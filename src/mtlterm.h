@@ -251,6 +251,16 @@ extern bool mtl_render_offscreen_png (const char *path, int w, int h,
 extern bool mtl_render_text_png (const char *path);
 extern void mtl_patch_terminal_rif (struct frame *f);
 
+/* Device/queue accessors for mtlfns.m (g_device and g_queue are file-static) */
+extern id<MTLDevice>       mtl_get_device (void);
+extern id<MTLCommandQueue> mtl_get_queue  (void);
+
+/* Diagnostic counters for mtl_draw_glyph_string */
+extern int mtl_dgs_call_count;
+extern int mtl_dgs_nofd_count;
+extern int mtl_dgs_nofont_count;
+extern int mtl_dgs_drawn_count;
+
 extern void syms_of_mtlfns (void);
 
 #endif /* HAVE_MTL */

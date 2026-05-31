@@ -295,6 +295,12 @@ ns_color_to_pixel (NSColor *c)
    Global Metal setup (called once)
    ----------------------------------------------------------------------- */
 
+id<MTLDevice>
+mtl_get_device (void) { return g_device; }
+
+id<MTLCommandQueue>
+mtl_get_queue (void) { return g_queue; }
+
 static BOOL
 mtl_global_setup (void)
 {
@@ -552,35 +558,23 @@ glyph_cache_insert (uint64_t key)
    Glyph rasterization — CoreText → R8Unorm atlas patch
    ----------------------------------------------------------------------- */
 
-MtlGlyphCacheEntry *
-mtl_cache_glyph (CTFontRef font, uint32_t codepoint)
+/* Core glyph rasterization: rasterize a CGGlyph (ID already resolved) into
+   the atlas.  This is the single rasterization path used by BOTH:
+   - mtl_cache_glyph_id (from Emacs glyph_string.char2b — already glyph IDs)
+   - mtl_cache_glyph (from off-screen PNG test, uses Unicode → glyph lookup)
+
+   The critical insight: glyph_string.char2b stores GLYPH IDs for the macfont
+   backend (not Unicode codepoints).  Always use glyph IDs with CTFont APIs
+   that accept CGGlyph directly (CTFontGetBoundingRectsForGlyphs, CTFontDrawGlyphs).
+   Never call CTFontGetGlyphsForCharacters on a value that is already a glyph ID.
+*/
+static MtlGlyphCacheEntry *
+mtl_rasterize_glyph_id (CTFontRef font, CGGlyph cgGlyph, uint64_t key)
 {
-  /* Key: mix font pointer and codepoint */
-  uint64_t key = ((uint64_t)(uintptr_t)font << 21) ^ codepoint;
-  MtlGlyphCacheEntry *entry = glyph_cache_lookup (key);
-  if (entry) return entry;
   if (!g_atlas) return NULL;
 
-  UniChar chars[2];
-  int nc = 1;
-  if (codepoint >= 0x10000)
-    {
-      /* Surrogate pair */
-      codepoint -= 0x10000;
-      chars[0] = 0xD800 | (codepoint >> 10);
-      chars[1] = 0xDC00 | (codepoint & 0x3FF);
-      nc = 2;
-    }
-  else
-    {
-      chars[0] = (UniChar)codepoint;
-    }
+  MtlGlyphCacheEntry *entry;
 
-  CGGlyph cgGlyph = 0;
-  if (!CTFontGetGlyphsForCharacters (font, chars, &cgGlyph, nc) || cgGlyph == 0)
-    return NULL;
-
-  /* Bounding box for this glyph (in font units → pixels) */
   CGRect bbox = CTFontGetBoundingRectsForGlyphs (font,
                    kCTFontOrientationDefault, &cgGlyph, NULL, 1);
 
@@ -655,6 +649,50 @@ mtl_cache_glyph (CTFontRef font, uint32_t codepoint)
   if (bh > g_atlas_row_h) g_atlas_row_h = bh;
 
   return entry;
+}
+
+/* mtl_cache_glyph_id — PRIMARY path for Emacs text rendering.
+   char2b[i] in glyph_string is a GLYPH ID (CGGlyph), not a Unicode codepoint.
+   We use it directly with CoreText APIs that accept CGGlyph. */
+static MtlGlyphCacheEntry *
+mtl_cache_glyph_id (CTFontRef font, CGGlyph glyphId)
+{
+  if (!font || glyphId == 0) return NULL;
+
+  /* Cache key = (font_ptr × large_prime) XOR glyphId */
+  uint64_t key = ((uint64_t)(uintptr_t)font * 6364136223846793005ULL) ^ (uint64_t)glyphId;
+
+  MtlGlyphCacheEntry *e = glyph_cache_lookup (key);
+  if (e) return e;
+  if (!g_atlas) return NULL;
+
+  return mtl_rasterize_glyph_id (font, glyphId, key);
+}
+
+/* mtl_cache_glyph — SECONDARY path for off-screen test renders.
+   Accepts a Unicode codepoint, converts to glyph ID first. */
+MtlGlyphCacheEntry *
+mtl_cache_glyph (CTFontRef font, uint32_t codepoint)
+{
+  if (!font) return NULL;
+
+  UniChar chars[2];
+  int nc = 1;
+  if (codepoint >= 0x10000)
+    {
+      codepoint -= 0x10000;
+      chars[0] = 0xD800 | (codepoint >> 10);
+      chars[1] = 0xDC00 | (codepoint & 0x3FF);
+      nc = 2;
+    }
+  else
+    chars[0] = (UniChar)codepoint;
+
+  CGGlyph cgGlyph = 0;
+  if (!CTFontGetGlyphsForCharacters (font, chars, &cgGlyph, nc) || cgGlyph == 0)
+    return NULL;
+
+  return mtl_cache_glyph_id (font, cgGlyph);
 }
 
 /* -----------------------------------------------------------------------
@@ -931,9 +969,16 @@ easing_apply (MtlScrollEasing mode, float t)
 
 - (void)beginFrame
 {
-  /* Ensure staticTexture exists and matches drawable size */
   CGSize dsz = self.metalLayer.drawableSize;
+
+  /* Ensure staticTexture exists and matches drawable size.
+     Bug fix: multiple update_begin/end cycles happen per Emacs redisplay pass
+     (cursor blink, modeline, etc.). Using MTLLoadActionClear on every beginFrame
+     wiped out the drawing from the PREVIOUS cycle, leaving only the background.
+     Fix: only clear when the texture is (re)created; preserve content otherwise.
+     Emacs's draw_glyph_string already fills backgrounds for updated regions. */
   NSUInteger tw = (NSUInteger)dsz.width, th = (NSUInteger)dsz.height;
+  BOOL needsClear = NO;
   if (!self.staticTexture
       || self.staticTexture.width != tw
       || self.staticTexture.height != th)
@@ -944,6 +989,7 @@ easing_apply (MtlScrollEasing mode, float t)
       td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
       td.storageMode = MTLStorageModePrivate;
       self.staticTexture = [g_device newTextureWithDescriptor:td];
+      needsClear = YES;  /* New or resized texture: clear to background color */
     }
 
   NSSize sz = self.metalLayer.frame.size;
@@ -957,9 +1003,11 @@ easing_apply (MtlScrollEasing mode, float t)
   unpack_color (bg, &r, &g, &b);
 
   MTLRenderPassDescriptor *rpd = [MTLRenderPassDescriptor renderPassDescriptor];
-  rpd.colorAttachments[0].texture    = self.staticTexture;
-  rpd.colorAttachments[0].loadAction = MTLLoadActionClear;
-  rpd.colorAttachments[0].clearColor = MTLClearColorMake(r, g, b, 1.0);
+  rpd.colorAttachments[0].texture     = self.staticTexture;
+  /* Load previous content (not clear) unless this is a fresh texture.
+     The NS backend redraws only dirty regions; our Metal backend must do the same. */
+  rpd.colorAttachments[0].loadAction  = needsClear ? MTLLoadActionClear : MTLLoadActionLoad;
+  rpd.colorAttachments[0].clearColor  = MTLClearColorMake(r, g, b, 1.0);
   rpd.colorAttachments[0].storeAction = MTLStoreActionStore;
 
   self.cmdBuf  = [g_queue commandBuffer];
@@ -1568,12 +1616,19 @@ mtl_draw_image_texture (MtlFrameData *fd, id<MTLTexture> tex,
    redisplay_interface — all file-static, called by xdisp.c engine
    ----------------------------------------------------------------------- */
 
+int mtl_dgs_call_count   = 0;  /* total calls */
+int mtl_dgs_nofd_count   = 0;  /* no fd or encoder */
+int mtl_dgs_nofont_count = 0;  /* no ctfont */
+int mtl_dgs_drawn_count  = 0;  /* glyphs actually drawn */
+
 static void
 mtl_draw_glyph_string (struct glyph_string *s)
 {
+  mtl_dgs_call_count++;
+
   struct frame *f = s->f;
   MtlFrameData *fd = mtl_get_frame_data (f);
-  if (!fd || !fd.encoder) return;
+  if (!fd || !fd.encoder) { mtl_dgs_nofd_count++; return; }
 
   struct face *face = s->face;
   unsigned long fg = face ? face->foreground : 0xECEFF4;
@@ -1617,26 +1672,27 @@ mtl_draw_glyph_string (struct glyph_string *s)
 
   /* Get CoreText font */
   CTFontRef ctfont = mtl_ctfont_for_face (face);
-  if (!ctfont) return;
+  if (!ctfont) { mtl_dgs_nofont_count++; return; }
 
-  /* Draw each glyph at its correct x position.
-     We use text_extents to get individual advance widths. */
+
   float pen_x = (float)s->x;
   float baseline_y = (float)s->ybase;
 
   for (int i = 0; i < s->nchars; i++)
     {
-      unsigned int cp = s->char2b ? s->char2b[i] : 0;
-      if (!cp) { pen_x += (float)FRAME_COLUMN_WIDTH (f); continue; }
+      /* char2b contains GLYPH IDs for the macfont backend — NOT Unicode codepoints.
+         Use mtl_cache_glyph_id which calls CoreText with the ID directly. */
+      CGGlyph glyphId = s->char2b ? (CGGlyph)s->char2b[i] : 0;
+      if (!glyphId) { pen_x += (float)FRAME_COLUMN_WIDTH (f); continue; }
 
-      MtlGlyphCacheEntry *ge = mtl_cache_glyph (ctfont, cp);
+      MtlGlyphCacheEntry *ge = mtl_cache_glyph_id (ctfont, glyphId);
       if (!ge) continue;
 
-      /* Glyph origin: (pen_x, baseline_y).
-         The cache entry's bearing_y is distance from top-of-bitmap to baseline.
-         So the top of the bitmap is baseline_y - bearing_y (in top-left coords). */
       if (ge->width > 0)
         {
+          mtl_dgs_drawn_count++;
+          /* bearing_y: distance from glyph top-left to baseline.
+             In our top-left coord system, glyph top = baseline_y - bearing_y. */
           CGPoint origin = CGPointMake (pen_x, baseline_y);
           [fd drawGlyph:ge at:origin color:fg];
         }
@@ -1956,17 +2012,54 @@ static const char mtl_resize_obs_key;
 
 @end
 
+/* One copy of the NS rif, patched with our Metal drawing functions.
+   Allocated once when mtl_patch_terminal_rif is first called.
+   CRITICAL: We must NOT replace the entire rif — the NS rif's
+   frame_parm_handlers, produce_glyphs, and management functions are
+   called by init_frame_faces / realize_basic_faces / Fx_create_frame.
+   Replacing them all with NULLs causes SIGSEGV there.
+   Solution: copy the NS rif, then override ONLY the drawing functions. */
+static struct redisplay_interface *mtl_ns_rif_copy = NULL;
+
 void
 mtl_patch_terminal_rif (struct frame *f)
 {
   struct terminal *term = FRAME_TERMINAL (f);
-  if (!term) return;
+  if (!term || !term->rif) return;
 
-  /* Replace the redisplay interface so draw_glyph_string etc. use Metal. */
-  term->rif = &mtl_redisplay_interface;
+  /* Build a patched copy of the NS rif (once per process lifetime).
+     All NS management/frame functions are preserved; only pixel-drawing
+     functions are replaced with Metal equivalents. */
+  if (!mtl_ns_rif_copy)
+    {
+      mtl_ns_rif_copy = xmalloc (sizeof (struct redisplay_interface));
+      *mtl_ns_rif_copy = *term->rif;  /* copy all NS functions as baseline */
 
-  /* Patch render cycle hooks so Metal manages the frame lifecycle.
-     NS update_begin (lockFocus) and update_end (flushWindow) are replaced. */
+      /* Override only the functions that perform pixel drawing.
+         Everything else (frame_parm_handlers, produce_glyphs, etc.)
+         stays as the NS implementation — frame management must work. */
+      mtl_ns_rif_copy->scroll_run_hook               = mtl_scroll_run;
+      mtl_ns_rif_copy->after_update_window_line_hook  = mtl_after_update_window_line;
+      mtl_ns_rif_copy->flush_display                 = mtl_flush_display;
+      mtl_ns_rif_copy->draw_fringe_bitmap            = mtl_draw_fringe_bitmap;
+      mtl_ns_rif_copy->define_fringe_bitmap          = mtl_define_fringe_bitmap;
+      mtl_ns_rif_copy->destroy_fringe_bitmap         = mtl_destroy_fringe_bitmap;
+      mtl_ns_rif_copy->compute_glyph_string_overhangs= mtl_compute_glyph_string_overhangs;
+      mtl_ns_rif_copy->draw_glyph_string             = mtl_draw_glyph_string;
+      mtl_ns_rif_copy->clear_frame_area              = mtl_clear_frame_area;
+      mtl_ns_rif_copy->clear_under_internal_border   = mtl_clear_under_internal_border;
+      mtl_ns_rif_copy->draw_window_cursor            = mtl_draw_window_cursor;
+      mtl_ns_rif_copy->draw_vertical_window_border   = mtl_draw_vertical_window_border;
+      mtl_ns_rif_copy->draw_window_divider           = mtl_draw_window_divider;
+      mtl_ns_rif_copy->shift_glyphs_for_insert       = mtl_shift_glyphs_for_insert;
+      /* show_hourglass, hide_hourglass, default_font_parameter: keep NS versions */
+    }
+
+  term->rif = mtl_ns_rif_copy;
+
+  /* Patch render cycle hooks so Metal manages the frame pixel lifecycle.
+     The NS backend's update_begin calls [view lockFocus] for CoreGraphics;
+     we bypass that entirely and use Metal command buffers instead. */
   term->update_begin_hook     = mtl_update_begin;
   term->update_end_hook       = mtl_update_end;
   term->clear_frame_hook      = mtl_clear_frame;

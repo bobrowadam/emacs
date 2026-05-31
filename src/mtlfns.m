@@ -200,6 +200,81 @@ quads to an off-screen MTLTexture.  Returns t on success.  */)
 }
 
 /* -----------------------------------------------------------------------
+   DEFUN: mtl-capture-frame — save the current Metal staticTexture to PNG.
+   Used for visual regression testing and debugging rendering issues.
+   ----------------------------------------------------------------------- */
+
+DEFUN ("mtl-capture-frame", Fmtl_capture_frame, Smtl_capture_frame, 1, 2, 0,
+       doc: /* Save the Metal staticTexture for FRAME (or selected frame) to PATH.
+Returns t on success.  The PNG shows exactly what Metal has rendered into
+the intermediate texture, before cursor/animation overlay.  */)
+  (Lisp_Object path, Lisp_Object frame)
+{
+  CHECK_STRING (path);
+  struct frame *f = NILP (frame) ? XFRAME (selected_frame) : XFRAME (frame);
+  if (!f) return Qnil;
+
+  MtlFrameData *fd = mtl_get_frame_data (f);
+  if (!fd || !fd.staticTexture) return Qnil;
+
+  id<MTLTexture> src = fd.staticTexture;
+  NSUInteger W = src.width, H = src.height;
+
+  id<MTLDevice> dev = mtl_get_device();
+  id<MTLCommandQueue> q = mtl_get_queue();
+  if (!dev || !q) return Qnil;
+
+  /* Blit from Private texture to Shared texture for CPU readback */
+  MTLTextureDescriptor *td =
+    [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                                       width:W height:H mipmapped:NO];
+  td.usage = MTLTextureUsageShaderRead;
+  td.storageMode = MTLStorageModeShared;
+  id<MTLTexture> readback = [dev newTextureWithDescriptor:td];
+  if (!readback) return Qnil;
+
+  id<MTLCommandBuffer> cmd = [q commandBuffer];
+  id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
+  [blit copyFromTexture:src
+            sourceSlice:0 sourceLevel:0
+           sourceOrigin:MTLOriginMake(0,0,0)
+             sourceSize:MTLSizeMake(W,H,1)
+              toTexture:readback
+     destinationSlice:0 destinationLevel:0
+     destinationOrigin:MTLOriginMake(0,0,0)];
+  [blit endEncoding];
+  [cmd commit];
+  [cmd waitUntilCompleted];
+
+  /* Read pixels (BGRA) and swap to RGBA for PNG */
+  NSUInteger bpr = W * 4;
+  uint8_t *px = malloc (bpr * H);
+  if (!px) return Qnil;
+  [readback getBytes:px bytesPerRow:bpr
+          fromRegion:MTLRegionMake2D(0,0,W,H) mipmapLevel:0];
+
+  /* BGRA → RGBA */
+  for (NSUInteger i = 0; i < W * H; i++)
+    { uint8_t b=px[i*4]; px[i*4]=px[i*4+2]; px[i*4+2]=b; }
+
+  CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+  CGContextRef ctx = CGBitmapContextCreate(px, W, H, 8, bpr, cs,
+    (CGBitmapInfo)(kCGImageAlphaPremultipliedLast));
+  CGColorSpaceRelease(cs);
+  CGImageRef img = CGBitmapContextCreateImage(ctx);
+  CGContextRelease(ctx);
+  NSString *nspath = [NSString stringWithUTF8String:SSDATA(path)];
+  NSURL *url = [NSURL fileURLWithPath:nspath];
+  CGImageDestinationRef dst = CGImageDestinationCreateWithURL(
+    (__bridge CFURLRef)url, kUTTypePNG, 1, NULL);
+  CGImageDestinationAddImage(dst, img, NULL);
+  bool ok = CGImageDestinationFinalize(dst);
+  CFRelease(dst); CGImageRelease(img); free(px);
+
+  return ok ? Qt : Qnil;
+}
+
+/* -----------------------------------------------------------------------
    DEFUN: mtl-create-frame (stub — use mtl-enable-for-frame instead)
    ----------------------------------------------------------------------- */
 
@@ -284,6 +359,18 @@ DEFUN ("mtl-trail-length", Fmtl_trail_length, Smtl_trail_length, 1, 1, 0,
   return len;
 }
 
+DEFUN ("mtl-draw-stats", Fmtl_draw_stats, Smtl_draw_stats, 0, 0, 0,
+       doc: /* Return diagnostic counters for Metal glyph rendering.
+Returns an alist with: total-calls, no-fd (no encoder), no-font, glyphs-drawn.  */)
+  (void)
+{
+  return list4 (
+    Fcons (intern ("total-calls"),   make_fixnum (mtl_dgs_call_count)),
+    Fcons (intern ("no-fd"),         make_fixnum (mtl_dgs_nofd_count)),
+    Fcons (intern ("no-font"),       make_fixnum (mtl_dgs_nofont_count)),
+    Fcons (intern ("glyphs-drawn"),  make_fixnum (mtl_dgs_drawn_count)));
+}
+
 DEFUN ("mtl-animation-status", Fmtl_animation_status, Smtl_animation_status,
        0, 0, 0,
        doc: /* Return an alist with current Metal animation configuration.  */)
@@ -316,6 +403,8 @@ syms_of_mtlfns (void)
   defsubr (&Smtl_scroll_duration);
   defsubr (&Smtl_trail_length);
   defsubr (&Smtl_animation_status);
+  defsubr (&Smtl_capture_frame);
+  defsubr (&Smtl_draw_stats);
 }
 
 #endif /* HAVE_MTL */
