@@ -253,9 +253,16 @@ static id<MTLRenderPipelineState> g_particle_pipeline = nil;
 /* Phase 5: inline image pipeline (RGBA, full texture output) */
 static id<MTLRenderPipelineState> g_image_pipeline    = nil;
 
-/* Phase 5: image texture cache — keyed by struct image pointer (as NSValue).
-   Uses NSMapTable with pointer keys to avoid retaining the Emacs structs. */
-static NSMapTable *g_image_texture_cache = nil;
+/* Phase 5: image texture cache.
+   Bug fix: NSMapTable with NSMapTableObjectPointerPersonality used the NSValue*
+   POINTER ADDRESS for equality (not the wrapped pointer content), so lookups
+   always missed, objects leaked, and the runtime confused them with
+   OS_dispatch_source objects on macOS 26.5 → crash.
+
+   Fix: CFMutableDictionaryRef with NULL key callbacks uses raw pointer
+   equality (struct image * itself as key) with no ObjC runtime involvement.
+   Values use kCFTypeDictionaryValueCallBacks (strong — MTLTexture retained). */
+static CFMutableDictionaryRef g_image_texture_cache = NULL;
 
 /* -----------------------------------------------------------------------
    Color utilities
@@ -468,9 +475,14 @@ mtl_global_setup (void)
     if (!g_image_pipeline) NSLog(@"emacs-mtl: image pipeline error: %@", err);
   }
 
-  /* Phase 5: image texture cache */
-  g_image_texture_cache = [NSMapTable mapTableWithKeyOptions:NSMapTableObjectPointerPersonality
-                                              valueOptions:NSMapTableStrongMemory];
+  /* Phase 5: image texture cache using CFMutableDictionary.
+     NULL key callbacks → pointer equality & no retain/release on keys (struct image*).
+     kCFTypeDictionaryValueCallBacks → retain/release MTLTexture values (ARC-safe). */
+  g_image_texture_cache =
+    CFDictionaryCreateMutable (kCFAllocatorDefault, 0,
+                                NULL,                            /* keys: raw pointer */
+                                &kCFTypeDictionaryValueCallBacks /* values: CF retain */
+                                );
 
   return YES;
 }
@@ -1466,62 +1478,69 @@ mtl_texture_for_image (struct image *img)
 {
   if (!img || !g_device || !g_image_texture_cache) return nil;
 
-  /* Cache lookup by struct image pointer */
-  NSValue *key = [NSValue valueWithPointer:img];
-  id<MTLTexture> tex = [g_image_texture_cache objectForKey:key];
+  /* Cache lookup: key is the struct image* pointer directly.
+     CFDictionary with NULL key callbacks uses pointer equality — correct and fast.
+     img->pixmap can change (image reload), so we also check img->id matches. */
+  id<MTLTexture> tex = (__bridge id<MTLTexture>)
+    CFDictionaryGetValue (g_image_texture_cache, (const void *)img);
   if (tex) return tex;
 
-  /* Get NSImage from Emacs image (NS backend stores it as EmacsImage* in pixmap) */
+  /* Get NSImage from Emacs image (NS backend stores EmacsImage* in pixmap) */
+  if (!img->pixmap) return nil;
   NSImage *nsimg = (__bridge NSImage *)img->pixmap;
-  if (!nsimg || ![nsimg isKindOfClass:[NSImage class]]) return nil;
+  if (![nsimg isKindOfClass:[NSImage class]]) return nil;
 
   NSSize sz = [nsimg size];
   if (sz.width < 1 || sz.height < 1) return nil;
 
-  NSUInteger w = (NSUInteger)sz.width;
-  NSUInteger h = (NSUInteger)sz.height;
+  NSUInteger w = (NSUInteger)ceil (sz.width);
+  NSUInteger h = (NSUInteger)ceil (sz.height);
 
-  /* Render NSImage to a bitmap context (RGBA8) */
+  /* Render NSImage to a BGRA8 bitmap via CGContext */
   CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB ();
-  size_t bpr = w * 4;
-  uint8_t *pixels = (uint8_t *)calloc (1, bpr * h);
-  CGContextRef ctx = CGBitmapContextCreate (pixels, w, h, 8, bpr, cs,
-    kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+  size_t bpr    = w * 4;
+  uint8_t *px   = (uint8_t *)calloc (1, bpr * h);
+  CGContextRef ctx = CGBitmapContextCreate (px, w, h, 8, bpr, cs,
+    (CGBitmapInfo)(kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little));
   CGColorSpaceRelease (cs);
+  if (!ctx) { free (px); return nil; }
 
-  /* Flip coordinate system to match Metal's top-left origin */
+  /* Flip Y so that Metal's top-left origin matches */
   CGContextTranslateCTM (ctx, 0, (CGFloat)h);
   CGContextScaleCTM (ctx, 1.0, -1.0);
 
-  /* Draw NSImage into the CGContext */
-  NSGraphicsContext *gc = [NSGraphicsContext graphicsContextWithCGContext:ctx flipped:NO];
+  NSGraphicsContext *gc = [NSGraphicsContext graphicsContextWithCGContext:ctx
+                                                                  flipped:NO];
   [NSGraphicsContext saveGraphicsState];
   [NSGraphicsContext setCurrentContext:gc];
   [nsimg drawInRect:NSMakeRect (0, 0, (CGFloat)w, (CGFloat)h)];
   [NSGraphicsContext restoreGraphicsState];
   CGContextRelease (ctx);
 
-  /* Upload to MTLTexture (BGRA8 — swap R↔B) */
-  for (NSUInteger i = 0; i < w * h; i++)
-    {
-      uint8_t r = pixels[i*4+0];
-      pixels[i*4+0] = pixels[i*4+2]; /* B */
-      pixels[i*4+2] = r;              /* R */
-    }
-
+  /* Upload pixels to MTLTexture (BGRA8Unorm — byte order already correct) */
   MTLTextureDescriptor *td =
     [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
                                                        width:w height:h mipmapped:NO];
-  td.usage = MTLTextureUsageShaderRead;
+  td.usage       = MTLTextureUsageShaderRead;
+  td.storageMode = MTLStorageModeShared;
   tex = [g_device newTextureWithDescriptor:td];
   [tex replaceRegion:MTLRegionMake2D (0, 0, w, h)
          mipmapLevel:0
-           withBytes:pixels bytesPerRow:bpr];
-  free (pixels);
+           withBytes:px bytesPerRow:bpr];
+  free (px);
 
-  /* Cache for reuse */
-  [g_image_texture_cache setObject:tex forKey:key];
+  /* Store in cache: key = raw struct image* pointer, value = MTLTexture (CF-retained) */
+  CFDictionarySetValue (g_image_texture_cache, (const void *)img,
+                        (__bridge CFTypeRef)tex);
   return tex;
+}
+
+/* Invalidate cached texture for an image (used when image is reloaded or freed) */
+static void __attribute__((unused))
+mtl_invalidate_image_texture (struct image *img)
+{
+  if (g_image_texture_cache && img)
+    CFDictionaryRemoveValue (g_image_texture_cache, (const void *)img);
 }
 
 /* Render a Metal RGBA texture as a quad at (x,y,w,h) into fd.encoder */
@@ -1896,9 +1915,24 @@ static const char mtl_resize_obs_key;
                         change:(NSDictionary *)change
                        context:(void *)ctx
 {
-  (void)keyPath; (void)change; (void)ctx;
+  (void)change; (void)ctx;
   NSView *view = (NSView *)object;
   NSSize sz = view.bounds.size;
+
+  /* Handle 'window' KVO (monitor/DPI change): re-read backing scale factor */
+  if ([keyPath isEqualToString:@"window"])
+    {
+      NSWindow *win = view.window;
+      if (win && self.layer)
+        {
+          CGFloat scale = win.backingScaleFactor;
+          self.layer.contentsScale = scale;
+          self.layer.drawableSize  = CGSizeMake (sz.width * scale, sz.height * scale);
+          self.layer.frame = view.bounds;
+          if (self.emacsFrame) SET_FRAME_GARBAGED (self.emacsFrame);
+        }
+      return;
+    }
 
   if (self.layer)
     {
@@ -1958,24 +1992,17 @@ mtl_patch_terminal_rif (struct frame *f)
       objc_setAssociatedObject (view, &mtl_resize_obs_key,
                                  obs, OBJC_ASSOCIATION_RETAIN);
 
-      /* Phase 6: multi-monitor support.
-         When the window moves to a screen with different DPI (Retina vs non-Retina),
-         update contentsScale and drawableSize to match the new display. */
-      __block CAMetalLayer *blayer = fd.metalLayer;
-      __block struct frame *bframe = f;
-      NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
-      [nc addObserverForName:NSWindowDidChangeScreenNotification
-                      object:[view window]
-                       queue:[NSOperationQueue mainQueue]
-                  usingBlock:^(NSNotification *notif) {
-        NSWindow *win = (NSWindow *)[notif object];
-        if (!win || !blayer) return;
-        CGFloat newScale = [win backingScaleFactor];
-        NSSize sz = [[win contentView] bounds].size;
-        blayer.contentsScale = newScale;
-        blayer.drawableSize  = CGSizeMake (sz.width * newScale, sz.height * newScale);
-        if (bframe) SET_FRAME_GARBAGED (bframe);
-      }];
+      /* Phase 6: multi-monitor support via KVO on 'window.screen'.
+         Bug fix: NSWindowDidChangeScreenNotification with usingBlock: returns an
+         observer TOKEN that MUST be stored; dropping it immediately removes the
+         observer and in macOS 26.5 the token (an OS_dispatch_source internally)
+         can corrupt adjacent static variables like g_image_texture_cache → crash.
+
+         Safe alternative: observe 'window' on the view.  When the view moves to a
+         new window (or the window's backing scale changes), update the Metal layer.
+         This uses the same KVO mechanism as the resize observer — stable and safe. */
+      [view addObserver:obs forKeyPath:@"window"
+                 options:NSKeyValueObservingOptionNew context:NULL];
     }
 }
 
