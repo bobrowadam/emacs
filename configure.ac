@@ -570,6 +570,9 @@ OPTION_DEFAULT_ON([xdbe],[don't use X11 double buffering support])
 AC_ARG_WITH([ns],[AS_HELP_STRING([--with-ns],
 [use Nextstep (macOS Cocoa or GNUstep) windowing system.
 On by default on macOS.])],[],[with_ns=maybe])
+AC_ARG_WITH([mtl],[AS_HELP_STRING([--with-mtl],
+[use Metal GPU backend for macOS (experimental; requires macOS 13+).])],
+[],[with_mtl=no])
 OPTION_DEFAULT_OFF([w32], [use native MS Windows GUI in a Cygwin build])
 OPTION_DEFAULT_OFF([pgtk], [use GTK to support window systems other than X])
 
@@ -2943,6 +2946,35 @@ AC_SUBST([INSTALL_ARCH_INDEP_EXTRA])
 AC_SUBST([ns_self_contained])
 AC_SUBST([NS_OBJ])
 AC_SUBST([NS_OBJC_OBJ])
+
+dnl Metal GPU backend (macOS-only, requires HAVE_NS infrastructure).
+HAVE_MTL=no
+MTL_OBJ=
+MTL_OBJC_OBJ=
+MTL_LIBS=
+if test "${with_mtl}" = yes; then
+  if test "${opsys}" != darwin; then
+    AC_MSG_ERROR([--with-mtl is only supported on macOS (darwin).])
+  fi
+  if test "${HAVE_NS}" != yes && test "${NS_IMPL_COCOA}" != yes; then
+    AC_MSG_ERROR([--with-mtl requires --with-ns (Cocoa) infrastructure.])
+  fi
+  dnl Metal/Metal.h uses Objective-C syntax; check in ObjC language mode.
+  AC_LANG_PUSH([Objective C])
+  AC_CHECK_HEADER([Metal/Metal.h],
+    [HAVE_MTL=yes],
+    [AC_MSG_ERROR([Metal/Metal.h not found. Install Xcode or the Command Line Tools.])])
+  AC_LANG_POP([Objective C])
+  if test "${HAVE_MTL}" = yes; then
+    MTL_OBJC_OBJ="mtlterm.o mtlfns.o"
+    MTL_LIBS="-framework Metal -framework QuartzCore -framework CoreText"
+    dnl Metal piggybacks on NS infrastructure; keep window_system=nextstep
+    dnl so that term_header=nsterm.h and all NS macros remain available.
+  fi
+fi
+AC_SUBST([MTL_OBJ])
+AC_SUBST([MTL_OBJC_OBJ])
+AC_SUBST([MTL_LIBS])
 
 if test "${HAVE_NS}" = yes; then
   AC_LANG_PUSH([Objective C])
@@ -5603,6 +5635,12 @@ if test "${HAVE_NS}" = "yes"; then
   OTHER_FILES=ns-app
 fi
 
+### Metal GPU backend.
+if test "${HAVE_MTL}" = "yes"; then
+  AC_DEFINE([HAVE_MTL], [1],
+    [Define to 1 if you are using the Metal GPU backend on macOS.])
+fi
+
 ### Use session management (-lSM -lICE) if available
 HAVE_X_SM=no
 LIBXSM=
@@ -7488,6 +7526,9 @@ case "$opsys" in
         if test "$emacs_cv_macosx_12_0" = "yes"; then
 	  libs_nsgui="$libs_nsgui -framework UniformTypeIdentifiers"
 	fi
+     fi
+     if test "$HAVE_MTL" = "yes"; then
+        libs_nsgui="$libs_nsgui -framework Metal -framework CoreText"
      fi
    else
      libs_nsgui=

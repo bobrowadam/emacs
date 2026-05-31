@@ -38,6 +38,11 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "androidterm.h"
 #endif
 
+#ifdef HAVE_MTL
+/* mtlterm.h uses Objective-C imports; only declare what emacs.c needs. */
+extern void syms_of_mtlfns (void);
+#endif
+
 #if defined HAVE_ANDROID && !defined ANDROID_STUBIFY
 #include "sfntfont.h"
 #endif
@@ -2425,6 +2430,9 @@ Using an Emacs configured with --with-x-toolkit=lucid does not have this problem
       syms_of_nsselect ();
       syms_of_fontset ();
 #endif /* HAVE_NS */
+#ifdef HAVE_MTL
+      syms_of_mtlfns ();
+#endif /* HAVE_MTL */
 
 #ifdef HAVE_PGTK
       syms_of_pgtkterm ();
