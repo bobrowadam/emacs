@@ -246,6 +246,13 @@ MtlScrollEasing g_mtl_scroll_easing  = MTL_EASE_OUT_QUAD;
 float           g_mtl_scroll_duration = 0.15f;
 NSUInteger      g_mtl_trail_len       = 20;
 
+/* Master switch for the GPU animation layer (cursor effects, particles,
+   CADisplayLink @60fps).  OFF by default: the goal is pixel-correct parity
+   with the NS backend first.  When off, the cursor is drawn directly into the
+   static texture (like NS) and no compositor overlay is drawn.  See TODO.org
+   Fase A.  Toggle from Lisp with (mtl-animations t). */
+BOOL            g_mtl_animations_enabled = NO;
+
 /* Phase 4: additional global pipeline state */
 static id<MTLRenderPipelineState> g_blit_pipeline     = nil;
 static id<MTLRenderPipelineState> g_particle_pipeline = nil;
@@ -637,12 +644,20 @@ mtl_rasterize_glyph_id (CTFontRef font, CGGlyph cgGlyph, uint64_t key)
   entry = glyph_cache_insert (key);
   if (!entry) return NULL;
 
+  /* The raster placed the baseline at raster_oy measured from the BOTTOM of the
+     bh-tall cell (Core Graphics draws y-up).  All draw sites expect bearing_y to
+     be the distance from the cell's TOP edge down to the baseline, so that
+     y0 = baseline - bearing_y lands the cell top correctly.  That distance is
+     (bh - 1 - raster_oy).  The previous code stored raster_oy itself (the
+     descent), which dropped every glyph ~one ascent too low. */
+  int raster_oy = (int)(floor (-bbox.origin.y) + 1);
+
   entry->atlas_x   = g_atlas_next_x;
   entry->atlas_y   = g_atlas_next_y;
   entry->width     = bw;
   entry->height    = bh;
   entry->bearing_x = (int)(floor (-bbox.origin.x) + 1);
-  entry->bearing_y = (int)(floor (-bbox.origin.y) + 1);
+  entry->bearing_y = bh - 1 - raster_oy;
   entry->advance_x = (float)adv.width;
 
   g_atlas_next_x += bw + 1;
@@ -753,10 +768,12 @@ mtl_setup_frame (struct frame *f)
   fd.uniformBuffer = ubuf;
   fd.emacsFrame   = f;
 
-  /* Phase 4: create animator and start 60fps animation loop */
+  /* Phase 4: create animator.  Only start the 60fps loop when the animation
+     layer is explicitly enabled (Fase A: correctness first, animation opt-in). */
   MtlAnimator *anim = [[MtlAnimator alloc] initWithFrame:f];
   fd.animator = anim;
-  [anim startAnimating];
+  if (g_mtl_animations_enabled)
+    [anim startAnimating];
 
   objc_setAssociatedObject (view, &mtl_frame_key,
                              fd, OBJC_ASSOCIATION_RETAIN);
@@ -1121,7 +1138,11 @@ easing_apply (MtlScrollEasing mode, float t)
     [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
   }
 
-  if (anim)
+  /* Animation overlay (cursor effects, trail, particles) is opt-in.  When off,
+     the cursor lives in the static texture (drawn by mtl_draw_window_cursor),
+     so the compositor only blits and presents.  This is what kills the stray
+     cyan cursor box drawn on top of text. */
+  if (anim && g_mtl_animations_enabled)
     {
       float cx = anim.cursorMode == MTL_CURSOR_SPRING ? anim.springX.pos : anim.curTargetX;
       float cy = anim.cursorMode == MTL_CURSOR_SPRING ? anim.springY.pos : anim.curTargetY;
@@ -1634,6 +1655,16 @@ mtl_draw_glyph_string (struct glyph_string *s)
   unsigned long fg = face ? face->foreground : 0xECEFF4;
   unsigned long bg = face ? face->background : 0x2E3440;
 
+  /* When this string is drawn as the cursor (via draw_phys_cursor_glyph),
+     invert: fill the background with the cursor color and draw the glyph in
+     the face's background color so the character stays readable.  Mirrors the
+     NS backend (FRAME_CURSOR_COLOR + FRAME_BACKGROUND for text). */
+  if (s->hl == DRAW_CURSOR)
+    {
+      bg = ns_color_to_pixel (FRAME_CURSOR_COLOR (f));
+      fg = face ? face->background : 0x2E3440;
+    }
+
   /* Background fill */
   if (!s->background_filled_p)
     {
@@ -1821,36 +1852,92 @@ mtl_draw_window_cursor (struct window *w,
                          enum text_cursor_kinds cursor_type,
                          int cursor_width, bool on_p, bool active_p)
 {
-  (void)row; (void)active_p;
-  if (!on_p) return;
+  (void)x; (void)y; (void)active_p;
 
   struct frame *f = WINDOW_XFRAME (w);
   MtlFrameData *fd = mtl_get_frame_data (f);
   if (!fd) return;
+  if (!on_p) return;
 
-  int ch = FRAME_COLUMN_WIDTH (f);
-  int lh = FRAME_LINE_HEIGHT (f);
-  int cw = cursor_width > 0 ? cursor_width : ch;
+  w->phys_cursor_type = cursor_type;
+  w->phys_cursor_on_p = on_p;
 
-  /* For static cursor modes, draw directly into the static texture */
-  if (cursor_type == BAR_CURSOR || cursor_type == HBAR_CURSOR
-      || fd.animator.cursorMode == MTL_CURSOR_BLOCK)
+  if (cursor_type == NO_CURSOR)
     {
-      unsigned long color = ns_color_to_pixel(FRAME_FOREGROUND_COLOR(f));
-      NSRect r;
-      switch (cursor_type)
-        {
-        case BAR_CURSOR:  r = NSMakeRect(x, y, cw>2?2:cw, lh); break;
-        case HBAR_CURSOR: r = NSMakeRect(x, y+lh-2, ch, 2);    break;
-        default:          r = NSMakeRect(x, y, ch, lh);         break;
-        }
-      [fd fillRect:r color:color];
+      w->phys_cursor_width = 0;
+      return;
     }
 
-  /* For animated cursor modes, just update the animator target.
-     The animator composites the cursor in compositeToScreen at 60fps. */
-  if (fd.animator)
-    [fd.animator setCursorX:x y:y width:ch height:lh];
+  /* Resolve the glyph and geometry exactly like the NS backend so the cursor
+     box lines up with the character cell.  See ns_draw_window_cursor. */
+  struct glyph *phys_cursor_glyph = get_phys_cursor_glyph (w);
+  if (phys_cursor_glyph == NULL)
+    {
+      if (row->exact_window_width_line_p
+          && w->phys_cursor.hpos >= row->used[TEXT_AREA])
+        {
+          row->cursor_in_fringe_p = 1;
+          draw_fringe_bitmap (w, row, 0);
+        }
+      return;
+    }
+
+  int fx, fy, h, cursor_height;
+  get_phys_cursor_geometry (w, row, phys_cursor_glyph, &fx, &fy, &h);
+
+  if (cursor_type == BAR_CURSOR)
+    {
+      struct glyph *cursor_glyph;
+      if (cursor_width < 1)
+        cursor_width = max (FRAME_CURSOR_WIDTH (f), 1);
+      if (cursor_width < w->phys_cursor_width)
+        w->phys_cursor_width = cursor_width;
+      /* For R2L glyphs draw the bar on the right edge. */
+      cursor_glyph = get_phys_cursor_glyph (w);
+      if ((cursor_glyph->resolved_level & 1) != 0)
+        fx += cursor_glyph->pixel_width - w->phys_cursor_width;
+    }
+  else if (cursor_type == HBAR_CURSOR)
+    {
+      cursor_height = (cursor_width < 1) ? lrint (0.25 * h) : cursor_width;
+      if (cursor_height > row->height)
+        cursor_height = row->height;
+      if (h > cursor_height)
+        fy += h - cursor_height;
+      h = cursor_height;
+    }
+
+  unsigned long cc = ns_color_to_pixel (FRAME_CURSOR_COLOR (f));
+  int cwidth = w->phys_cursor_width;
+
+  switch (cursor_type)
+    {
+    case DEFAULT_CURSOR:
+    case NO_CURSOR:
+      break;
+    case FILLED_BOX_CURSOR:
+      /* Re-draw the glyph with DRAW_CURSOR highlight: fills the cell with the
+         cursor color and draws the character in the background color, keeping
+         it readable (mtl_draw_glyph_string handles DRAW_CURSOR). */
+      draw_phys_cursor_glyph (w, row, DRAW_CURSOR);
+      break;
+    case HOLLOW_BOX_CURSOR:
+      /* Outline only: four 1px edges. */
+      [fd fillRect:NSMakeRect (fx, fy, cwidth, 1)         color:cc];
+      [fd fillRect:NSMakeRect (fx, fy + h - 1, cwidth, 1) color:cc];
+      [fd fillRect:NSMakeRect (fx, fy, 1, h)              color:cc];
+      [fd fillRect:NSMakeRect (fx + cwidth - 1, fy, 1, h) color:cc];
+      break;
+    case HBAR_CURSOR:
+    case BAR_CURSOR:
+      [fd fillRect:NSMakeRect (fx, fy, cwidth, h) color:cc];
+      break;
+    }
+
+  /* Keep the animator target in sync for when the animation layer is enabled.
+     With animations off this has no visible effect. */
+  if (g_mtl_animations_enabled && fd.animator)
+    [fd.animator setCursorX:fx y:fy width:cwidth height:h];
 }
 
 static void

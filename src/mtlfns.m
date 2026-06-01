@@ -359,6 +359,37 @@ DEFUN ("mtl-trail-length", Fmtl_trail_length, Smtl_trail_length, 1, 1, 0,
   return len;
 }
 
+DEFUN ("mtl-animations", Fmtl_animations, Smtl_animations, 0, 1, 0,
+       doc: /* Enable or disable the Metal GPU animation layer.
+With ENABLE non-nil, turn on the animated cursor effects, particles and the
+CADisplayLink 60fps compositor overlay.  With ENABLE nil (the default state),
+the cursor is drawn directly into the static texture like the NS backend and
+no overlay is composited, which is the correct, flicker-free baseline.
+Returns t when animations are enabled, nil otherwise.  */)
+  (Lisp_Object enable)
+{
+  g_mtl_animations_enabled = !NILP (enable);
+
+  /* Start or stop the per-frame animators on live Metal frames so the change
+     takes effect immediately rather than only on the next (mtl-enable). */
+  Lisp_Object tail, frame;
+  FOR_EACH_FRAME (tail, frame)
+    {
+      struct frame *f = XFRAME (frame);
+      if (!FRAME_LIVE_P (f) || !FRAME_NS_P (f))
+        continue;
+      MtlFrameData *fd = mtl_get_frame_data (f);
+      if (!fd || !fd.animator)
+        continue;
+      if (g_mtl_animations_enabled)
+        [fd.animator startAnimating];
+      else
+        [fd.animator stopAnimating];
+    }
+
+  return g_mtl_animations_enabled ? Qt : Qnil;
+}
+
 DEFUN ("mtl-draw-stats", Fmtl_draw_stats, Smtl_draw_stats, 0, 0, 0,
        doc: /* Return diagnostic counters for Metal glyph rendering.
 Returns an alist with: total-calls, no-fd (no encoder), no-font, glyphs-drawn.  */)
@@ -376,7 +407,8 @@ DEFUN ("mtl-animation-status", Fmtl_animation_status, Smtl_animation_status,
        doc: /* Return an alist with current Metal animation configuration.  */)
   (void)
 {
-  return list4 (
+  return list5 (
+    Fcons (intern ("animations"),     g_mtl_animations_enabled ? Qt : Qnil),
     Fcons (intern ("cursor-mode"),    make_fixnum ((EMACS_INT)g_mtl_cursor_mode)),
     Fcons (intern ("scroll-easing"),  make_fixnum ((EMACS_INT)g_mtl_scroll_easing)),
     Fcons (intern ("scroll-duration"),make_float (g_mtl_scroll_duration)),
@@ -403,6 +435,7 @@ syms_of_mtlfns (void)
   defsubr (&Smtl_scroll_duration);
   defsubr (&Smtl_trail_length);
   defsubr (&Smtl_animation_status);
+  defsubr (&Smtl_animations);
   defsubr (&Smtl_capture_frame);
   defsubr (&Smtl_draw_stats);
 }

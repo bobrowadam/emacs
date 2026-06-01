@@ -136,6 +136,19 @@ Lower values are snappier; higher values are more fluid."
   :set #'set-default
   :group 'mtl)
 
+(defcustom mtl-animations-enabled nil
+  "If non-nil, enable the Metal GPU animation layer.
+When nil (the default), the cursor is drawn directly into the static
+texture like the NS backend and no compositor overlay is drawn, which is
+the correct, flicker-free baseline.  Enable this to turn on the animated
+cursor effects, particles and the 60fps compositor."
+  :type 'boolean
+  :set (lambda (sym val)
+         (set-default sym val)
+         (when (fboundp 'mtl-animations)
+           (mtl-animations val)))
+  :group 'mtl)
+
 (defcustom mtl-enable-on-startup nil
   "If non-nil, enable Metal GPU rendering on the initial frame at startup."
   :type 'boolean
@@ -165,8 +178,15 @@ The NS backend still handles events, menus, and scrollbars."
     (mtl-scroll-effect (mtl--scroll-easing-number mtl-scroll-easing))
     (mtl-scroll-duration mtl-scroll-duration)
     (mtl-trail-length mtl-trail-length)
-    (message "Metal GPU enabled on frame: %s (device: %s)"
-             f (mtl-device-name))))
+    (mtl-animations mtl-animations-enabled)
+    (message "Metal GPU enabled on frame: %s (device: %s, animations: %s)"
+             f (mtl-device-name) (if mtl-animations-enabled "on" "off"))))
+
+(defun mtl-toggle-animations ()
+  "Toggle the Metal GPU animation layer on or off."
+  (interactive)
+  (setopt mtl-animations-enabled (not mtl-animations-enabled))
+  (message "Metal animations %s" (if mtl-animations-enabled "enabled" "disabled")))
 
 (defun mtl-status ()
   "Display current Metal GPU backend status in the minibuffer."
@@ -176,8 +196,9 @@ The NS backend still handles events, menus, and scrollbars."
     (if (not (mtl-backend-p))
         (message "Metal not available on this system")
       (let ((status (mtl-animation-status)))
-        (message "Metal GPU: %s | Cursor: %s | Scroll: %s (%.2fs)"
+        (message "Metal GPU: %s | Animations: %s | Cursor: %s | Scroll: %s (%.2fs)"
                  (mtl-device-name)
+                 (if (cdr (assq 'animations status)) "on" "off")
                  (nth (cdr (assq 'cursor-mode status))
                       '(block spring torpedo sonicboom ripple pixiedust hollow beam))
                  (nth (cdr (assq 'scroll-easing status))
@@ -223,6 +244,7 @@ The NS backend still handles events, menus, and scrollbars."
     (define-key map (kbd "C-c m s") #'mtl-status)
     (define-key map (kbd "C-c m c") #'mtl-set-cursor)
     (define-key map (kbd "C-c m S") #'mtl-set-scroll)
+    (define-key map (kbd "C-c m a") #'mtl-toggle-animations)
     map)
   "Keymap for `mtl-mode'.")
 

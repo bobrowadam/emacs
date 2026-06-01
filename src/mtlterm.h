@@ -224,6 +224,7 @@ extern MtlCursorMode   g_mtl_cursor_mode;
 extern MtlScrollEasing g_mtl_scroll_easing;
 extern float           g_mtl_scroll_duration; /* seconds, default 0.15 */
 extern NSUInteger      g_mtl_trail_len;        /* default 20 */
+extern BOOL            g_mtl_animations_enabled; /* default NO (Fase A) */
 
 /* -----------------------------------------------------------------------
    Global Metal display list
