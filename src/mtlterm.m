@@ -990,6 +990,8 @@ easing_apply (MtlScrollEasing mode, float t)
 @interface MtlFrameData ()
 - (void)openRenderEncoderClear:(BOOL)clear;
 - (void)scrollRunFrom:(int)fromY to:(int)toY x:(int)x width:(int)w height:(int)h;
+- (void)drawFringeBits:(unsigned short *)bits dh:(int)dh wd:(int)wd h:(int)h
+                   atX:(int)x y:(int)y color:(unsigned long)color;
 @end
 
 @implementation MtlFrameData
@@ -1153,6 +1155,54 @@ easing_apply (MtlScrollEasing mode, float t)
   [self.encoder setVertexBuffer:self.uniformBuffer offset:0 atIndex:1];
   [self.encoder setFragmentTexture:g_atlas atIndex:0];
   [self.encoder setFragmentSamplerState:g_sampler atIndex:0];
+  [self.encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+}
+
+/* Rasterize a fringe bitmap (rows of bits, MSB-first like the X backend's
+   XCreatePixmapFromBitmapData) into a one-shot R8 coverage texture and draw it
+   as a colored quad.  Reuses the glyph pipeline (coverage * color).  bits[dh+r]
+   is row r; the visible window is [dh, dh+h).  A fresh texture per call avoids
+   the deferred-sampling hazard of reusing one texture across queued draws; the
+   command buffer retains it until completion, and fringes are few per frame. */
+- (void)drawFringeBits:(unsigned short *)bits dh:(int)dh wd:(int)wd h:(int)h
+                   atX:(int)x y:(int)y color:(unsigned long)color
+{
+  if (!self.encoder || !g_glyph_pipeline || !bits || wd <= 0 || h <= 0) return;
+  if (wd > 32) wd = 32;
+
+  MTLTextureDescriptor *td =
+    [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm
+                                                       width:(NSUInteger) wd
+                                                      height:(NSUInteger) h mipmapped:NO];
+  td.usage = MTLTextureUsageShaderRead;
+  td.storageMode = MTLStorageModeShared;
+  id<MTLTexture> tex = [g_device newTextureWithDescriptor:td];
+
+  uint8_t *buf = (uint8_t *) calloc ((size_t) wd * (size_t) h, 1);
+  for (int r = 0; r < h; r++)
+    {
+      unsigned short row = bits[dh + r];
+      for (int c = 0; c < wd; c++)
+        /* MSB-first: leftmost pixel is the high bit of the wd-wide row. */
+        if ((row >> (wd - 1 - c)) & 1)
+          buf[r * wd + c] = 0xFF;
+    }
+  [tex replaceRegion:MTLRegionMake2D (0, 0, (NSUInteger) wd, (NSUInteger) h)
+         mipmapLevel:0 withBytes:buf bytesPerRow:(NSUInteger) wd];
+  free (buf);
+
+  float fr, fg, fb;
+  unpack_color (color, &fr, &fg, &fb);
+  float x0 = x, y0 = y, x1 = x + wd, y1 = y + h;
+  MtlGlyphVertex v[6] = {
+    {x0,y0, 0,0, fr,fg,fb,1}, {x1,y0, 1,0, fr,fg,fb,1}, {x0,y1, 0,1, fr,fg,fb,1},
+    {x1,y0, 1,0, fr,fg,fb,1}, {x1,y1, 1,1, fr,fg,fb,1}, {x0,y1, 0,1, fr,fg,fb,1},
+  };
+  [self.encoder setRenderPipelineState:g_glyph_pipeline];
+  [self.encoder setVertexBytes:v length:sizeof(v) atIndex:0];
+  [self.encoder setVertexBuffer:self.uniformBuffer offset:0 atIndex:1];
+  [self.encoder setFragmentTexture:tex atIndex:0];
+  [self.encoder setFragmentSamplerState:g_nearest_sampler atIndex:0];
   [self.encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
 }
 
@@ -2048,7 +2098,39 @@ mtl_draw_window_divider (struct window *w,
 
 static void mtl_draw_fringe_bitmap (struct window *w,
   struct glyph_row *row, struct draw_fringe_bitmap_params *p)
-{ (void)w; (void)row; (void)p; }
+{
+  (void)row;
+  struct frame *f = WINDOW_XFRAME (w);
+  MtlFrameData *fd = mtl_get_frame_data (f);
+  if (!fd || !fd.encoder) return;
+
+  struct face *face = p->face;
+  unsigned long bg = face ? face->background
+                          : ns_color_to_pixel (FRAME_BACKGROUND_COLOR (f));
+
+  /* Clear the fringe background (and the wider bx area) unless this is an
+     overlay bitmap.  Mirrors ns_draw_fringe_bitmap. */
+  if (!p->overlay_p)
+    {
+      if (p->bx >= 0)
+        [fd fillRect:NSMakeRect (p->bx, p->by, p->nx, p->ny) color:bg];
+      [fd fillRect:NSMakeRect (p->x, p->y, p->wd, p->h) color:bg];
+    }
+
+  if (!p->bits || p->wd <= 0 || p->h <= 0)
+    return;
+
+  unsigned long color;
+  if (!p->cursor_p)
+    color = face ? face->foreground : ns_color_to_pixel (FRAME_FOREGROUND_COLOR (f));
+  else if (p->overlay_p)
+    color = bg;
+  else
+    color = ns_color_to_pixel (FRAME_CURSOR_COLOR (f));
+
+  [fd drawFringeBits:p->bits dh:p->dh wd:p->wd h:p->h
+                 atX:p->x y:p->y color:color];
+}
 
 static void mtl_define_fringe_bitmap (int w, unsigned short *b, int h, int wd)
 { (void)w; (void)b; (void)h; (void)wd; }
