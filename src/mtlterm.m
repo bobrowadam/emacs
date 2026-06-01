@@ -626,7 +626,12 @@ mtl_rasterize_glyph_id (CTFontRef font, CGGlyph cgGlyph, uint64_t key)
                                              (CGBitmapInfo)kCGImageAlphaNone);
   CGColorSpaceRelease (cs);
 
-  /* White glyph on black background — alpha-mask style (neomacs approach) */
+  /* White glyph on black background — alpha-mask style (neomacs approach).
+     Disable font smoothing (stem-darkening): it bolds the white-on-black mask
+     and makes the final text heavier than the NS backend.  We want the plain
+     geometric grayscale coverage. */
+  CGContextSetShouldAntialias (ctx, true);
+  CGContextSetShouldSmoothFonts (ctx, false);
   CGContextSetGrayFillColor (ctx, 1.0, 1.0);
   CGPoint origin = CGPointMake (floor (-bbox.origin.x) + 1,
                                  floor (-bbox.origin.y) + 1);
@@ -1706,29 +1711,37 @@ mtl_draw_glyph_string (struct glyph_string *s)
   if (!ctfont) { mtl_dgs_nofont_count++; return; }
 
 
-  float pen_x = (float)s->x;
-  float baseline_y = (float)s->ybase;
+  /* Advance using Emacs's own integer glyph grid (first_glyph[i].pixel_width),
+     NOT the CoreText float advance.  Re-advancing by the font's fractional
+     advance drifts away from the layout Emacs computed: glyphs land at
+     fractional positions (linear sampling blurs them) and progressively
+     overlap/clip across the line.  Keeping integer pen positions also makes the
+     1:1 blit pixel-crisp. */
+  int pen_x = s->x;
+  int baseline_y = s->ybase;
 
   for (int i = 0; i < s->nchars; i++)
     {
       /* char2b contains GLYPH IDs for the macfont backend — NOT Unicode codepoints.
          Use mtl_cache_glyph_id which calls CoreText with the ID directly. */
       CGGlyph glyphId = s->char2b ? (CGGlyph)s->char2b[i] : 0;
-      if (!glyphId) { pen_x += (float)FRAME_COLUMN_WIDTH (f); continue; }
+      int adv = (i < s->nchars) ? s->first_glyph[i].pixel_width
+                                : FRAME_COLUMN_WIDTH (f);
 
-      MtlGlyphCacheEntry *ge = mtl_cache_glyph_id (ctfont, glyphId);
-      if (!ge) continue;
-
-      if (ge->width > 0)
+      if (glyphId)
         {
-          mtl_dgs_drawn_count++;
-          /* bearing_y: distance from glyph top-left to baseline.
-             In our top-left coord system, glyph top = baseline_y - bearing_y. */
-          CGPoint origin = CGPointMake (pen_x, baseline_y);
-          [fd drawGlyph:ge at:origin color:fg];
+          MtlGlyphCacheEntry *ge = mtl_cache_glyph_id (ctfont, glyphId);
+          if (ge && ge->width > 0)
+            {
+              mtl_dgs_drawn_count++;
+              /* bearing_y: distance from glyph top-left to baseline.
+                 In our top-left coord system, glyph top = baseline_y - bearing_y. */
+              [fd drawGlyph:ge at:CGPointMake ((float)pen_x, (float)baseline_y)
+                      color:fg];
+            }
         }
 
-      pen_x += ge->advance_x;
+      pen_x += adv;
     }
 
   /* Underline */
