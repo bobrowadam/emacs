@@ -153,6 +153,9 @@ typedef struct mtl_spring {
 
 /* Phase 4: intermediate texture — Emacs renders here, animator blits to screen */
 @property (nonatomic, strong) id<MTLTexture>              staticTexture;
+/* Scratch texture for scroll_run: a region can't be blitted onto itself when
+   source and destination overlap, so we bounce through this. */
+@property (nonatomic, strong) id<MTLTexture>              scratchTexture;
 @property (nonatomic, strong) id<MTLRenderPipelineState>  blitPipeline;
 
 /* Phase 4: animator */

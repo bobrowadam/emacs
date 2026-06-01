@@ -987,7 +987,87 @@ easing_apply (MtlScrollEasing mode, float t)
    @implementation MtlFrameData
    ----------------------------------------------------------------------- */
 
+@interface MtlFrameData ()
+- (void)openRenderEncoderClear:(BOOL)clear;
+- (void)scrollRunFrom:(int)fromY to:(int)toY x:(int)x width:(int)w height:(int)h;
+@end
+
 @implementation MtlFrameData
+
+/* Open a render command encoder targeting the static texture.  CLEAR wipes it to
+   the frame background (only for a fresh/resized texture); otherwise LOAD
+   preserves the previous content (Emacs redraws just the dirty regions).
+   Factored out so beginFrame and scrollRunFrom: can both reopen the encoder. */
+- (void)openRenderEncoderClear:(BOOL)clear
+{
+  struct frame *f = self.emacsFrame;
+  unsigned long bg = f ? ns_color_to_pixel (FRAME_BACKGROUND_COLOR (f)) : 0x2E3440;
+  float r, g, b;
+  unpack_color (bg, &r, &g, &b);
+
+  MTLRenderPassDescriptor *rpd = [MTLRenderPassDescriptor renderPassDescriptor];
+  rpd.colorAttachments[0].texture     = self.staticTexture;
+  rpd.colorAttachments[0].loadAction  = clear ? MTLLoadActionClear : MTLLoadActionLoad;
+  rpd.colorAttachments[0].clearColor  = MTLClearColorMake (r, g, b, 1.0);
+  rpd.colorAttachments[0].storeAction = MTLStoreActionStore;
+
+  self.encoder = [self.cmdBuf renderCommandEncoderWithDescriptor:rpd];
+  [self.encoder setVertexBuffer:self.uniformBuffer offset:0 atIndex:1];
+  [self.encoder setFragmentBuffer:self.uniformBuffer offset:0 atIndex:1];
+}
+
+/* RIF scroll_run: move a block of already-rendered pixels inside the static
+   texture (from y -> to y, full width of the run).  Coordinates come in as
+   Emacs logical pixels; the texture is physical, so scale by the backing factor.
+   A single GPU copy can't have overlapping source/destination, so bounce the
+   region through scratchTexture. */
+- (void)scrollRunFrom:(int)fromY to:(int)toY x:(int)x width:(int)w height:(int)h
+{
+  if (!self.staticTexture || !self.scratchTexture || w <= 0 || h <= 0) return;
+
+  CGSize dsz = self.metalLayer.drawableSize;
+  NSSize lsz = self.metalLayer.frame.size;
+  double scx = lsz.width  > 0 ? dsz.width  / lsz.width  : 1.0;
+  double scy = lsz.height > 0 ? dsz.height / lsz.height : 1.0;
+
+  long px = lround (x * scx), pw = lround (w * scx);
+  long pfrom = lround (fromY * scy), pto = lround (toY * scy), ph = lround (h * scy);
+  long tw = (long) self.staticTexture.width, tht = (long) self.staticTexture.height;
+
+  if (px < 0) px = 0;
+  if (pfrom < 0 || pto < 0) return;
+  if (px >= tw || pfrom >= tht || pto >= tht) return;
+  if (px + pw > tw)  pw = tw - px;
+  if (pfrom + ph > tht) ph = tht - pfrom;
+  if (pto + ph > tht)   ph = tht - pto;
+  if (pw <= 0 || ph <= 0) return;
+
+  /* The copy must run after the draws already recorded this frame.  End the
+     render encoder, do the two blits on the same command buffer (Metal's hazard
+     tracking orders them after the render writes), then reopen the encoder with
+     LOAD so subsequent draw_glyph_string calls land on top of the moved pixels. */
+  BOOL hadEncoder = (self.encoder != nil);
+  if (self.encoder) { [self.encoder endEncoding]; self.encoder = nil; }
+  if (!self.cmdBuf) self.cmdBuf = [g_queue commandBuffer];
+
+  id<MTLBlitCommandEncoder> blit = [self.cmdBuf blitCommandEncoder];
+  [blit copyFromTexture:self.staticTexture sourceSlice:0 sourceLevel:0
+           sourceOrigin:MTLOriginMake ((NSUInteger) px, (NSUInteger) pfrom, 0)
+             sourceSize:MTLSizeMake ((NSUInteger) pw, (NSUInteger) ph, 1)
+              toTexture:self.scratchTexture destinationSlice:0 destinationLevel:0
+      destinationOrigin:MTLOriginMake (0, 0, 0)];
+  [blit copyFromTexture:self.scratchTexture sourceSlice:0 sourceLevel:0
+           sourceOrigin:MTLOriginMake (0, 0, 0)
+             sourceSize:MTLSizeMake ((NSUInteger) pw, (NSUInteger) ph, 1)
+              toTexture:self.staticTexture destinationSlice:0 destinationLevel:0
+      destinationOrigin:MTLOriginMake ((NSUInteger) px, (NSUInteger) pto, 0)];
+  [blit endEncoding];
+
+  if (hadEncoder)
+    [self openRenderEncoderClear:NO];
+  else
+    { [self.cmdBuf commit]; self.cmdBuf = nil; }
+}
 
 - (void)beginFrame
 {
@@ -1011,6 +1091,7 @@ easing_apply (MtlScrollEasing mode, float t)
       td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
       td.storageMode = MTLStorageModePrivate;
       self.staticTexture = [g_device newTextureWithDescriptor:td];
+      self.scratchTexture = [g_device newTextureWithDescriptor:td];
       needsClear = YES;  /* New or resized texture: clear to background color */
     }
 
@@ -1019,23 +1100,8 @@ easing_apply (MtlScrollEasing mode, float t)
   u->screen_width  = (float)sz.width;
   u->screen_height = (float)sz.height;
 
-  struct frame *f = self.emacsFrame;
-  unsigned long bg = f ? ns_color_to_pixel(FRAME_BACKGROUND_COLOR(f)) : 0x2E3440;
-  float r, g, b;
-  unpack_color (bg, &r, &g, &b);
-
-  MTLRenderPassDescriptor *rpd = [MTLRenderPassDescriptor renderPassDescriptor];
-  rpd.colorAttachments[0].texture     = self.staticTexture;
-  /* Load previous content (not clear) unless this is a fresh texture.
-     The NS backend redraws only dirty regions; our Metal backend must do the same. */
-  rpd.colorAttachments[0].loadAction  = needsClear ? MTLLoadActionClear : MTLLoadActionLoad;
-  rpd.colorAttachments[0].clearColor  = MTLClearColorMake(r, g, b, 1.0);
-  rpd.colorAttachments[0].storeAction = MTLStoreActionStore;
-
-  self.cmdBuf  = [g_queue commandBuffer];
-  self.encoder = [self.cmdBuf renderCommandEncoderWithDescriptor:rpd];
-  [self.encoder setVertexBuffer:self.uniformBuffer offset:0 atIndex:1];
-  [self.encoder setFragmentBuffer:self.uniformBuffer offset:0 atIndex:1];
+  self.cmdBuf = [g_queue commandBuffer];
+  [self openRenderEncoderClear:needsClear];
 }
 
 - (void)fillRect:(NSRect)rect color:(unsigned long)color
@@ -1843,13 +1909,25 @@ mtl_scroll_run (struct window *w, struct run *run)
 {
   struct frame *f = WINDOW_XFRAME (w);
   MtlFrameData *fd = mtl_get_frame_data (f);
-  if (!fd || !fd.animator) return;
+  if (!fd) return;
 
-  /* Accumulate scroll pixels for animation */
-  float pixels = (float)(run->height);
-  if (run->current_y < run->desired_y) pixels = -pixels;
-  [fd.animator beginScrollBy:pixels];
-  (void)run;
+  /* Move the already-rendered block of pixels inside the static texture, the
+     same geometry the NS backend uses (ns_scroll_run): the text area box of W
+     including fringes, clamped so we never copy over the mode line. */
+  int x, y, width, height, from_y, to_y, bottom_y;
+  window_box (w, ANY_AREA, &x, &y, &width, &height);
+  from_y = WINDOW_TO_FRAME_PIXEL_Y (w, run->current_y);
+  to_y   = WINDOW_TO_FRAME_PIXEL_Y (w, run->desired_y);
+  bottom_y = y + height;
+
+  if (to_y < from_y)
+    height = (from_y + run->height > bottom_y) ? bottom_y - from_y : run->height;
+  else
+    height = (to_y + run->height > bottom_y) ? bottom_y - to_y : run->height;
+
+  if (height <= 0) return;
+
+  [fd scrollRunFrom:from_y to:to_y x:x width:width height:height];
 }
 
 static void
