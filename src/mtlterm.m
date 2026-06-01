@@ -2084,16 +2084,47 @@ mtl_draw_window_cursor (struct window *w,
 static void
 mtl_draw_vertical_window_border (struct window *w, int x, int y0, int y1)
 {
-  MtlFrameData *fd = mtl_get_frame_data (WINDOW_XFRAME (w));
-  if (fd) [fd fillRect:NSMakeRect(x, y0, 1, y1-y0) color:0x4C566A];
+  struct frame *f = WINDOW_XFRAME (w);
+  MtlFrameData *fd = mtl_get_frame_data (f);
+  if (!fd) return;
+  struct face *face = FACE_FROM_ID_OR_NULL (f, VERTICAL_BORDER_FACE_ID);
+  unsigned long color = face ? face->foreground
+                             : ns_color_to_pixel (FRAME_FOREGROUND_COLOR (f));
+  [fd fillRect:NSMakeRect (x, y0, 1, y1 - y0) color:color];
 }
 
 static void
 mtl_draw_window_divider (struct window *w,
                           int x0, int x1, int y0, int y1)
 {
-  MtlFrameData *fd = mtl_get_frame_data (WINDOW_XFRAME (w));
-  if (fd) [fd fillRect:NSMakeRect(x0, y0, x1-x0, y1-y0) color:0x4C566A];
+  struct frame *f = WINDOW_XFRAME (w);
+  MtlFrameData *fd = mtl_get_frame_data (f);
+  if (!fd) return;
+
+  struct face *face = FACE_FROM_ID_OR_NULL (f, WINDOW_DIVIDER_FACE_ID);
+  struct face *face_first = FACE_FROM_ID_OR_NULL (f, WINDOW_DIVIDER_FIRST_PIXEL_FACE_ID);
+  struct face *face_last = FACE_FROM_ID_OR_NULL (f, WINDOW_DIVIDER_LAST_PIXEL_FACE_ID);
+  unsigned long fg = ns_color_to_pixel (FRAME_FOREGROUND_COLOR (f));
+  unsigned long color       = face ? face->foreground : fg;
+  unsigned long color_first = face_first ? face_first->foreground : fg;
+  unsigned long color_last  = face_last ? face_last->foreground : fg;
+
+  if ((y1 - y0 > x1 - x0) && (x1 - x0 >= 3))
+    {
+      /* Vertical divider >= 3px wide: distinct first/last columns. */
+      [fd fillRect:NSMakeRect (x0, y0, 1, y1 - y0)             color:color_first];
+      [fd fillRect:NSMakeRect (x0 + 1, y0, x1 - x0 - 2, y1 - y0) color:color];
+      [fd fillRect:NSMakeRect (x1 - 1, y0, 1, y1 - y0)         color:color_last];
+    }
+  else if ((x1 - x0 > y1 - y0) && (y1 - y0 >= 3))
+    {
+      /* Horizontal divider >= 3px high: distinct first/last rows. */
+      [fd fillRect:NSMakeRect (x0, y0, x1 - x0, 1)             color:color_first];
+      [fd fillRect:NSMakeRect (x0, y0 + 1, x1 - x0, y1 - y0 - 2) color:color];
+      [fd fillRect:NSMakeRect (x0, y1 - 1, x1 - x0, 1)         color:color_last];
+    }
+  else
+    [fd fillRect:NSMakeRect (x0, y0, x1 - x0, y1 - y0) color:color];
 }
 
 static void mtl_draw_fringe_bitmap (struct window *w,
