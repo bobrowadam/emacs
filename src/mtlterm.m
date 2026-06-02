@@ -2090,14 +2090,25 @@ mtl_draw_glyph_string_impl (struct glyph_string *s)
              color:uc];
     }
 
-  /* Strike-through */
+  /* Overline: 1px at the top of the string (NS ignores overline_margin too). */
+  if (face && face->overline_p)
+    {
+      unsigned long oc = face->overline_color_defaulted_p
+        ? fg : face->overline_color;
+      [fd fillRect:NSMakeRect (s->x, s->y, s->width, 1) color:oc];
+    }
+
+  /* Strike-through: a 1px line centered on the first glyph's body, like NS.
+     Using s->y/s->height would mis-center it when the row is taller than this
+     string (e.g. a bigger font elsewhere on the line). */
   if (face && face->strike_through_p)
     {
-      int sth = s->underline_thickness > 0 ? s->underline_thickness : 1;
-      int sty = s->ybase - (s->height / 3);
+      int glyph_y = s->ybase - s->first_glyph->ascent;
+      int glyph_height = s->first_glyph->ascent + s->first_glyph->descent;
+      int dy = lrint ((glyph_height - 1) / 2.0);
       unsigned long sc = face->strike_through_color_defaulted_p
         ? fg : face->strike_through_color;
-      [fd fillRect:NSMakeRect (s->x, sty, s->width, sth) color:sc];
+      [fd fillRect:NSMakeRect (s->x, glyph_y + dy, s->width, 1) color:sc];
     }
 
   /* Face box / 3D relief (mode line, buttons, etc.). */
