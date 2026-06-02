@@ -1269,6 +1269,10 @@ easing_apply (MtlScrollEasing mode, float t)
       float cy = anim.cursorMode == MTL_CURSOR_SPRING ? anim.springY.pos : anim.curTargetY;
       float cw = anim.curTargetW, ch = anim.curTargetH;
 
+      /* Real frame cursor color (fed by mtl_draw_window_cursor), not cyan. */
+      float ccr, ccg, ccb;
+      unpack_color (anim.cursorColor ? anim.cursorColor : 0x88C0D0, &ccr, &ccg, &ccb);
+
       /* 2. Torpedo trail */
       if (anim.cursorMode == MTL_CURSOR_TORPEDO && anim.trailCount > 0)
         {
@@ -1280,7 +1284,7 @@ easing_apply (MtlScrollEasing mode, float t)
               float tx = anim->trailX[slot], ty = anim->trailY[slot];
               float x0=tx, y0=ty, x1=tx+cw, y1=ty+ch;
               typedef struct { float x,y,r,g,b,a; } RV;
-              float r2=0x88/255.f,g2=0xC0/255.f,b2=0xD0/255.f;
+              float r2=ccr,g2=ccg,b2=ccb;
               RV v[6] = {
                 {x0,y0,r2,g2,b2,alpha},{x1,y0,r2,g2,b2,alpha},{x0,y1,r2,g2,b2,alpha},
                 {x1,y0,r2,g2,b2,alpha},{x1,y1,r2,g2,b2,alpha},{x0,y1,r2,g2,b2,alpha},
@@ -1294,7 +1298,7 @@ easing_apply (MtlScrollEasing mode, float t)
       /* 3. Cursor (spring-interpolated position) */
       {
         float x0=cx, y0=cy, x1=cx+cw, y1=cy+ch;
-        float fr=0x88/255.f,fg=0xC0/255.f,fb=0xD0/255.f;
+        float fr=ccr,fg=ccg,fb=ccb;
         typedef struct { float x,y,r,g,b,a; } RV;
         RV v[6] = {
           {x0,y0,fr,fg,fb,1},{x1,y0,fr,fg,fb,1},{x0,y1,fr,fg,fb,1},
@@ -2117,34 +2121,41 @@ mtl_draw_window_cursor (struct window *w,
   unsigned long cc = ns_color_to_pixel (FRAME_CURSOR_COLOR (f));
   int cwidth = w->phys_cursor_width;
 
-  switch (cursor_type)
-    {
-    case DEFAULT_CURSOR:
-    case NO_CURSOR:
-      break;
-    case FILLED_BOX_CURSOR:
-      /* Re-draw the glyph with DRAW_CURSOR highlight: fills the cell with the
-         cursor color and draws the character in the background color, keeping
-         it readable (mtl_draw_glyph_string handles DRAW_CURSOR). */
-      draw_phys_cursor_glyph (w, row, DRAW_CURSOR);
-      break;
-    case HOLLOW_BOX_CURSOR:
-      /* Outline only: four 1px edges. */
-      [fd fillRect:NSMakeRect (fx, fy, cwidth, 1)         color:cc];
-      [fd fillRect:NSMakeRect (fx, fy + h - 1, cwidth, 1) color:cc];
-      [fd fillRect:NSMakeRect (fx, fy, 1, h)              color:cc];
-      [fd fillRect:NSMakeRect (fx + cwidth - 1, fy, 1, h) color:cc];
-      break;
-    case HBAR_CURSOR:
-    case BAR_CURSOR:
-      [fd fillRect:NSMakeRect (fx, fy, cwidth, h) color:cc];
-      break;
-    }
+  /* With the animation layer OFF, draw the cursor straight into the static
+     texture (like NS).  With it ON, the compositor draws the animated cursor on
+     top, so skip the static one here to avoid a double cursor. */
+  if (!g_mtl_animations_enabled)
+    switch (cursor_type)
+      {
+      case DEFAULT_CURSOR:
+      case NO_CURSOR:
+        break;
+      case FILLED_BOX_CURSOR:
+        /* Re-draw the glyph with DRAW_CURSOR highlight: fills the cell with the
+           cursor color and draws the character in the background color, keeping
+           it readable (mtl_draw_glyph_string handles DRAW_CURSOR). */
+        draw_phys_cursor_glyph (w, row, DRAW_CURSOR);
+        break;
+      case HOLLOW_BOX_CURSOR:
+        /* Outline only: four 1px edges. */
+        [fd fillRect:NSMakeRect (fx, fy, cwidth, 1)         color:cc];
+        [fd fillRect:NSMakeRect (fx, fy + h - 1, cwidth, 1) color:cc];
+        [fd fillRect:NSMakeRect (fx, fy, 1, h)              color:cc];
+        [fd fillRect:NSMakeRect (fx + cwidth - 1, fy, 1, h) color:cc];
+        break;
+      case HBAR_CURSOR:
+      case BAR_CURSOR:
+        [fd fillRect:NSMakeRect (fx, fy, cwidth, h) color:cc];
+        break;
+      }
 
-  /* Keep the animator target in sync for when the animation layer is enabled.
-     With animations off this has no visible effect. */
+  /* Feed the animator the target position and the real cursor color so the
+     compositor can draw the animated cursor (no hardcoded cyan). */
   if (g_mtl_animations_enabled && fd.animator)
-    [fd.animator setCursorX:fx y:fy width:cwidth height:h];
+    {
+      fd.animator.cursorColor = cc;
+      [fd.animator setCursorX:fx y:fy width:cwidth height:h];
+    }
 }
 
 static void

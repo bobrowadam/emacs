@@ -99,6 +99,7 @@ typedef struct mtl_spring {
 /* Cursor state */
 @property (nonatomic, assign) float curTargetX, curTargetY;  /* Emacs target */
 @property (nonatomic, assign) float curTargetW, curTargetH;
+@property (nonatomic, assign) unsigned long cursorColor;     /* real frame cursor color */
 @property (nonatomic, assign) MtlSpring1D springX, springY;  /* animated pos */
 @property (nonatomic, assign) BOOL cursorDirty;
 
