@@ -791,6 +791,10 @@ mtl_setup_frame (struct frame *f)
 
 #define SPRING_OMEGA 8.0f  /* sqrt(k/m): settles in ~150ms */
 
+/* How long a torpedo trail sample stays visible before it fully fades.
+   The tail dissipates on its own this many seconds after the cursor stops. */
+#define MTL_TRAIL_LIFETIME 0.40f
+
 static void
 spring_update (MtlSpring1D *s, float target, float dt)
 {
@@ -876,8 +880,9 @@ easing_apply (MtlScrollEasing mode, float t)
       && (fabsf(dx) > 1 || fabsf(dy) > 1))
     {
       NSUInteger slot = (self.trailHead + self.trailCount) % MTL_TRAIL_LEN;
-      trailX[slot] = self.curTargetX;
-      trailY[slot] = self.curTargetY;
+      trailX[slot]   = self.curTargetX;
+      trailY[slot]   = self.curTargetY;
+      trailAge[slot] = 0.0f;            /* fresh sample, fully opaque */
       if (self.trailCount < g_mtl_trail_len)
         self.trailCount++;
       else
@@ -930,9 +935,8 @@ easing_apply (MtlScrollEasing mode, float t)
 
   BOOL needsComposite = NO;
 
-  /* Update spring cursor */
-  if (self.cursorMode == MTL_CURSOR_SPRING
-      || self.cursorMode == MTL_CURSOR_TORPEDO)
+  /* Update spring cursor (spring mode only; torpedo snaps instantly) */
+  if (self.cursorMode == MTL_CURSOR_SPRING)
     {
       MtlSpring1D sx = self.springX, sy = self.springY;
       spring_update (&sx, self.curTargetX, dt);
@@ -942,6 +946,25 @@ easing_apply (MtlScrollEasing mode, float t)
       self.springX = sx;
       self.springY = sy;
       if (dx > 0.5f || dy > 0.5f) needsComposite = YES;
+    }
+
+  /* Age the torpedo trail so it fades out smoothly on its own.  Samples are
+     pushed oldest-first at trailHead, so the head always holds the oldest one;
+     retire it once it outlives MTL_TRAIL_LIFETIME. */
+  if (self.cursorMode == MTL_CURSOR_TORPEDO && self.trailCount > 0)
+    {
+      for (NSUInteger i = 0; i < self.trailCount; i++)
+        {
+          NSUInteger slot = (self.trailHead + i) % MTL_TRAIL_LEN;
+          trailAge[slot] += dt;
+        }
+      while (self.trailCount > 0
+             && trailAge[self.trailHead] >= MTL_TRAIL_LIFETIME)
+        {
+          self.trailHead = (self.trailHead + 1) % MTL_TRAIL_LEN;
+          self.trailCount--;
+        }
+      if (self.trailCount > 0) needsComposite = YES;
     }
 
   /* Update particles */
@@ -1280,9 +1303,23 @@ easing_apply (MtlScrollEasing mode, float t)
           for (NSUInteger i = 0; i < tlen; i++)
             {
               NSUInteger slot = (anim.trailHead + i) % MTL_TRAIL_LEN;
-              float alpha = (float)(i + 1) / (float)(tlen + 1) * 0.6f;
+              /* Two combined falloffs so the head stays a sharp instant cursor
+                 and the rest reads as a temporary comet tail:
+                 - spatial: samples nearer the cursor (higher i) are brighter,
+                   so even while moving the tail tapers instead of forming a
+                   uniform bright bar that looks like the cursor sliding;
+                 - temporal: every sample fades with age, so the whole tail
+                   dissipates on its own shortly after the cursor stops. */
+              float pos  = (float)(i + 1) / (float)tlen;        /* 0=tail .. 1=head */
+              float frac = anim->trailAge[slot] / MTL_TRAIL_LIFETIME;
+              if (frac > 1.0f) frac = 1.0f;
+              float life  = 1.0f - frac;
+              float alpha = pos * life * life * 0.5f;  /* spatial x temporal */
+              float scale = 0.35f + 0.55f * pos;       /* narrow toward the tail */
               float tx = anim->trailX[slot], ty = anim->trailY[slot];
-              float x0=tx, y0=ty, x1=tx+cw, y1=ty+ch;
+              float iw = cw * scale, ih = ch * scale;
+              float ox = tx + (cw - iw) * 0.5f, oy = ty + (ch - ih) * 0.5f;
+              float x0=ox, y0=oy, x1=ox+iw, y1=oy+ih;
               typedef struct { float x,y,r,g,b,a; } RV;
               float r2=ccr,g2=ccg,b2=ccb;
               RV v[6] = {

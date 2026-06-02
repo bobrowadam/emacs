@@ -88,6 +88,8 @@ typedef struct mtl_spring {
   /* Trail history (torpedo mode) — C arrays cannot be @property */
   float trailX[MTL_TRAIL_LEN];
   float trailY[MTL_TRAIL_LEN];
+  /* Seconds since each trail sample was emitted; drives the smooth fade. */
+  float trailAge[MTL_TRAIL_LEN];
   /* Particles (pixiedust, sonicboom, ripple) */
   MtlParticle particles[MTL_MAX_PARTICLES];
 }

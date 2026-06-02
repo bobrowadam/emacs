@@ -314,6 +314,23 @@ MODE is an integer 0-7:
   NSUInteger m = (NSUInteger)XFIXNAT (mode);
   if (m > 7) error ("mtl-cursor-mode: mode must be 0-7");
   g_mtl_cursor_mode = (MtlCursorMode)m;
+
+  /* Propagate to live animators: each MtlAnimator caches cursorMode at init,
+     so without this a running frame keeps its old mode (e.g. the default
+     spring) and the change only takes effect on the next (mtl-enable). */
+  Lisp_Object tail, frame;
+  FOR_EACH_FRAME (tail, frame)
+    {
+      struct frame *f = XFRAME (frame);
+      if (!FRAME_LIVE_P (f) || !FRAME_NS_P (f))
+        continue;
+      MtlFrameData *fd = mtl_get_frame_data (f);
+      if (fd && fd.animator)
+        {
+          fd.animator.cursorMode = g_mtl_cursor_mode;
+          fd.animator.trailCount = 0;   /* drop any stale trail from old mode */
+        }
+    }
   return mode;
 }
 
@@ -332,6 +349,18 @@ EFFECT is an integer 0-5:
   NSUInteger e = (NSUInteger)XFIXNAT (effect);
   if (e > 5) error ("mtl-scroll-effect: effect must be 0-5");
   g_mtl_scroll_easing = (MtlScrollEasing)e;
+
+  /* Propagate to live animators (they cache scrollEasing at init). */
+  Lisp_Object tail, frame;
+  FOR_EACH_FRAME (tail, frame)
+    {
+      struct frame *f = XFRAME (frame);
+      if (!FRAME_LIVE_P (f) || !FRAME_NS_P (f))
+        continue;
+      MtlFrameData *fd = mtl_get_frame_data (f);
+      if (fd && fd.animator)
+        fd.animator.scrollEasing = g_mtl_scroll_easing;
+    }
   return effect;
 }
 
