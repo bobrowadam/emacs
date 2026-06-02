@@ -1763,6 +1763,68 @@ int mtl_dgs_nofd_count   = 0;  /* no fd or encoder */
 int mtl_dgs_nofont_count = 0;  /* no ctfont */
 int mtl_dgs_drawn_count  = 0;  /* glyphs actually drawn */
 
+/* Lighten (toward white) or darken (toward black) COLOR by LEVEL [0,1].
+   Matches NSColor highlightWithLevel:/shadowWithLevel: closely enough for the
+   relief shadows. */
+static unsigned long
+mtl_shade_color (unsigned long c, double level, bool lighten)
+{
+  double r = (c >> 16) & 0xff, g = (c >> 8) & 0xff, b = c & 0xff;
+  if (lighten) { r += (255 - r) * level; g += (255 - g) * level; b += (255 - b) * level; }
+  else         { r *= (1.0 - level);     g *= (1.0 - level);     b *= (1.0 - level); }
+  return ((unsigned long) r << 16) | ((unsigned long) g << 8) | (unsigned long) b;
+}
+
+/* Draw the face box / relief around glyph string S (mode line, buttons, etc.).
+   Ports ns_dumpglyphs_box_or_relief + ns_draw_box/ns_draw_relief with simple
+   rectangle edges (good enough for the typical 1px relief). */
+static void
+mtl_draw_glyph_string_box (struct glyph_string *s, MtlFrameData *fd)
+{
+  struct face *face = s->face;
+  if (!face || face->box == FACE_NO_BOX) return;
+
+  int hth = abs (face->box_horizontal_line_width);
+  int vth = abs (face->box_vertical_line_width);
+  if (hth == 0 && vth == 0) return;
+
+  struct glyph *last_glyph = s->first_glyph + s->nchars - 1;
+  int last_x = (s->row->full_width_p && !s->w->pseudo_window_p)
+               ? WINDOW_RIGHT_EDGE_X (s->w)
+               : window_box_right (s->w, s->area);
+  int right_x = (s->row->full_width_p && s->extends_to_end_of_line_p
+                 ? last_x - 1
+                 : min (last_x, s->x + s->background_width) - 1);
+  bool left_p  = s->first_glyph->left_box_line_p;
+  bool right_p = last_glyph->right_box_line_p;
+
+  int x = s->x, y = s->y, w = right_x - s->x + 1, h = s->height;
+  if (w <= 0 || h <= 0) return;
+
+  unsigned long tl, br;   /* top/left and bottom/right edge colors */
+  if (face->box == FACE_SIMPLE_BOX)
+    tl = br = face->box_color;
+  else
+    {
+      unsigned long base = face->use_box_color_for_shadows_p
+                           ? face->box_color : face->background;
+      if (s->hl == DRAW_CURSOR)
+        base = ns_color_to_pixel (FRAME_CURSOR_COLOR (s->f));
+      unsigned long light = mtl_shade_color (base, 0.4, true);
+      unsigned long dark  = mtl_shade_color (base, 0.4, false);
+      bool raised = (face->box == FACE_RAISED_BOX);
+      tl = raised ? light : dark;
+      br = raised ? dark  : light;
+    }
+
+  [fd fillRect:NSMakeRect (x, y, w, hth) color:tl];                 /* top */
+  [fd fillRect:NSMakeRect (x, y + h - hth, w, hth) color:br];       /* bottom */
+  if (left_p)
+    [fd fillRect:NSMakeRect (x, y, vth, h) color:tl];               /* left */
+  if (right_p)
+    [fd fillRect:NSMakeRect (x + w - vth, y, vth, h) color:br];     /* right */
+}
+
 static void
 mtl_draw_glyph_string (struct glyph_string *s)
 {
@@ -1879,6 +1941,10 @@ mtl_draw_glyph_string (struct glyph_string *s)
         ? fg : face->strike_through_color;
       [fd fillRect:NSMakeRect (s->x, sty, s->width, sth) color:sc];
     }
+
+  /* Face box / 3D relief (mode line, buttons, etc.). */
+  if (face && face->box != FACE_NO_BOX)
+    mtl_draw_glyph_string_box (s, fd);
 }
 
 static void
