@@ -1913,6 +1913,57 @@ mtl_draw_glyph_string_box (struct glyph_string *s, MtlFrameData *fd)
     [fd fillRect:NSMakeRect (x + w - vth, y, vth, h) color:br];     /* right */
 }
 
+/* Compute the underline offset below the baseline and its thickness, mirroring
+   ns_draw_text_decoration.  These depend on font metrics; the glyph string's
+   underline_position/underline_thickness are otherwise left uninitialized, so
+   the underline was being drawn at the baseline (offset 0), cutting through the
+   bottom of the glyphs.  Honors the face's descent-line options and uses the
+   default underline-minimum-offset (1) and x-use-underline-position-properties
+   (t). */
+static void
+mtl_underline_metrics (struct glyph_string *s, int *position, int *thickness)
+{
+  /* Match a previous underlined run so a continued underline stays seamless. */
+  if (s->prev
+      && s->prev->face->underline != FACE_UNDERLINE_WAVE
+      && s->prev->face->underline >= FACE_UNDERLINE_SINGLE
+      && s->prev->underline_thickness > 0
+      && (s->prev->face->underline_at_descent_line_p
+          == s->face->underline_at_descent_line_p)
+      && (s->prev->face->underline_pixels_above_descent_line
+          == s->face->underline_pixels_above_descent_line))
+    {
+      *thickness = s->prev->underline_thickness;
+      *position  = s->prev->underline_position;
+      return;
+    }
+
+  struct font *font = font_for_underline_metrics (s);
+  int descent = s->y + s->height - s->ybase;
+  int minimum_offset = 1;
+  int th = (font && font->underline_thickness > 0) ? font->underline_thickness : 1;
+  int pos;
+
+  if (s->face->underline_at_descent_line_p)
+    pos = descent - th - s->face->underline_pixels_above_descent_line;
+  else if (font && font->underline_position >= 0)
+    pos = font->underline_position;
+  else if (font)
+    pos = lround (font->descent / 2.0);
+  else
+    pos = minimum_offset;
+
+  if (!s->face->underline_pixels_above_descent_line)
+    pos = max (pos, minimum_offset);
+
+  /* Keep the underline inside the cell. */
+  if (descent <= pos)        { pos = descent - 1; th = 1; }
+  else if (descent < pos + th) th = 1;
+
+  *position = pos;
+  *thickness = th;
+}
+
 static void
 mtl_draw_glyph_string_impl (struct glyph_string *s)
 {
@@ -2010,14 +2061,33 @@ mtl_draw_glyph_string_impl (struct glyph_string *s)
       pen_x += adv;
     }
 
-  /* Underline */
-  if (face && face->underline != FACE_NO_UNDERLINE)
+  /* Underline.  Single/double lines (the common case for buttons and links)
+     use font-derived position/thickness; wave falls back to a straight line at
+     the same position for now. */
+  if (face && face->underline >= FACE_UNDERLINE_SINGLE)
     {
-      int uth = s->underline_thickness > 0 ? s->underline_thickness : 1;
-      int uybase = s->ybase + s->underline_position;
-      unsigned long uc = face->underline_defaulted_p
-        ? fg : face->underline_color;
-      [fd fillRect:NSMakeRect (s->x, uybase, s->width, uth) color:uc];
+      int position, thickness;
+      mtl_underline_metrics (s, &position, &thickness);
+      s->underline_thickness = thickness;
+      s->underline_position  = position;
+      unsigned long uc = face->underline_defaulted_p ? fg : face->underline_color;
+      [fd fillRect:NSMakeRect (s->x, s->ybase + position, s->width, thickness)
+             color:uc];
+      /* Second line above the first for double underline. */
+      if (face->underline == FACE_UNDERLINE_DOUBLE_LINE)
+        {
+          int p2 = position - thickness - 1;
+          [fd fillRect:NSMakeRect (s->x, s->ybase + p2, s->width, thickness)
+                 color:uc];
+        }
+    }
+  else if (face && face->underline == FACE_UNDERLINE_WAVE)
+    {
+      int position, thickness;
+      mtl_underline_metrics (s, &position, &thickness);
+      unsigned long uc = face->underline_defaulted_p ? fg : face->underline_color;
+      [fd fillRect:NSMakeRect (s->x, s->ybase + position, s->width, thickness)
+             color:uc];
     }
 
   /* Strike-through */
