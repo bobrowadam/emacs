@@ -239,6 +239,12 @@ static id<MTLTexture>    g_atlas         = nil;
 static int               g_atlas_next_x  = 0;
 static int               g_atlas_next_y  = 0;
 static int               g_atlas_row_h   = 0;
+/* Backing scale the atlas glyphs are rasterized at (1.0 on a 1x display, 2.0 on
+   Retina).  Glyphs are baked at physical resolution so they stay crisp on the
+   physical-pixel static texture; draw sites divide the physical metrics back to
+   logical pixels.  Reset the atlas when this changes (e.g. window moves to a
+   monitor with a different DPI).  See TODO.org Fase C-bis. */
+static CGFloat           g_atlas_scale   = 1.0;
 
 /* Phase 4: global animation configuration (Lisp-configurable) */
 MtlCursorMode   g_mtl_cursor_mode    = MTL_CURSOR_SPRING;
@@ -581,13 +587,22 @@ mtl_rasterize_glyph_id (CTFontRef font, CGGlyph cgGlyph, uint64_t key)
   if (!g_atlas) return NULL;
 
   MtlGlyphCacheEntry *entry;
+  CGFloat s = g_atlas_scale;
 
-  CGRect bbox = CTFontGetBoundingRectsForGlyphs (font,
+  /* Rasterize at physical resolution: bake the glyph from a copy of the font
+     scaled by the backing factor.  Bbox/advance then come out in physical
+     pixels; draw sites divide the stored metrics by g_atlas_scale to get back to
+     logical pixels.  On a 1x display this is a no-op (s == 1). */
+  CTFontRef rfont = (s != 1.0)
+    ? CTFontCreateCopyWithAttributes (font, CTFontGetSize (font) * s, NULL, NULL)
+    : (CTFontRef) CFRetain (font);
+
+  CGRect bbox = CTFontGetBoundingRectsForGlyphs (rfont,
                    kCTFontOrientationDefault, &cgGlyph, NULL, 1);
 
-  /* Glyph advance */
+  /* Glyph advance (physical → store logical) */
   CGSize adv;
-  CTFontGetAdvancesForGlyphs (font, kCTFontOrientationDefault,
+  CTFontGetAdvancesForGlyphs (rfont, kCTFontOrientationDefault,
                                &cgGlyph, &adv, 1);
 
   int bw = (int)ceil (bbox.size.width)  + 2;
@@ -596,8 +611,9 @@ mtl_rasterize_glyph_id (CTFontRef font, CGGlyph cgGlyph, uint64_t key)
     {
       /* Space or zero-size glyph: cache as empty with correct advance */
       entry = glyph_cache_insert (key);
+      CFRelease (rfont);
       if (!entry) return NULL;
-      entry->advance_x = (float)adv.width;
+      entry->advance_x = (float)(adv.width / s);
       entry->width = entry->height = 0;
       return entry;
     }
@@ -635,8 +651,9 @@ mtl_rasterize_glyph_id (CTFontRef font, CGGlyph cgGlyph, uint64_t key)
   CGContextSetGrayFillColor (ctx, 1.0, 1.0);
   CGPoint origin = CGPointMake (floor (-bbox.origin.x) + 1,
                                  floor (-bbox.origin.y) + 1);
-  CTFontDrawGlyphs (font, &cgGlyph, &origin, 1, ctx);
+  CTFontDrawGlyphs (rfont, &cgGlyph, &origin, 1, ctx);
   CGContextRelease (ctx);
+  CFRelease (rfont);
 
   /* Upload to atlas */
   MTLRegion region = MTLRegionMake2D ((NSUInteger)g_atlas_next_x,
@@ -663,7 +680,7 @@ mtl_rasterize_glyph_id (CTFontRef font, CGGlyph cgGlyph, uint64_t key)
   entry->height    = bh;
   entry->bearing_x = (int)(floor (-bbox.origin.x) + 1);
   entry->bearing_y = bh - 1 - raster_oy;
-  entry->advance_x = (float)adv.width;
+  entry->advance_x = (float)(adv.width / s);
 
   g_atlas_next_x += bw + 1;
   if (bh > g_atlas_row_h) g_atlas_row_h = bh;
@@ -1098,6 +1115,18 @@ easing_apply (MtlScrollEasing mode, float t)
 {
   CGSize dsz = self.metalLayer.drawableSize;
 
+  /* Track the backing scale so the glyph atlas is baked at physical resolution.
+     If it changes (window moved to a different-DPI monitor), drop the atlas so
+     glyphs re-rasterize at the new scale. */
+  NSSize fsz = self.metalLayer.frame.size;
+  CGFloat scale = fsz.width > 0 ? dsz.width / fsz.width : 1.0;
+  if (scale > 0 && fabs (scale - g_atlas_scale) > 0.01)
+    {
+      g_atlas_scale  = scale;
+      g_atlas_next_x = g_atlas_next_y = g_atlas_row_h = 0;
+      glyph_cache_init ();
+    }
+
   /* Ensure staticTexture exists and matches drawable size.
      Bug fix: multiple update_begin/end cycles happen per Emacs redisplay pass
      (cursor blink, modeline, etc.). Using MTLLoadActionClear on every beginFrame
@@ -1158,10 +1187,15 @@ easing_apply (MtlScrollEasing mode, float t)
   float fr, fg, fb;
   unpack_color (fgcolor, &fr, &fg, &fb);
 
-  float x0 = (float)(origin.x - ge->bearing_x);
-  float y0 = (float)(origin.y - ge->bearing_y);
-  float x1 = x0 + ge->width;
-  float y1 = y0 + ge->height;
+  /* The atlas glyph is baked at physical resolution (g_atlas_scale); the draw
+     site works in logical pixels, so divide the physical metrics back down.  The
+     quad ends up logical-sized but textured from a high-res glyph, which maps
+     ~1:1 onto the physical static texture and stays crisp on Retina. */
+  CGFloat s = g_atlas_scale;
+  float x0 = (float)(origin.x - ge->bearing_x / s);
+  float y0 = (float)(origin.y - ge->bearing_y / s);
+  float x1 = x0 + ge->width  / s;
+  float y1 = y0 + ge->height / s;
 
   float u0 = (float)ge->atlas_x / MTL_ATLAS_WIDTH;
   float v0 = (float)ge->atlas_y / MTL_ATLAS_HEIGHT;
