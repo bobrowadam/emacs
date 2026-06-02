@@ -164,6 +164,11 @@ typedef struct mtl_spring {
 /* Phase 4: animator */
 @property (nonatomic, strong) MtlAnimator                *animator;
 
+/* D1: scroll bar gutter rects (NSValue-wrapped NSRect, logical pixels) queued
+   by the scroll bar hooks during the layout phase and flushed to background at
+   the start of the next frame, when a render encoder is active. */
+@property (nonatomic, strong) NSMutableArray             *pendingClears;
+
 /* Main Emacs render cycle (renders to staticTexture) */
 - (void)beginFrame;
 - (void)endFrame;

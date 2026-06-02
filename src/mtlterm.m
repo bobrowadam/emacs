@@ -1156,6 +1156,19 @@ easing_apply (MtlScrollEasing mode, float t)
 
   self.cmdBuf = [g_queue commandBuffer];
   [self openRenderEncoderClear:needsClear];
+
+  /* D1: flush any scroll bar gutter rects queued by the scroll bar hooks during
+     the layout phase (no encoder was active then).  Clear them to the frame
+     background so stale text behind the transparent NSScroller is wiped.  A full
+     clear (needsClear) already covers everything, so skip in that case. */
+  if (!needsClear && self.pendingClears.count)
+    {
+      struct frame *f = self.emacsFrame;
+      unsigned long bg = f ? ns_color_to_pixel (FRAME_BACKGROUND_COLOR (f)) : 0x2E3440;
+      for (NSValue *v in self.pendingClears)
+        [self fillRect:[v rectValue] color:bg];
+    }
+  [self.pendingClears removeAllObjects];
 }
 
 - (void)fillRect:(NSRect)rect color:(unsigned long)color
@@ -2054,6 +2067,56 @@ mtl_clear_under_internal_border (struct frame *f)
   mtl_clear_frame_area (f, w-b, 0,   b,  h);
 }
 
+/* D1: the NS scroll bars are transparent NSScroller overlays, so the gutter
+   behind them shows whatever is in the static texture.  ns_set_*_scroll_bar
+   clears that area with ns_clear_frame_area, which targets CoreGraphics, not the
+   Metal texture, so on a window split the old text in the new gutter column
+   bleeds through until the next full redraw.  Wrap the hooks to queue the scroll
+   bar area for clearing.  The hooks run in redisplay's layout phase, before
+   update_begin, so there is no active render encoder yet: we record the rect and
+   flush it to background at the start of the next frame (see beginFrame).  Then
+   delegate to NS to position the scroller.  Mirrors ns_set_*_scroll_bar. */
+static void (*mtl_orig_set_vsb_hook) (struct window *, int, int, int) = NULL;
+static void (*mtl_orig_set_hsb_hook) (struct window *, int, int, int) = NULL;
+
+static void
+mtl_queue_clear (struct frame *f, int x, int y, int w, int h)
+{
+  if (w <= 0 || h <= 0) return;
+  MtlFrameData *fd = mtl_get_frame_data (f);
+  if (!fd) return;
+  if (!fd.pendingClears) fd.pendingClears = [NSMutableArray array];
+  [fd.pendingClears addObject:[NSValue valueWithRect:NSMakeRect (x, y, w, h)]];
+}
+
+static void
+mtl_set_vertical_scroll_bar (struct window *window,
+                             int portion, int whole, int position)
+{
+  struct frame *f = XFRAME (WINDOW_FRAME (window));
+  int window_y, window_height;
+  window_box (window, ANY_AREA, 0, &window_y, 0, &window_height);
+  mtl_queue_clear (f, WINDOW_SCROLL_BAR_AREA_X (window), window_y,
+                   WINDOW_SCROLL_BAR_AREA_WIDTH (window), window_height);
+
+  if (mtl_orig_set_vsb_hook)
+    mtl_orig_set_vsb_hook (window, portion, whole, position);
+}
+
+static void
+mtl_set_horizontal_scroll_bar (struct window *window,
+                               int portion, int whole, int position)
+{
+  struct frame *f = XFRAME (WINDOW_FRAME (window));
+  int window_x, window_width;
+  window_box (window, ANY_AREA, &window_x, 0, &window_width, 0);
+  mtl_queue_clear (f, window_x, WINDOW_SCROLL_BAR_AREA_Y (window),
+                   window_width, WINDOW_SCROLL_BAR_AREA_HEIGHT (window));
+
+  if (mtl_orig_set_hsb_hook)
+    mtl_orig_set_hsb_hook (window, portion, whole, position);
+}
+
 static void
 mtl_flush_display (struct frame *f)
 {
@@ -2503,6 +2566,19 @@ mtl_patch_terminal_rif (struct frame *f)
   term->update_end_hook       = mtl_update_end;
   term->clear_frame_hook      = mtl_clear_frame;
   term->frame_up_to_date_hook = mtl_frame_up_to_date;
+
+  /* D1: wrap the scroll bar hooks so the gutter is cleared in the Metal static
+     texture (not just CoreGraphics) when windows are split or re-laid out. */
+  if (term->set_vertical_scroll_bar_hook != mtl_set_vertical_scroll_bar)
+    {
+      mtl_orig_set_vsb_hook = term->set_vertical_scroll_bar_hook;
+      term->set_vertical_scroll_bar_hook = mtl_set_vertical_scroll_bar;
+    }
+  if (term->set_horizontal_scroll_bar_hook != mtl_set_horizontal_scroll_bar)
+    {
+      mtl_orig_set_hsb_hook = term->set_horizontal_scroll_bar_hook;
+      term->set_horizontal_scroll_bar_hook = mtl_set_horizontal_scroll_bar;
+    }
 
   /* Install a KVO observer so the Metal layer tracks EmacsView size changes.
      When the user resizes the window, the CAMetalLayer drawableSize updates
