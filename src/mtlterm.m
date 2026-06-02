@@ -1914,7 +1914,7 @@ mtl_draw_glyph_string_box (struct glyph_string *s, MtlFrameData *fd)
 }
 
 static void
-mtl_draw_glyph_string (struct glyph_string *s)
+mtl_draw_glyph_string_impl (struct glyph_string *s)
 {
   mtl_dgs_call_count++;
 
@@ -2033,6 +2033,31 @@ mtl_draw_glyph_string (struct glyph_string *s)
   /* Face box / 3D relief (mode line, buttons, etc.). */
   if (face && face->box != FACE_NO_BOX)
     mtl_draw_glyph_string_box (s, fd);
+}
+
+/* The redisplay engine also draws OUTSIDE the update_begin/end cycle: mouse-face
+   highlight (note_mouse_highlight → show_mouse_face) and other immediate draws
+   call draw_glyph_string directly, with no Metal render encoder active.  The NS
+   backend draws immediately via lockFocus; we must open a self-contained frame
+   (LOAD preserves the static texture), draw, then present.  Without this the
+   mouse-face highlight never appeared (the draw was silently dropped). */
+static void
+mtl_draw_glyph_string (struct glyph_string *s)
+{
+  MtlFrameData *fd = mtl_get_frame_data (s->f);
+  if (!fd) return;
+
+  BOOL opened_here = NO;
+  if (!fd.encoder)
+    {
+      [fd beginFrame];
+      opened_here = YES;
+    }
+
+  mtl_draw_glyph_string_impl (s);
+
+  if (opened_here)
+    [fd endFrame];
 }
 
 static void
