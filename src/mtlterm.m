@@ -1736,10 +1736,10 @@ mtl_texture_for_image (struct image *img)
   CGColorSpaceRelease (cs);
   if (!ctx) { free (px); return nil; }
 
-  /* Flip Y so that Metal's top-left origin matches */
-  CGContextTranslateCTM (ctx, 0, (CGFloat)h);
-  CGContextScaleCTM (ctx, 1.0, -1.0);
-
+  /* No CTM flip: drawing the image upright into a CGBitmapContext already puts
+     the visual top of the image in the first memory row, which is exactly what
+     Metal's texture row 0 (V=0, the top of the quad) expects.  Flipping here
+     would invert the lone orientation and render the image upside down. */
   NSGraphicsContext *gc = [NSGraphicsContext graphicsContextWithCGContext:ctx
                                                                   flipped:NO];
   [NSGraphicsContext saveGraphicsState];
