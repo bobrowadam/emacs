@@ -1400,12 +1400,28 @@ easing_apply (MtlScrollEasing mode, float t)
     self.needsPresent = YES;
 }
 
+/* Sequence tracing for present-flow debugging (MTL_LOG_SEQ=1). */
+static BOOL
+mtl_log_seq_p (void)
+{
+  static int on = -1;
+  if (on < 0) on = getenv ("MTL_LOG_SEQ") != NULL;
+  return on > 0;
+}
+
+#define MTL_SEQ(fmt, ...)                                               \
+  do { if (mtl_log_seq_p ())                                            \
+         fprintf (stderr, "[mtlseq %.3f] " fmt "\n",                    \
+                  CACurrentMediaTime (), ##__VA_ARGS__); } while (0)
+
 - (void)compositeToScreen
 {
   if (!self.staticTexture || !g_blit_pipeline) return;
 
   id<CAMetalDrawable> drawable = [self.metalLayer nextDrawable];
   if (!drawable) return;
+
+  MTL_SEQ ("PRESENT");
 
   self.needsPresent = NO;   /* about to present whatever is in the static texture */
 
@@ -2709,12 +2725,14 @@ mtl_draw_glyph_string (struct glyph_string *s)
 
   if (fd.encoder)
     {
+      fd.cycleSawDraw = YES;
       [fd applyClipRect:clip];
       mtl_draw_glyph_string_impl (s);
       [fd clearClipRect];
     }
   else
     {
+      MTL_SEQ ("immediate glyph draw x=%d y=%d w=%d", s->x, s->y, s->width);
       [fd beginFrame];
       [fd applyClipRect:clip];
       mtl_draw_glyph_string_impl (s);
@@ -2737,6 +2755,8 @@ mtl_clear_frame (struct frame *f)
      committed immediate frame with a deferred present, like
      mtl_draw_glyph_string. */
   BOOL immediate = (fd.encoder == nil);
+  MTL_SEQ ("clear_frame (immediate=%d)", immediate);
+  fd.cycleSawClear = YES;
   if (immediate) [fd beginFrame];
 
   NSRect bounds = fd.metalLayer ? CGRectMake (0, 0,
@@ -2828,6 +2848,7 @@ mtl_flush_display (struct frame *f)
      encoder that never got endEncoding, causing an assertion failure. */
   MtlFrameData *fd = mtl_get_frame_data (f);
   if (!fd) return;
+  MTL_SEQ ("flush_display (encoder=%d needsPresent=%d)", fd.encoder != nil, (int) fd.needsPresent);
   if (fd.encoder)
     [fd endFrame];
   else if (fd.needsPresent)
@@ -2844,6 +2865,9 @@ mtl_update_begin (struct frame *f)
   /* Guard: if encoder already active (e.g. from a re-entrant redisplay),
      end it cleanly before starting a new frame. */
   if (fd.encoder) [fd endFrame];
+  MTL_SEQ ("update_begin");
+  fd.cycleSawClear = NO;
+  fd.cycleSawDraw  = NO;
   [fd beginFrame];
 
   /* Expose substitute: when the minibuffer (echo area) changes height, the
@@ -2874,7 +2898,15 @@ static void
 mtl_update_end (struct frame *f)
 {
   MtlFrameData *fd = mtl_get_frame_data (f);
-  if (fd) [fd endFrame];
+  if (!fd) return;
+  /* A cycle that only cleared the garbaged frame (no content drawn) commits
+     to the static texture but defers the present: presenting it would flash
+     a blank frame for the tens of ms the follow-up cycle needs to realize
+     faces/fonts and repaint (seen on the first switch to a new tab).  The
+     deferred present is picked up by the next cycle or by flush_display. */
+  BOOL clearOnly = fd.cycleSawClear && !fd.cycleSawDraw;
+  MTL_SEQ ("update_end%s", clearOnly ? " (clear-only, present deferred)" : "");
+  [fd endFramePresent:!clearOnly];
 }
 
 static void

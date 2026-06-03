@@ -179,6 +179,14 @@ typedef struct mtl_spring {
    drawRect: expose path for the uncovered pixels; Metal has none). */
 @property (nonatomic, assign) int                         lastMiniHeight;
 
+/* Within the current update cycle: clear_frame ran / real content was drawn.
+   A cycle that only cleared (a garbaged frame, e.g. the first switch to a tab
+   whose faces are not realized yet) must NOT present, or the user sees a blank
+   flash before the follow-up cycle paints the actual content.  NS does not
+   flash there because AppKit coalesces the backing-store flushes. */
+@property (nonatomic, assign) BOOL                        cycleSawClear;
+@property (nonatomic, assign) BOOL                        cycleSawDraw;
+
 /* Main Emacs render cycle (renders to staticTexture) */
 - (void)beginFrame;
 - (void)endFrame;
