@@ -1883,13 +1883,6 @@ mtl_texture_for_image (struct image *img)
 {
   if (!img || !g_device || !g_image_texture_cache) return nil;
 
-  /* Cache lookup: key is the struct image* pointer directly.
-     CFDictionary with NULL key callbacks uses pointer equality — correct and fast.
-     img->pixmap can change (image reload), so we also check img->id matches. */
-  id<MTLTexture> tex = (__bridge id<MTLTexture>)
-    CFDictionaryGetValue (g_image_texture_cache, (const void *)img);
-  if (tex) return tex;
-
   /* Get NSImage from Emacs image (NS backend stores EmacsImage* in pixmap) */
   if (!img->pixmap) return nil;
   NSImage *nsimg = (__bridge NSImage *)img->pixmap;
@@ -1898,8 +1891,17 @@ mtl_texture_for_image (struct image *img)
   NSSize sz = [nsimg size];
   if (sz.width < 1 || sz.height < 1) return nil;
 
-  NSUInteger w = (NSUInteger)ceil (sz.width);
-  NSUInteger h = (NSUInteger)ceil (sz.height);
+  /* Target size: the engine's display size (img->width/height) accounts for
+     :scale / :rotation transforms; fall back to the natural size. */
+  NSUInteger w = img->width  > 0 ? (NSUInteger)img->width  : (NSUInteger)ceil (sz.width);
+  NSUInteger h = img->height > 0 ? (NSUInteger)img->height : (NSUInteger)ceil (sz.height);
+
+  /* Cache lookup: key is the struct image* pointer directly.
+     CFDictionary with NULL key callbacks uses pointer equality — correct and
+     fast.  Re-rasterize if the display size changed (reload / new transform). */
+  id<MTLTexture> tex = (__bridge id<MTLTexture>)
+    CFDictionaryGetValue (g_image_texture_cache, (const void *)img);
+  if (tex && tex.width == w && tex.height == h) return tex;
 
   /* Render NSImage to a BGRA8 bitmap via CGContext */
   CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB ();
@@ -1910,15 +1912,37 @@ mtl_texture_for_image (struct image *img)
   CGColorSpaceRelease (cs);
   if (!ctx) { free (px); return nil; }
 
-  /* No CTM flip: drawing the image upright into a CGBitmapContext already puts
-     the visual top of the image in the first memory row, which is exactly what
-     Metal's texture row 0 (V=0, the top of the quad) expects.  Flipping here
-     would invert the lone orientation and render the image upside down. */
+  /* Mirror ns_dumpglyphs_image: EmacsImage carries an NSAffineTransform
+     (rotation/scale from image.c) meant for the flipped EmacsView coordinate
+     system, plus a smoothing flag.  Reproduce that environment: flip the CTM
+     and use a flipped NSGraphicsContext, concat the transform, then draw with
+     respectFlipped:YES.  The two flips cancel for the memory layout, so row 0
+     of the bitmap is still the visual top (what Metal's V=0 expects). */
+  BOOL is_emacs_image = [nsimg isKindOfClass:[EmacsImage class]];
+  NSAffineTransform *xform =
+    is_emacs_image ? ((EmacsImage *)nsimg)->transform : nil;
+  BOOL smoothing = is_emacs_image ? ((EmacsImage *)nsimg)->smoothing : YES;
+
+  CGContextTranslateCTM (ctx, 0, (CGFloat)h);
+  CGContextScaleCTM (ctx, 1.0, -1.0);
   NSGraphicsContext *gc = [NSGraphicsContext graphicsContextWithCGContext:ctx
-                                                                  flipped:NO];
+                                                                  flipped:YES];
   [NSGraphicsContext saveGraphicsState];
   [NSGraphicsContext setCurrentContext:gc];
-  [nsimg drawInRect:NSMakeRect (0, 0, (CGFloat)w, (CGFloat)h)];
+  if (xform)
+    [xform concat];
+  if (!smoothing)
+    [gc setImageInterpolation:NSImageInterpolationNone];
+  NSRect ir = NSMakeRect (0, 0, sz.width, sz.height);
+  if (xform)
+    [nsimg drawInRect:ir fromRect:ir
+            operation:NSCompositingOperationSourceOver
+             fraction:1.0 respectFlipped:YES hints:nil];
+  else
+    /* No transform: scale the natural image to the display size. */
+    [nsimg drawInRect:NSMakeRect (0, 0, (CGFloat)w, (CGFloat)h) fromRect:ir
+            operation:NSCompositingOperationSourceOver
+             fraction:1.0 respectFlipped:YES hints:nil];
   [NSGraphicsContext restoreGraphicsState];
   CGContextRelease (ctx);
 
@@ -1948,18 +1972,20 @@ mtl_invalidate_image_texture (struct image *img)
     CFDictionaryRemoveValue (g_image_texture_cache, (const void *)img);
 }
 
-/* Render a Metal RGBA texture as a quad at (x,y,w,h) into fd.encoder */
+/* Render the (U0,V0)-(U1,V1) subrect of a Metal RGBA texture as a quad at
+   (x,y,w,h) into fd.encoder.  Used for image slices (insert-sliced-image). */
 static void
-mtl_draw_image_texture (MtlFrameData *fd, id<MTLTexture> tex,
-                         float x, float y, float w, float h, float alpha)
+mtl_draw_image_texture_uv (MtlFrameData *fd, id<MTLTexture> tex,
+                           float x, float y, float w, float h,
+                           float u0, float v0, float u1, float v1, float alpha)
 {
   if (!fd.encoder || !g_image_pipeline || !tex) return;
 
   typedef struct { float x, y, u, v, a; } ImgVert;
   float x1 = x+w, y1 = y+h;
   ImgVert verts[6] = {
-    {x, y,  0,0,alpha}, {x1,y,  1,0,alpha}, {x, y1, 0,1,alpha},
-    {x1,y,  1,0,alpha}, {x1,y1, 1,1,alpha}, {x, y1, 0,1,alpha},
+    {x, y,  u0,v0,alpha}, {x1,y,  u1,v0,alpha}, {x, y1, u0,v1,alpha},
+    {x1,y,  u1,v0,alpha}, {x1,y1, u1,v1,alpha}, {x, y1, u0,v1,alpha},
   };
   [fd.encoder setRenderPipelineState:g_image_pipeline];
   [fd.encoder setVertexBytes:verts length:sizeof(verts) atIndex:0];
@@ -1967,6 +1993,14 @@ mtl_draw_image_texture (MtlFrameData *fd, id<MTLTexture> tex,
   [fd.encoder setFragmentTexture:tex atIndex:0];
   [fd.encoder setFragmentSamplerState:g_sampler atIndex:0];
   [fd.encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+}
+
+/* Render a full Metal RGBA texture as a quad at (x,y,w,h) into fd.encoder */
+static void
+mtl_draw_image_texture (MtlFrameData *fd, id<MTLTexture> tex,
+                         float x, float y, float w, float h, float alpha)
+{
+  mtl_draw_image_texture_uv (fd, tex, x, y, w, h, 0, 0, 1, 1, alpha);
 }
 
 /* -----------------------------------------------------------------------
@@ -2362,11 +2396,18 @@ mtl_draw_glyph_string_impl (struct glyph_string *s)
               int x = s->x + s->img->hmargin;
               int y = s->ybase - image_ascent (img, s->face, &s->slice)
                       + s->img->vmargin;
-              mtl_draw_image_texture (fd, tex,
-                                      (float)x, (float)y,
-                                      (float)s->slice.width,
-                                      (float)s->slice.height,
-                                      1.0f);
+              /* The texture holds the full display-size image; sample only
+                 this glyph string's slice (insert-sliced-image). */
+              float tw = (float) tex.width, th = (float) tex.height;
+              mtl_draw_image_texture_uv (fd, tex,
+                                         (float)x, (float)y,
+                                         (float)s->slice.width,
+                                         (float)s->slice.height,
+                                         s->slice.x / tw,
+                                         s->slice.y / th,
+                                         (s->slice.x + s->slice.width) / tw,
+                                         (s->slice.y + s->slice.height) / th,
+                                         1.0f);
             }
         }
       return;
