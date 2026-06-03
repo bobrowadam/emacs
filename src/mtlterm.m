@@ -2703,6 +2703,29 @@ mtl_update_begin (struct frame *f)
      end it cleanly before starting a new frame. */
   if (fd.encoder) [fd endFrame];
   [fd beginFrame];
+
+  /* Expose substitute: when the minibuffer (echo area) changes height, the
+     bottom of the layout shifts but the engine does not repaint every
+     uncovered pixel — it relies on an expose pass that NS gets via drawRect:
+     and Metal does not have.  (Seen as a stale wrap-arrow shard in the echo
+     fringe after a multi-line message shrank back.)  Clear the affected
+     bottom strip at the start of this same update; the update then redraws
+     the real rows on top, all within one present, so nothing flashes. */
+  if (WINDOWP (FRAME_MINIBUF_WINDOW (f)))
+    {
+      struct window *mini = XWINDOW (FRAME_MINIBUF_WINDOW (f));
+      int mh = WINDOW_PIXEL_HEIGHT (mini);
+      if (fd.lastMiniHeight > 0 && mh != fd.lastMiniHeight)
+        {
+          int maxh = mh > fd.lastMiniHeight ? mh : fd.lastMiniHeight;
+          int y0 = FRAME_PIXEL_HEIGHT (f) - maxh - FRAME_LINE_HEIGHT (f);
+          if (y0 < 0) y0 = 0;
+          [fd fillRect:NSMakeRect (0, y0, FRAME_PIXEL_WIDTH (f),
+                                    FRAME_PIXEL_HEIGHT (f) - y0)
+                 color:ns_color_to_pixel (FRAME_BACKGROUND_COLOR (f))];
+        }
+      fd.lastMiniHeight = mh;
+    }
 }
 
 static void

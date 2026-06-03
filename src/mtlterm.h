@@ -174,6 +174,11 @@ typedef struct mtl_spring {
    the whole clear+redraw sequence is shown in one go (no flicker). */
 @property (nonatomic, assign) BOOL                        needsPresent;
 
+/* Expose substitute: last known pixel height of the minibuffer window.  When it
+   changes, update_begin clears the affected bottom strip (NS relies on its
+   drawRect: expose path for the uncovered pixels; Metal has none). */
+@property (nonatomic, assign) int                         lastMiniHeight;
+
 /* Main Emacs render cycle (renders to staticTexture) */
 - (void)beginFrame;
 - (void)endFrame;
