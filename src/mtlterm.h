@@ -263,6 +263,9 @@ extern MtlFrameData *mtl_get_frame_data (struct frame *f);
 
 MtlGlyphCacheEntry *mtl_cache_glyph (CTFontRef font, uint32_t codepoint);
 
+/* Pre-rasterize printable ASCII for FRAME's default face (atlas warm-up). */
+extern void mtl_warm_glyph_cache (struct frame *f);
+
 extern bool mtl_render_offscreen_png (const char *path, int w, int h,
                                        void (^draw)(id<MTLRenderCommandEncoder>));
 extern bool mtl_render_text_png (const char *path);

@@ -111,6 +111,11 @@ FRAME must be a live graphical NS frame.  */)
      The NS terminal still handles events, menus, and scrollbars. */
   mtl_patch_terminal_rif (f);
 
+  /* Warm the glyph atlas with printable ASCII for the default face so the
+     first big redraw (e.g. first tab switch) doesn't rasterize everything at
+     once, which showed as a visible blink. */
+  mtl_warm_glyph_cache (f);
+
   /* Begin Metal rendering for this frame */
   [fd beginFrame];
   [fd endFrame];

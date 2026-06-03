@@ -1820,6 +1820,20 @@ mtl_ctfont_for_face (struct face *face)
   return (CTFontRef)ptr;
 }
 
+/* Pre-rasterize the printable ASCII range for FRAME's default face into the
+   glyph atlas.  Called from mtl-enable-for-frame so the first full redraw of
+   new content (e.g. the first tab switch) does not pay the whole rasterization
+   cost at once, which showed up as a visible blink. */
+void
+mtl_warm_glyph_cache (struct frame *f)
+{
+  struct face *face = FACE_FROM_ID_OR_NULL (f, DEFAULT_FACE_ID);
+  CTFontRef ctfont = mtl_ctfont_for_face (face);
+  if (!ctfont) return;
+  for (uint32_t c = 32; c < 127; c++)
+    mtl_cache_glyph (ctfont, c);
+}
+
 /* -----------------------------------------------------------------------
    Phase 5: inline image support — NSImage (EmacsImage) → MTLTexture
    ----------------------------------------------------------------------- */
