@@ -1278,15 +1278,25 @@ easing_apply (MtlScrollEasing mode, float t)
 
 - (void)endFrame
 {
+  [self endFramePresent:YES];
+}
+
+/* Commit the static-texture draws.  When PRESENT is NO, only the static texture
+   is updated and the on-screen present is deferred (needsPresent), so a sequence
+   of immediate draws (clear_mouse_face + show_mouse_face) is shown in a single
+   composite by flush_display instead of flickering through each step. */
+- (void)endFramePresent:(BOOL)present
+{
   if (!self.encoder) return;
   [self.encoder endEncoding];
   [self.cmdBuf commit];
-  /* Do NOT present here — compositor presents via compositeToScreen */
   self.encoder = nil;
   self.cmdBuf  = nil;
   self.drawable = nil;
-  /* Immediately composite so Emacs redisplay is visible */
-  [self compositeToScreen];
+  if (present)
+    [self compositeToScreen];
+  else
+    self.needsPresent = YES;
 }
 
 - (void)compositeToScreen
@@ -1295,6 +1305,8 @@ easing_apply (MtlScrollEasing mode, float t)
 
   id<CAMetalDrawable> drawable = [self.metalLayer nextDrawable];
   if (!drawable) return;
+
+  self.needsPresent = NO;   /* about to present whatever is in the static texture */
 
   NSSize sz = self.metalLayer.frame.size;
   MtlAnimator *anim = self.animator;
@@ -2128,17 +2140,25 @@ mtl_draw_glyph_string (struct glyph_string *s)
   MtlFrameData *fd = mtl_get_frame_data (s->f);
   if (!fd) return;
 
-  BOOL opened_here = NO;
-  if (!fd.encoder)
+  /* If we are outside the normal update_begin/end cycle (mouse-face highlight
+     and other immediate draws), wrap this one string in its own frame: open,
+     draw, and COMMIT to the static texture, but DEFER the on-screen present.
+     Presenting on every immediate draw flickered (a mouse move runs
+     clear_mouse_face + show_mouse_face = several draws, each flashing the
+     intermediate state); leaving the encoder open across draws instead made the
+     state leak into the next click/redisplay.  Committing per draw keeps the
+     pipeline clean, and deferring the present lets mtl_flush_display show the
+     whole sequence in one composite. */
+  if (fd.encoder)
+    {
+      mtl_draw_glyph_string_impl (s);
+    }
+  else
     {
       [fd beginFrame];
-      opened_here = YES;
+      mtl_draw_glyph_string_impl (s);
+      [fd endFramePresent:NO];
     }
-
-  mtl_draw_glyph_string_impl (s);
-
-  if (opened_here)
-    [fd endFrame];
 }
 
 static void
@@ -2231,7 +2251,13 @@ mtl_flush_display (struct frame *f)
      The bug in Phase 2 was calling beginFrame here, which left an orphaned
      encoder that never got endEncoding, causing an assertion failure. */
   MtlFrameData *fd = mtl_get_frame_data (f);
-  if (fd && fd.encoder) [fd endFrame];
+  if (!fd) return;
+  if (fd.encoder)
+    [fd endFrame];
+  else if (fd.needsPresent)
+    /* Present the deferred immediate draws (mouse-face highlight, etc.) that
+       were committed to the static texture without presenting. */
+    [fd compositeToScreen];
 }
 
 static void

@@ -169,6 +169,11 @@ typedef struct mtl_spring {
    the start of the next frame, when a render encoder is active. */
 @property (nonatomic, strong) NSMutableArray             *pendingClears;
 
+/* F1: immediate draws (mouse-face highlight, etc.) commit to the static texture
+   but defer presenting; this flag tells flush_display a present is pending so
+   the whole clear+redraw sequence is shown in one go (no flicker). */
+@property (nonatomic, assign) BOOL                        needsPresent;
+
 /* Main Emacs render cycle (renders to staticTexture) */
 - (void)beginFrame;
 - (void)endFrame;
