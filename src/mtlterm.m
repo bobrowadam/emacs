@@ -675,8 +675,12 @@ mtl_rasterize_glyph_id (CTFontRef font, CGGlyph cgGlyph, uint64_t key)
      bh-tall cell (Core Graphics draws y-up).  All draw sites expect bearing_y to
      be the distance from the cell's TOP edge down to the baseline, so that
      y0 = baseline - bearing_y lands the cell top correctly.  That distance is
-     (bh - 1 - raster_oy).  The previous code stored raster_oy itself (the
-     descent), which dropped every glyph ~one ascent too low. */
+     (bh - raster_oy): the row at top-down index r covers CG y in
+     [bh-1-r, bh-r), so the baseline CG y = raster_oy lies bh - raster_oy rows
+     below the top edge.  The previous (bh - 1 - raster_oy) left every glyph one
+     pixel LOWER than the NS backend across the whole frame (verified by
+     cross-correlation: shifting Metal text up 1px dropped the per-row mean
+     error from ~40 to ~3 gray levels). */
   int raster_oy = (int)(floor (-bbox.origin.y) + 1);
 
   entry->atlas_x   = g_atlas_next_x;
@@ -684,7 +688,7 @@ mtl_rasterize_glyph_id (CTFontRef font, CGGlyph cgGlyph, uint64_t key)
   entry->width     = bw;
   entry->height    = bh;
   entry->bearing_x = (int)(floor (-bbox.origin.x) + 1);
-  entry->bearing_y = bh - 1 - raster_oy;
+  entry->bearing_y = bh - raster_oy;
   entry->advance_x = (float)(adv.width / s);
 
   g_atlas_next_x += bw + 1;
