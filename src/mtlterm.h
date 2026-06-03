@@ -10,6 +10,8 @@
 #import <Metal/Metal.h>
 #import <QuartzCore/QuartzCore.h>
 #import <CoreText/CoreText.h>
+#import <AVFoundation/AVFoundation.h>
+#import <CoreVideo/CoreVideo.h>
 
 #include "dispextern.h"
 #include "frame.h"
@@ -141,6 +143,38 @@ typedef struct mtl_spring {
 @end
 
 /* -----------------------------------------------------------------------
+   MtlVideoPlayer — inline video playback (Fase H2).
+   AVPlayer decodes; AVPlayerItemVideoOutput hands BGRA pixel buffers that
+   CVMetalTextureCache wraps as Metal textures with zero copies; the
+   compositor draws the current frame as a textured quad over the static
+   texture each present, and the animator's CADisplayLink keeps presents
+   flowing while playback is active.
+   ----------------------------------------------------------------------- */
+
+@interface MtlVideoPlayer : NSObject
+@property (nonatomic, strong) AVPlayer                 *player;
+@property (nonatomic, strong) AVPlayerItemVideoOutput  *output;
+@property (nonatomic, assign) CVMetalTextureCacheRef    textureCache;
+/* Keep the CoreVideo wrapper alive while its MTLTexture is in use. */
+@property (nonatomic, assign) CVMetalTextureRef         currentCVTexture;
+@property (nonatomic, strong) id<MTLTexture>            currentTexture;
+@property (nonatomic, assign) NSRect                    rect;  /* logical px */
+/* Window-interior clip (logical px); NSZeroRect = no clipping.  Keeps a
+   half-scrolled video from bleeding over the mode line. */
+@property (nonatomic, assign) NSRect                    clipRect;
+@property (nonatomic, assign) BOOL                      loop;
+/* NSNotificationCenter block token for loop mode (retained; this file is
+   compiled without ARC, so raw ivar assignments would not retain). */
+@property (nonatomic, strong) id                        endObserver;
+
+- (instancetype)initWithURL:(NSURL *)url rect:(NSRect)rect loop:(BOOL)loop;
+/* Latest decoded frame as a Metal texture (nil before the first frame). */
+- (id<MTLTexture>)textureForNow;
+- (BOOL)isPlaying;
+- (void)shutdown;
+@end
+
+/* -----------------------------------------------------------------------
    MtlFrameData — per-frame Metal rendering state.
    Stored as ObjC associated object on EmacsView.
    ----------------------------------------------------------------------- */
@@ -186,6 +220,10 @@ typedef struct mtl_spring {
    flash there because AppKit coalesces the backing-store flushes. */
 @property (nonatomic, assign) BOOL                        cycleSawClear;
 @property (nonatomic, assign) BOOL                        cycleSawDraw;
+
+/* Fase H2: active inline video (one per frame for now), drawn by
+   compositeToScreen over the static texture. */
+@property (nonatomic, strong) MtlVideoPlayer             *videoPlayer;
 
 /* Main Emacs render cycle (renders to staticTexture) */
 - (void)beginFrame;
@@ -278,6 +316,15 @@ MtlGlyphCacheEntry *mtl_cache_glyph (CTFontRef font, uint32_t codepoint);
 
 /* Pre-rasterize printable ASCII for FRAME's default face (atlas warm-up). */
 extern void mtl_warm_glyph_cache (struct frame *f);
+
+/* Fase H2: inline video (one player per frame). */
+extern bool mtl_video_open (struct frame *f, const char *path,
+                            int x, int y, int w, int h, bool loop);
+extern bool mtl_video_close (struct frame *f);
+extern bool mtl_video_set_paused (struct frame *f, bool paused);
+extern bool mtl_video_set_rect (struct frame *f, int x, int y, int w, int h);
+extern bool mtl_video_set_clip (struct frame *f, int x, int y, int w, int h);
+extern bool mtl_video_tick (struct frame *f);
 
 extern bool mtl_render_offscreen_png (const char *path, int w, int h,
                                        void (^draw)(id<MTLRenderCommandEncoder>));

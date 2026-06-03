@@ -64,7 +64,7 @@
 ;; Helper functions (must be defined before defcustom :set functions use them)
 
 (defun mtl--cursor-mode-number (mode)
-  "Convert cursor MODE symbol to integer for mtl-cursor-mode."
+  "Convert cursor MODE symbol to integer for `mtl-cursor-mode'."
   (pcase mode
     ('block    0)
     ('spring   1)
@@ -77,7 +77,7 @@
     (_ 1)))
 
 (defun mtl--scroll-easing-number (easing)
-  "Convert EASING symbol to integer for mtl-scroll-effect."
+  "Convert EASING symbol to integer for `mtl-scroll-effect'."
   (pcase easing
     ('none            0)
     ('linear          1)
@@ -171,7 +171,7 @@ The NS backend still handles events, menus, and scrollbars."
     (error "mtl-enable: Metal is not available on this system"))
   (let ((f (or frame (selected-frame))))
     (unless (framep f)
-      (error "mtl-enable: argument is not a frame"))
+      (error "Mtl-enable: argument is not a frame"))
     (mtl-enable-for-frame f)
     ;; Apply current configuration
     (mtl-cursor-mode (mtl--cursor-mode-number mtl-cursor-animation))
@@ -222,6 +222,62 @@ The NS backend still handles events, menus, and scrollbars."
                                     "ease-out-cubic" "spring" "ease-in-out-cubic")
                                   nil t))))
   (setopt mtl-scroll-easing easing))
+
+;; ---------------------------------------------------------------------------
+;; Inline video (Fase H2)
+
+(defvar mtl--video-state nil
+  "Active inline video: (MARKER WIDTH HEIGHT TIMER FRAME), or nil.")
+
+(defun mtl--video-sync ()
+  "Track the video placeholder: move/clip the GPU rect and present a frame.
+Runs on a 30fps timer started by `mtl-video-insert'.  Follows scrolling
+and window changes; hides the video while its position is off-screen."
+  (when mtl--video-state
+    (pcase-let ((`(,marker ,w ,h ,_timer ,frame) mtl--video-state))
+      (if (not (and (frame-live-p frame) (marker-buffer marker)))
+          (mtl-video-stop)
+        (let* ((win (get-buffer-window (marker-buffer marker) frame))
+               (vis (and win (pos-visible-in-window-p marker win t))))
+          (if (not (and vis (listp vis)))
+              ;; Not visible: park the rect off-screen but keep decoding.
+              (mtl-video-move 0 -32768 w h nil frame)
+            (let* ((edges (window-inside-pixel-edges win))
+                   (x (+ (nth 0 edges) (nth 0 vis)))
+                   (y (+ (nth 1 edges) (nth 1 vis))))
+              (mtl-video-move x y w h edges frame)))
+          (mtl-video-tick frame))))))
+
+;;;###autoload
+(defun mtl-video-insert (file width height &optional loop)
+  "Insert a WIDTH x HEIGHT placeholder at point and play video FILE over it.
+The placeholder is a space with a pixel-sized display spec; the GPU
+composites the video at its position every frame, following scrolling
+\(clipped to the window interior).  With LOOP non-nil, restart playback
+at the end.  One video per frame; a previous one is replaced."
+  (interactive "fVideo file: \nnWidth (px): \nnHeight (px): ")
+  (mtl-video-stop)
+  (insert (propertize " "
+                      'display `(space :width (,width) :height (,height))
+                      'mtl-video file))
+  (let ((marker (copy-marker (1- (point)))))
+    ;; Park off-screen; the first sync tick positions it for real.
+    (unless (mtl-video-open file 0 -32768 width height loop)
+      (error "mtl-video-open failed for %s" file))
+    (setq mtl--video-state
+          (list marker width height
+                (run-at-time 0 0.033 #'mtl--video-sync)
+                (selected-frame)))))
+
+;;;###autoload
+(defun mtl-video-stop ()
+  "Stop and remove the inline video, canceling its sync timer."
+  (interactive)
+  (when mtl--video-state
+    (pcase-let ((`(,_marker ,_w ,_h ,timer ,frame) mtl--video-state))
+      (when (timerp timer) (cancel-timer timer))
+      (when (frame-live-p frame) (mtl-video-close frame)))
+    (setq mtl--video-state nil)))
 
 ;; ---------------------------------------------------------------------------
 ;; Startup integration

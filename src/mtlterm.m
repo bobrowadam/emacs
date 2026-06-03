@@ -850,6 +850,20 @@ easing_apply (MtlScrollEasing mode, float t)
   }
 }
 
+/* Sequence tracing for present-flow debugging (MTL_LOG_SEQ=1). */
+static BOOL
+mtl_log_seq_p (void)
+{
+  static int on = -1;
+  if (on < 0) on = getenv ("MTL_LOG_SEQ") != NULL;
+  return on > 0;
+}
+
+#define MTL_SEQ(fmt, ...)                                               \
+  do { if (mtl_log_seq_p ())                                            \
+         fprintf (stderr, "[mtlseq %.3f] " fmt "\n",                    \
+                  CACurrentMediaTime (), ##__VA_ARGS__); } while (0)
+
 /* -----------------------------------------------------------------------
    @implementation MtlAnimator
    ----------------------------------------------------------------------- */
@@ -1025,11 +1039,134 @@ easing_apply (MtlScrollEasing mode, float t)
       needsComposite = YES;
     }
 
+  /* Fase H2: while a video plays, every tick presents so the compositor
+     samples the freshest decoded frame. */
+  if (fd.videoPlayer && [fd.videoPlayer isPlaying])
+    needsComposite = YES;
+
   if (needsComposite || self.cursorDirty)
     {
       self.cursorDirty = NO;
       [fd compositeToScreen];
     }
+}
+
+@end
+
+/* -----------------------------------------------------------------------
+   @implementation MtlVideoPlayer (Fase H2: inline video)
+   ----------------------------------------------------------------------- */
+
+@implementation MtlVideoPlayer
+
+/* NOTE: this file is compiled without ARC; always go through the property
+   setters (retain semantics), never raw ivar assignment, or the AVPlayer
+   graph gets autoreleased under us. */
+- (instancetype)initWithURL:(NSURL *)url rect:(NSRect)rect loop:(BOOL)loop
+{
+  self = [super init];
+  if (!self) return nil;
+
+  AVPlayerItem *item = [AVPlayerItem playerItemWithURL:url];
+  NSDictionary *attrs = @{
+    (id) kCVPixelBufferPixelFormatTypeKey : @(kCVPixelFormatType_32BGRA),
+    (id) kCVPixelBufferMetalCompatibilityKey : @YES,
+  };
+  self.output = [[[AVPlayerItemVideoOutput alloc]
+                   initWithPixelBufferAttributes:attrs] autorelease];
+  [item addOutput:self.output];
+
+  self.player = [AVPlayer playerWithPlayerItem:item];
+  self.player.actionAtItemEnd = loop ? AVPlayerActionAtItemEndNone
+                                     : AVPlayerActionAtItemEndPause;
+  if (loop)
+    self.endObserver = [[NSNotificationCenter defaultCenter]
+      addObserverForName:AVPlayerItemDidPlayToEndTimeNotification
+                  object:item
+                   queue:[NSOperationQueue mainQueue]
+              usingBlock:^(NSNotification *note) {
+                (void) note;
+                [item seekToTime:kCMTimeZero completionHandler:nil];
+              }];
+
+  CVMetalTextureCacheRef cache = NULL;
+  CVMetalTextureCacheCreate (NULL, NULL, g_device, NULL, &cache);
+  self.textureCache = cache;
+  self.rect = rect;
+  self.clipRect = NSZeroRect;
+  self.loop = loop;
+  [self.player play];
+  return self;
+}
+
+- (BOOL)isPlaying
+{
+  return self.player != nil && self.player.rate != 0.0f;
+}
+
+/* Wrap the newest decoded pixel buffer as a Metal texture (zero copy via
+   CVMetalTextureCache).  Falls back to the previous frame's texture when the
+   output has nothing new, so redraws between video frames keep the picture. */
+- (id<MTLTexture>)textureForNow
+{
+  if (!self.output || !self.textureCache) return self.currentTexture;
+
+  CMTime t = [self.output itemTimeForHostTime:CACurrentMediaTime ()];
+  if ([self.output hasNewPixelBufferForItemTime:t])
+    {
+      CVPixelBufferRef pb = [self.output copyPixelBufferForItemTime:t
+                                                  itemTimeForDisplay:NULL];
+      if (pb)
+        {
+          size_t w = CVPixelBufferGetWidth (pb);
+          size_t h = CVPixelBufferGetHeight (pb);
+          CVMetalTextureRef cvtex = NULL;
+          if (CVMetalTextureCacheCreateTextureFromImage (
+                NULL, self.textureCache, pb, NULL,
+                MTLPixelFormatBGRA8Unorm, w, h, 0, &cvtex)
+              == kCVReturnSuccess && cvtex)
+            {
+              /* The MTLTexture is only valid while its CV wrapper lives;
+                 release the previous wrapper now that it is replaced. */
+              if (self.currentCVTexture)
+                CFRelease (self.currentCVTexture);
+              self.currentCVTexture = cvtex;
+              self.currentTexture = CVMetalTextureGetTexture (cvtex);
+            }
+          CVPixelBufferRelease (pb);
+        }
+    }
+  return self.currentTexture;
+}
+
+- (void)shutdown
+{
+  [self.player pause];
+  if (self.endObserver)
+    {
+      [[NSNotificationCenter defaultCenter] removeObserver:self.endObserver];
+      self.endObserver = nil;
+    }
+  self.player = nil;
+  self.output = nil;
+  self.currentTexture = nil;
+  if (self.currentCVTexture)
+    {
+      CFRelease (self.currentCVTexture);
+      self.currentCVTexture = NULL;
+    }
+  if (self.textureCache)
+    {
+      CVMetalTextureCacheFlush (self.textureCache, 0);
+      CFRelease (self.textureCache);
+      self.textureCache = NULL;
+    }
+}
+
+- (void)dealloc
+{
+  [self shutdown];
+  [super dealloc];
 }
 
 @end
@@ -1400,20 +1537,6 @@ easing_apply (MtlScrollEasing mode, float t)
     self.needsPresent = YES;
 }
 
-/* Sequence tracing for present-flow debugging (MTL_LOG_SEQ=1). */
-static BOOL
-mtl_log_seq_p (void)
-{
-  static int on = -1;
-  if (on < 0) on = getenv ("MTL_LOG_SEQ") != NULL;
-  return on > 0;
-}
-
-#define MTL_SEQ(fmt, ...)                                               \
-  do { if (mtl_log_seq_p ())                                            \
-         fprintf (stderr, "[mtlseq %.3f] " fmt "\n",                    \
-                  CACurrentMediaTime (), ##__VA_ARGS__); } while (0)
-
 - (void)compositeToScreen
 {
   if (!self.staticTexture || !g_blit_pipeline) return;
@@ -1421,7 +1544,12 @@ mtl_log_seq_p (void)
   id<CAMetalDrawable> drawable = [self.metalLayer nextDrawable];
   if (!drawable) return;
 
-  MTL_SEQ ("PRESENT");
+  MTL_SEQ ("PRESENT layer=%.0fx%.0f drawable=%lux%lu static=%lux%lu",
+           self.metalLayer.frame.size.width, self.metalLayer.frame.size.height,
+           (unsigned long) drawable.texture.width,
+           (unsigned long) drawable.texture.height,
+           (unsigned long) self.staticTexture.width,
+           (unsigned long) self.staticTexture.height);
 
   self.needsPresent = NO;   /* about to present whatever is in the static texture */
 
@@ -1457,6 +1585,65 @@ mtl_log_seq_p (void)
     [enc setFragmentSamplerState:g_nearest_sampler atIndex:0];
     [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
   }
+
+  /* Fase H2: inline video overlay.  Drawn over the static texture so the
+     redisplay engine can keep treating the placeholder area as ordinary
+     buffer background. */
+  MtlVideoPlayer *vp = self.videoPlayer;
+  if (vp)
+    {
+      id<MTLTexture> vtex = [vp textureForNow];
+      if (vtex && g_image_pipeline)
+        {
+          /* Clip to the window interior so a half-scrolled video does not
+             bleed over the mode line or a neighboring window. */
+          NSRect cr = vp.clipRect;
+          BOOL clipped = !NSIsEmptyRect (cr);
+          if (clipped)
+            {
+              CGSize dsz = self.metalLayer.drawableSize;
+              double scx = sz.width  > 0 ? dsz.width  / sz.width  : 1.0;
+              double scy = sz.height > 0 ? dsz.height / sz.height : 1.0;
+              long tw = (long) drawable.texture.width;
+              long th = (long) drawable.texture.height;
+              long cx0 = lround (NSMinX (cr) * scx);
+              long cy0 = lround (NSMinY (cr) * scy);
+              long cx1 = lround (NSMaxX (cr) * scx);
+              long cy1 = lround (NSMaxY (cr) * scy);
+              cx0 = MAX (0, MIN (cx0, tw)); cy0 = MAX (0, MIN (cy0, th));
+              cx1 = MAX (cx0, MIN (cx1, tw)); cy1 = MAX (cy0, MIN (cy1, th));
+              MTLScissorRect sc = { (NSUInteger) cx0, (NSUInteger) cy0,
+                                    (NSUInteger) (cx1 - cx0),
+                                    (NSUInteger) (cy1 - cy0) };
+              if (sc.width == 0 || sc.height == 0)
+                sc = (MTLScissorRect) {0, 0, 1, 1};
+              [enc setScissorRect:sc];
+            }
+
+          typedef struct { float x, y, u, v, a; } ImgVert;
+          NSRect vr = vp.rect;
+          float x0 = NSMinX (vr), y0 = NSMinY (vr);
+          float x1 = NSMaxX (vr), y1 = NSMaxY (vr);
+          ImgVert verts[6] = {
+            {x0,y0, 0,0,1}, {x1,y0, 1,0,1}, {x0,y1, 0,1,1},
+            {x1,y0, 1,0,1}, {x1,y1, 1,1,1}, {x0,y1, 0,1,1},
+          };
+          [enc setRenderPipelineState:g_image_pipeline];
+          [enc setVertexBytes:verts length:sizeof (verts) atIndex:0];
+          [enc setVertexBuffer:self.uniformBuffer offset:0 atIndex:1];
+          [enc setFragmentTexture:vtex atIndex:0];
+          [enc setFragmentSamplerState:g_sampler atIndex:0];
+          [enc drawPrimitives:MTLPrimitiveTypeTriangle
+                  vertexStart:0 vertexCount:6];
+
+          if (clipped)
+            {
+              MTLScissorRect full = { 0, 0, drawable.texture.width,
+                                      drawable.texture.height };
+              [enc setScissorRect:full];
+            }
+        }
+    }
 
   /* Animation overlay (cursor effects, trail, particles) is opt-in.  When off,
      the cursor lives in the static texture (drawn by mtl_draw_window_cursor),
@@ -2855,6 +3042,95 @@ mtl_flush_display (struct frame *f)
     /* Present the deferred immediate draws (mouse-face highlight, etc.) that
        were committed to the static texture without presenting. */
     [fd compositeToScreen];
+}
+
+/* ---------------------------------------------------------------------------
+   Fase H2: inline video API (called from mtlfns.m).
+   --------------------------------------------------------------------------- */
+
+bool
+mtl_video_open (struct frame *f, const char *path, int x, int y,
+                int w, int h, bool loop)
+{
+  MtlFrameData *fd = mtl_get_frame_data (f);
+  if (!fd) return false;
+
+  if (fd.videoPlayer)
+    {
+      [fd.videoPlayer shutdown];
+      fd.videoPlayer = nil;
+    }
+
+  NSString *ns_path = [NSString stringWithUTF8String:path];
+  if (!ns_path || ![[NSFileManager defaultManager] fileExistsAtPath:ns_path])
+    return false;
+
+  MtlVideoPlayer *vp =
+    [[MtlVideoPlayer alloc] initWithURL:[NSURL fileURLWithPath:ns_path]
+                                   rect:NSMakeRect (x, y, w, h)
+                                   loop:loop];
+  if (!vp) return false;
+  fd.videoPlayer = vp;
+
+  /* The animator's CADisplayLink drives presents during playback. */
+  [fd.animator startAnimating];
+  return true;
+}
+
+bool
+mtl_video_close (struct frame *f)
+{
+  MtlFrameData *fd = mtl_get_frame_data (f);
+  if (!fd || !fd.videoPlayer) return false;
+  [fd.videoPlayer shutdown];
+  fd.videoPlayer = nil;
+  if (!g_mtl_animations_enabled)
+    [fd.animator stopAnimating];
+  [fd compositeToScreen];   /* repaint without the overlay */
+  return true;
+}
+
+bool
+mtl_video_set_paused (struct frame *f, bool paused)
+{
+  MtlFrameData *fd = mtl_get_frame_data (f);
+  if (!fd || !fd.videoPlayer) return false;
+  if (paused)
+    [fd.videoPlayer.player pause];
+  else
+    [fd.videoPlayer.player play];
+  return true;
+}
+
+bool
+mtl_video_set_rect (struct frame *f, int x, int y, int w, int h)
+{
+  MtlFrameData *fd = mtl_get_frame_data (f);
+  if (!fd || !fd.videoPlayer) return false;
+  fd.videoPlayer.rect = NSMakeRect (x, y, w, h);
+  return true;
+}
+
+bool
+mtl_video_set_clip (struct frame *f, int x, int y, int w, int h)
+{
+  MtlFrameData *fd = mtl_get_frame_data (f);
+  if (!fd || !fd.videoPlayer) return false;
+  fd.videoPlayer.clipRect = NSMakeRect (x, y, w, h);
+  return true;
+}
+
+/* Present a fresh composite if a video is active.  Called from a Lisp-level
+   timer (mtl.el): Emacs's event loop starves the CADisplayLink while idle,
+   so Lisp timers are what reliably drives playback presents. */
+bool
+mtl_video_tick (struct frame *f)
+{
+  MtlFrameData *fd = mtl_get_frame_data (f);
+  if (!fd || !fd.videoPlayer) return false;
+  if ([fd.videoPlayer isPlaying] && !fd.encoder)
+    [fd compositeToScreen];
+  return true;
 }
 
 static void

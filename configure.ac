@@ -2967,7 +2967,9 @@ if test "${with_mtl}" = yes; then
   AC_LANG_POP([Objective C])
   if test "${HAVE_MTL}" = yes; then
     MTL_OBJC_OBJ="mtlterm.o mtlfns.o"
-    MTL_LIBS="-framework Metal -framework QuartzCore -framework CoreText"
+    dnl AVFoundation/CoreMedia/CoreVideo: inline video (AVPlayerItemVideoOutput
+    dnl decoded straight into Metal textures via CVMetalTextureCache).
+    MTL_LIBS="-framework Metal -framework QuartzCore -framework CoreText -framework AVFoundation -framework CoreMedia -framework CoreVideo"
     dnl Metal piggybacks on NS infrastructure; keep window_system=nextstep
     dnl so that term_header=nsterm.h and all NS macros remain available.
   fi
@@ -7528,7 +7530,10 @@ case "$opsys" in
 	fi
      fi
      if test "$HAVE_MTL" = "yes"; then
-        libs_nsgui="$libs_nsgui -framework Metal -framework CoreText"
+        dnl AVFoundation/CoreMedia/CoreVideo: inline video (Fase H2).
+        libs_nsgui="$libs_nsgui -framework Metal -framework CoreText \
+                    -framework AVFoundation -framework CoreMedia \
+                    -framework CoreVideo"
      fi
    else
      libs_nsgui=

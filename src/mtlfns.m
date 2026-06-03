@@ -22,6 +22,7 @@
 #include "fontset.h"
 #include "font.h"
 #include "character.h"
+#include "coding.h"
 #include "macfont.h"
 
 #include "mtlterm.h"
@@ -453,6 +454,117 @@ DEFUN ("mtl-animation-status", Fmtl_animation_status, Smtl_animation_status,
    Initialization
    ----------------------------------------------------------------------- */
 
+/* ---------------------------------------------------------------------------
+   Fase H2: inline video
+   --------------------------------------------------------------------------- */
+
+DEFUN ("mtl-video-open", Fmtl_video_open, Smtl_video_open, 5, 7, 0,
+       doc: /* Play video FILE over FRAME at X, Y sized WIDTH x HEIGHT pixels.
+X and Y are frame-relative logical pixels (top-left origin).  The video
+is decoded by AVFoundation straight into Metal textures and composited
+over the frame content every present; redisplay underneath continues
+normally.  If LOOP is non-nil, restart playback at the end.
+FRAME defaults to the selected frame.  One video per frame: opening a
+new one replaces the previous.  Returns t on success.  */)
+  (Lisp_Object file, Lisp_Object x, Lisp_Object y, Lisp_Object width,
+   Lisp_Object height, Lisp_Object loop, Lisp_Object frame)
+{
+  if (NILP (frame)) frame = Fselected_frame ();
+  CHECK_LIVE_FRAME (frame);
+  struct frame *f = XFRAME (frame);
+  CHECK_STRING (file);
+  CHECK_FIXNUM (x); CHECK_FIXNUM (y);
+  CHECK_FIXNUM (width); CHECK_FIXNUM (height);
+
+  Lisp_Object expanded = Fexpand_file_name (file, Qnil);
+  bool ok;
+  block_input ();
+  ok = mtl_video_open (f, SSDATA (ENCODE_FILE (expanded)),
+                       XFIXNUM (x), XFIXNUM (y),
+                       XFIXNUM (width), XFIXNUM (height),
+                       !NILP (loop));
+  unblock_input ();
+  return ok ? Qt : Qnil;
+}
+
+DEFUN ("mtl-video-close", Fmtl_video_close, Smtl_video_close, 0, 1, 0,
+       doc: /* Stop and remove the inline video on FRAME.
+FRAME defaults to the selected frame.  Returns t if a video was open.  */)
+  (Lisp_Object frame)
+{
+  if (NILP (frame)) frame = Fselected_frame ();
+  CHECK_LIVE_FRAME (frame);
+  bool ok;
+  block_input ();
+  ok = mtl_video_close (XFRAME (frame));
+  unblock_input ();
+  return ok ? Qt : Qnil;
+}
+
+DEFUN ("mtl-video-pause", Fmtl_video_pause, Smtl_video_pause, 1, 2, 0,
+       doc: /* Pause (PAUSED non-nil) or resume the inline video on FRAME.
+FRAME defaults to the selected frame.  Returns t if a video is open.  */)
+  (Lisp_Object paused, Lisp_Object frame)
+{
+  if (NILP (frame)) frame = Fselected_frame ();
+  CHECK_LIVE_FRAME (frame);
+  bool ok;
+  block_input ();
+  ok = mtl_video_set_paused (XFRAME (frame), !NILP (paused));
+  unblock_input ();
+  return ok ? Qt : Qnil;
+}
+
+DEFUN ("mtl-video-move", Fmtl_video_move, Smtl_video_move, 4, 6, 0,
+       doc: /* Move/resize the inline video on FRAME to X, Y, WIDTH, HEIGHT.
+Frame-relative logical pixels.  Optional CLIP is a list (LEFT TOP RIGHT
+BOTTOM), also frame-relative, that confines the video to a window's
+interior; nil removes clipping.  FRAME defaults to the selected frame.
+Returns t if a video is open.  */)
+  (Lisp_Object x, Lisp_Object y, Lisp_Object width, Lisp_Object height,
+   Lisp_Object clip, Lisp_Object frame)
+{
+  if (NILP (frame)) frame = Fselected_frame ();
+  CHECK_LIVE_FRAME (frame);
+  CHECK_FIXNUM (x); CHECK_FIXNUM (y);
+  CHECK_FIXNUM (width); CHECK_FIXNUM (height);
+  bool ok;
+  block_input ();
+  ok = mtl_video_set_rect (XFRAME (frame), XFIXNUM (x), XFIXNUM (y),
+                           XFIXNUM (width), XFIXNUM (height));
+  if (ok)
+    {
+      if (CONSP (clip))
+        {
+          int cl = XFIXNUM (Fnth (make_fixnum (0), clip));
+          int ct = XFIXNUM (Fnth (make_fixnum (1), clip));
+          int cr = XFIXNUM (Fnth (make_fixnum (2), clip));
+          int cb = XFIXNUM (Fnth (make_fixnum (3), clip));
+          mtl_video_set_clip (XFRAME (frame), cl, ct, cr - cl, cb - ct);
+        }
+      else
+        mtl_video_set_clip (XFRAME (frame), 0, 0, 0, 0);
+    }
+  unblock_input ();
+  return ok ? Qt : Qnil;
+}
+
+DEFUN ("mtl-video-tick", Fmtl_video_tick, Smtl_video_tick, 0, 1, 0,
+       doc: /* Present a fresh frame of the inline video on FRAME.
+Driven by a Lisp timer in mtl.el (Emacs's event loop starves the
+CADisplayLink while idle).  Returns t while a video is open, nil
+otherwise (letting the timer cancel itself).  */)
+  (Lisp_Object frame)
+{
+  if (NILP (frame)) frame = Fselected_frame ();
+  if (!FRAME_LIVE_P (XFRAME (frame))) return Qnil;
+  bool ok;
+  block_input ();
+  ok = mtl_video_tick (XFRAME (frame));
+  unblock_input ();
+  return ok ? Qt : Qnil;
+}
+
 void
 syms_of_mtlfns (void)
 {
@@ -472,6 +584,12 @@ syms_of_mtlfns (void)
   defsubr (&Smtl_animations);
   defsubr (&Smtl_capture_frame);
   defsubr (&Smtl_draw_stats);
+  /* Fase H2: inline video */
+  defsubr (&Smtl_video_open);
+  defsubr (&Smtl_video_close);
+  defsubr (&Smtl_video_pause);
+  defsubr (&Smtl_video_move);
+  defsubr (&Smtl_video_tick);
 }
 
 #endif /* HAVE_MTL */
