@@ -1043,7 +1043,7 @@ easing_apply (MtlScrollEasing mode, float t)
 - (void)openRenderEncoderClear:(BOOL)clear
 {
   struct frame *f = self.emacsFrame;
-  unsigned long bg = f ? ns_color_to_pixel (FRAME_BACKGROUND_COLOR (f)) : 0x2E3440;
+  unsigned long bg = f ? ns_color_to_pixel (FRAME_BACKGROUND_COLOR (f)) : 0xFFFFFF;
   float r, g, b;
   unpack_color (bg, &r, &g, &b);
 
@@ -1164,7 +1164,7 @@ easing_apply (MtlScrollEasing mode, float t)
   if (!needsClear && self.pendingClears.count)
     {
       struct frame *f = self.emacsFrame;
-      unsigned long bg = f ? ns_color_to_pixel (FRAME_BACKGROUND_COLOR (f)) : 0x2E3440;
+      unsigned long bg = f ? ns_color_to_pixel (FRAME_BACKGROUND_COLOR (f)) : 0xFFFFFF;
       for (NSValue *v in self.pendingClears)
         [self fillRect:[v rectValue] color:bg];
     }
@@ -1986,8 +1986,8 @@ mtl_draw_glyph_string_impl (struct glyph_string *s)
   if (!fd || !fd.encoder) { mtl_dgs_nofd_count++; return; }
 
   struct face *face = s->face;
-  unsigned long fg = face ? face->foreground : 0xECEFF4;
-  unsigned long bg = face ? face->background : 0x2E3440;
+  unsigned long fg = face ? face->foreground : 0x000000;
+  unsigned long bg = face ? face->background : 0xFFFFFF;
 
   /* When this string is drawn as the cursor (via draw_phys_cursor_glyph),
      invert: fill the background with the cursor color and draw the glyph in
@@ -1996,7 +1996,7 @@ mtl_draw_glyph_string_impl (struct glyph_string *s)
   if (s->hl == DRAW_CURSOR)
     {
       bg = ns_color_to_pixel (FRAME_CURSOR_COLOR (f));
-      fg = face ? face->background : 0x2E3440;
+      fg = face ? face->background : 0xFFFFFF;
     }
 
   /* Background fill */
