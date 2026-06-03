@@ -2129,6 +2129,53 @@ mtl_shade_color (unsigned long c, double level, bool lighten)
   return ((unsigned long) r << 16) | ((unsigned long) g << 8) | (unsigned long) b;
 }
 
+/* Compute the relief light/dark colors for glyph string S exactly like
+   ns_setup_relief_colors: NSColor highlight/shadowWithLevel on the face
+   background (or box color).  These are appearance-dynamic (dark mode shifts
+   the highlight), so a plain blend toward pure white/black does not match
+   what NS renders (e.g. the mode-line top edge: NS ~177 vs blend ~211). */
+static void
+mtl_relief_colors (struct glyph_string *s, unsigned long *light,
+                   unsigned long *dark)
+{
+  struct face *face = s->face;
+  unsigned long base = face->use_box_color_for_shadows_p
+                       ? face->box_color : face->background;
+  if (s->hl == DRAW_CURSOR)
+    base = ns_color_to_pixel (FRAME_CURSOR_COLOR (s->f));
+  NSColor *bc = [NSColor colorWithUnsignedLong:base];
+  NSColor *lc = [bc highlightWithLevel:0.4];
+  NSColor *dc = [bc shadowWithLevel:0.4];
+  *light = lc ? ns_color_to_pixel (lc) : mtl_shade_color (base, 0.4, true);
+  *dark  = dc ? ns_color_to_pixel (dc) : mtl_shade_color (base, 0.4, false);
+}
+
+/* Draw a relief inside rect R with simple rectangle edges (subset of
+   ns_draw_relief, good enough for the typical thin relief).  Raised: light
+   top/left + dark bottom/right; sunken: the inverse. */
+static void
+mtl_draw_relief (MtlFrameData *fd, struct glyph_string *s, NSRect r,
+                 int hth, int vth, bool raised_p,
+                 bool top_p, bool bot_p, bool left_p, bool right_p)
+{
+  unsigned long light, dark;
+  mtl_relief_colors (s, &light, &dark);
+  unsigned long tl = raised_p ? light : dark;
+  unsigned long br = raised_p ? dark  : light;
+  if (top_p)
+    [fd fillRect:NSMakeRect (NSMinX (r), NSMinY (r), NSWidth (r), hth)
+           color:tl];
+  if (bot_p)
+    [fd fillRect:NSMakeRect (NSMinX (r), NSMaxY (r) - hth, NSWidth (r), hth)
+           color:br];
+  if (left_p)
+    [fd fillRect:NSMakeRect (NSMinX (r), NSMinY (r), vth, NSHeight (r))
+           color:tl];
+  if (right_p)
+    [fd fillRect:NSMakeRect (NSMaxX (r) - vth, NSMinY (r), vth, NSHeight (r))
+           color:br];
+}
+
 /* Draw the face box / relief around glyph string S (mode line, buttons, etc.).
    Ports ns_dumpglyphs_box_or_relief + ns_draw_box/ns_draw_relief with simple
    rectangle edges (good enough for the typical 1px relief). */
@@ -2142,50 +2189,126 @@ mtl_draw_glyph_string_box (struct glyph_string *s, MtlFrameData *fd)
   int vth = abs (face->box_vertical_line_width);
   if (hth == 0 && vth == 0) return;
 
-  struct glyph *last_glyph = s->first_glyph + s->nchars - 1;
+  /* Image and composition strings have no usable nchars; their single glyph
+     carries the box flags (mirrors xterm's x_draw_glyph_string_box). */
+  struct glyph *last_glyph = (s->cmp || s->img)
+                             ? s->first_glyph
+                             : s->first_glyph + s->nchars - 1;
   int last_x = (s->row->full_width_p && !s->w->pseudo_window_p)
                ? WINDOW_RIGHT_EDGE_X (s->w)
                : window_box_right (s->w, s->area);
   int right_x = (s->row->full_width_p && s->extends_to_end_of_line_p
                  ? last_x - 1
                  : min (last_x, s->x + s->background_width) - 1);
-  bool left_p  = s->first_glyph->left_box_line_p;
-  bool right_p = last_glyph->right_box_line_p;
+  /* A mouse-face run gets box edges at its own boundaries, like NS. */
+  bool left_p  = (s->first_glyph->left_box_line_p
+                  || (s->hl == DRAW_MOUSE_FACE
+                      && (s->prev == NULL || s->prev->hl != s->hl)));
+  bool right_p = (last_glyph->right_box_line_p
+                  || (s->hl == DRAW_MOUSE_FACE
+                      && (s->next == NULL || s->next->hl != s->hl)));
 
   int x = s->x, y = s->y, w = right_x - s->x + 1, h = s->height;
   if (w <= 0 || h <= 0) return;
 
-  unsigned long tl, br;   /* top/left and bottom/right edge colors */
   if (face->box == FACE_SIMPLE_BOX)
-    tl = br = face->box_color;
+    {
+      unsigned long c = face->box_color;
+      [fd fillRect:NSMakeRect (x, y, w, hth) color:c];              /* top */
+      [fd fillRect:NSMakeRect (x, y + h - hth, w, hth) color:c];    /* bottom */
+      if (left_p)
+        [fd fillRect:NSMakeRect (x, y, vth, h) color:c];            /* left */
+      if (right_p)
+        [fd fillRect:NSMakeRect (x + w - vth, y, vth, h) color:c];  /* right */
+    }
+  else
+    mtl_draw_relief (fd, s, NSMakeRect (x, y, w, h), hth, vth,
+                     face->box == FACE_RAISED_BOX,
+                     true, true, left_p, right_p);
+}
+
+/* Draw the relief around image glyph string S (tab/tool bar buttons and
+   images with :relief).  Port of ns_draw_image_relief. */
+static void
+mtl_draw_image_relief (struct glyph_string *s, MtlFrameData *fd)
+{
+  int x1, y1, thick;
+  bool raised_p, top_p, bot_p, left_p, right_p;
+  int extra_x, extra_y;
+  int x = s->x;
+  int y = s->ybase - image_ascent (s->img, s->face, &s->slice);
+
+  if (s->face->box != FACE_NO_BOX
+      && s->first_glyph->left_box_line_p
+      && s->slice.x == 0)
+    x += max (s->face->box_vertical_line_width, 0);
+
+  if (s->slice.x == 0)
+    x += s->img->hmargin;
+  if (s->slice.y == 0)
+    y += s->img->vmargin;
+
+  if (s->hl == DRAW_IMAGE_SUNKEN || s->hl == DRAW_IMAGE_RAISED)
+    {
+      if (s->face->id == TAB_BAR_FACE_ID)
+        thick = (tab_bar_button_relief < 0
+                 ? DEFAULT_TAB_BAR_BUTTON_RELIEF
+                 : min (tab_bar_button_relief, 1000000));
+      else
+        thick = (tool_bar_button_relief < 0
+                 ? DEFAULT_TOOL_BAR_BUTTON_RELIEF
+                 : min (tool_bar_button_relief, 1000000));
+      raised_p = s->hl == DRAW_IMAGE_RAISED;
+    }
   else
     {
-      unsigned long base = face->use_box_color_for_shadows_p
-                           ? face->box_color : face->background;
-      if (s->hl == DRAW_CURSOR)
-        base = ns_color_to_pixel (FRAME_CURSOR_COLOR (s->f));
-      /* Use the same NSColor highlight/shadow used by ns_setup_relief_colors:
-         these are appearance-dynamic (dark mode shifts the highlight), so a
-         plain blend toward pure white/black does not match what NS renders
-         (e.g. the mode-line top edge: NS ~177 vs blend-to-white 211). */
-      NSColor *bc = [NSColor colorWithUnsignedLong:base];
-      NSColor *lc = [bc highlightWithLevel:0.4];
-      NSColor *dc = [bc shadowWithLevel:0.4];
-      unsigned long light = lc ? ns_color_to_pixel (lc)
-                               : mtl_shade_color (base, 0.4, true);
-      unsigned long dark  = dc ? ns_color_to_pixel (dc)
-                               : mtl_shade_color (base, 0.4, false);
-      bool raised = (face->box == FACE_RAISED_BOX);
-      tl = raised ? light : dark;
-      br = raised ? dark  : light;
+      thick = eabs (s->img->relief);
+      raised_p = s->img->relief > 0;
     }
 
-  [fd fillRect:NSMakeRect (x, y, w, hth) color:tl];                 /* top */
-  [fd fillRect:NSMakeRect (x, y + h - hth, w, hth) color:br];       /* bottom */
-  if (left_p)
-    [fd fillRect:NSMakeRect (x, y, vth, h) color:tl];               /* left */
-  if (right_p)
-    [fd fillRect:NSMakeRect (x + w - vth, y, vth, h) color:br];     /* right */
+  x1 = x + s->slice.width - 1;
+  y1 = y + s->slice.height - 1;
+
+  extra_x = extra_y = 0;
+  if (s->face->id == TAB_BAR_FACE_ID)
+    {
+      if (CONSP (Vtab_bar_button_margin)
+          && FIXNUMP (XCAR (Vtab_bar_button_margin))
+          && FIXNUMP (XCDR (Vtab_bar_button_margin)))
+        {
+          extra_x = XFIXNUM (XCAR (Vtab_bar_button_margin)) - thick;
+          extra_y = XFIXNUM (XCDR (Vtab_bar_button_margin)) - thick;
+        }
+      else if (FIXNUMP (Vtab_bar_button_margin))
+        extra_x = extra_y = XFIXNUM (Vtab_bar_button_margin) - thick;
+    }
+  if (s->face->id == TOOL_BAR_FACE_ID)
+    {
+      if (CONSP (Vtool_bar_button_margin)
+          && FIXNUMP (XCAR (Vtool_bar_button_margin))
+          && FIXNUMP (XCDR (Vtool_bar_button_margin)))
+        {
+          extra_x = XFIXNUM (XCAR (Vtool_bar_button_margin));
+          extra_y = XFIXNUM (XCDR (Vtool_bar_button_margin));
+        }
+      else if (FIXNUMP (Vtool_bar_button_margin))
+        extra_x = extra_y = XFIXNUM (Vtool_bar_button_margin);
+    }
+
+  top_p = bot_p = left_p = right_p = false;
+
+  if (s->slice.x == 0)
+    x -= thick + extra_x, left_p = true;
+  if (s->slice.y == 0)
+    y -= thick + extra_y, top_p = true;
+  if (s->slice.x + s->slice.width == s->img->width)
+    x1 += thick + extra_x, right_p = true;
+  if (s->slice.y + s->slice.height == s->img->height)
+    y1 += thick + extra_y, bot_p = true;
+
+  if (thick > 0)
+    mtl_draw_relief (fd, s, NSMakeRect (x, y, x1 - x + 1, y1 - y + 1),
+                     thick, thick, raised_p, top_p, bot_p, left_p, right_p);
 }
 
 /* Compute the underline offset below the baseline and its thickness, mirroring
@@ -2375,7 +2498,13 @@ mtl_draw_glyph_string_impl (struct glyph_string *s)
      box_line_width is 0, so this is identical to filling the full height. */
   if (!s->background_filled_p)
     {
-      int blw = face ? max (face->box_horizontal_line_width, 0) : 0;
+      /* Images get the full cell height: NS fills s->height without the box
+         inset there (ns_dumpglyphs_image notes the inset "was causing
+         problems w/tabbar mode"), and the face box is drawn after the
+         image anyway. */
+      int blw = (face && !(s->first_glyph
+                           && s->first_glyph->type == IMAGE_GLYPH))
+                ? max (face->box_horizontal_line_width, 0) : 0;
       NSRect bgr = NSMakeRect (s->x, s->y + blw,
                                 s->background_width, s->height - 2 * blw);
       [fd fillRect:bgr color:bg];
@@ -2393,9 +2522,14 @@ mtl_draw_glyph_string_impl (struct glyph_string *s)
           id<MTLTexture> tex = mtl_texture_for_image (img);
           if (tex)
             {
-              int x = s->x + s->img->hmargin;
-              int y = s->ybase - image_ascent (img, s->face, &s->slice)
-                      + s->img->vmargin;
+              int x = s->x;
+              int y = s->ybase - image_ascent (img, s->face, &s->slice);
+              /* Start to the right of a left box line, like NS. */
+              if (face && face->box != FACE_NO_BOX
+                  && s->first_glyph->left_box_line_p && s->slice.x == 0)
+                x += max (face->box_vertical_line_width, 0);
+              if (s->slice.x == 0) x += s->img->hmargin;
+              if (s->slice.y == 0) y += s->img->vmargin;
               /* The texture holds the full display-size image; sample only
                  this glyph string's slice (insert-sliced-image). */
               float tw = (float) tex.width, th = (float) tex.height;
@@ -2409,7 +2543,15 @@ mtl_draw_glyph_string_impl (struct glyph_string *s)
                                          (s->slice.y + s->slice.height) / th,
                                          1.0f);
             }
+          /* Relief around tab/tool bar buttons and :relief images. */
+          if (s->img->relief
+              || s->hl == DRAW_IMAGE_RAISED || s->hl == DRAW_IMAGE_SUNKEN)
+            mtl_draw_image_relief (s, fd);
         }
+      /* The face box is drawn after the image, like NS ("draw box if not
+         done already" at the end of ns_draw_glyph_string). */
+      if (face && face->box != FACE_NO_BOX)
+        mtl_draw_glyph_string_box (s, fd);
       return;
     }
 
