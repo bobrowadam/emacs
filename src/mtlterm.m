@@ -1999,11 +1999,16 @@ mtl_draw_glyph_string_impl (struct glyph_string *s)
       fg = face ? face->background : 0xFFFFFF;
     }
 
-  /* Background fill */
+  /* Background fill.  Inset vertically by the box line width, exactly like the
+     NS backend (ns_maybe_dumpglyphs_background): for a boxed face (e.g. the
+     selected tab-bar tab) this leaves the box edge rows untouched so the relief
+     drawn afterwards is not overwritten and then redrawn.  For unboxed faces
+     box_line_width is 0, so this is identical to filling the full height. */
   if (!s->background_filled_p)
     {
-      NSRect bgr = NSMakeRect (s->x, s->y,
-                                s->background_width, s->height);
+      int blw = face ? max (face->box_horizontal_line_width, 0) : 0;
+      NSRect bgr = NSMakeRect (s->x, s->y + blw,
+                                s->background_width, s->height - 2 * blw);
       [fd fillRect:bgr color:bg];
       s->background_filled_p = true;
     }
