@@ -1971,8 +1971,17 @@ mtl_draw_glyph_string_box (struct glyph_string *s, MtlFrameData *fd)
                            ? face->box_color : face->background;
       if (s->hl == DRAW_CURSOR)
         base = ns_color_to_pixel (FRAME_CURSOR_COLOR (s->f));
-      unsigned long light = mtl_shade_color (base, 0.4, true);
-      unsigned long dark  = mtl_shade_color (base, 0.4, false);
+      /* Use the same NSColor highlight/shadow used by ns_setup_relief_colors:
+         these are appearance-dynamic (dark mode shifts the highlight), so a
+         plain blend toward pure white/black does not match what NS renders
+         (e.g. the mode-line top edge: NS ~177 vs blend-to-white 211). */
+      NSColor *bc = [NSColor colorWithUnsignedLong:base];
+      NSColor *lc = [bc highlightWithLevel:0.4];
+      NSColor *dc = [bc shadowWithLevel:0.4];
+      unsigned long light = lc ? ns_color_to_pixel (lc)
+                               : mtl_shade_color (base, 0.4, true);
+      unsigned long dark  = dc ? ns_color_to_pixel (dc)
+                               : mtl_shade_color (base, 0.4, false);
       bool raised = (face->box == FACE_RAISED_BOX);
       tl = raised ? light : dark;
       br = raised ? dark  : light;
