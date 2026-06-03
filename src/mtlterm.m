@@ -1044,9 +1044,46 @@ easing_apply (MtlScrollEasing mode, float t)
 - (void)shiftGlyphsX:(int)x y:(int)y width:(int)w height:(int)h by:(int)shift;
 - (void)drawFringeBits:(unsigned short *)bits dh:(int)dh wd:(int)wd h:(int)h
                    atX:(int)x y:(int)y color:(unsigned long)color;
+- (void)applyClipRect:(NSRect)r;
+- (void)clearClipRect;
 @end
 
 @implementation MtlFrameData
+
+/* Clip subsequent draws on the current encoder to R (logical pixels), like the
+   NS backend's ns_focus clipping with get_glyph_string_clip_rect.  This is what
+   keeps a filled-box cursor on a tall row (e.g. an image line) at the size of
+   the character cell instead of the whole row, and stops overhangs from
+   bleeding outside the window area. */
+- (void)applyClipRect:(NSRect)r
+{
+  if (!self.encoder || !self.staticTexture) return;
+  CGSize dsz = self.metalLayer.drawableSize;
+  NSSize lsz = self.metalLayer.frame.size;
+  double scx = lsz.width  > 0 ? dsz.width  / lsz.width  : 1.0;
+  double scy = lsz.height > 0 ? dsz.height / lsz.height : 1.0;
+  long tw = (long) self.staticTexture.width;
+  long th = (long) self.staticTexture.height;
+  long x0 = lround (NSMinX (r) * scx), y0 = lround (NSMinY (r) * scy);
+  long x1 = lround (NSMaxX (r) * scx), y1 = lround (NSMaxY (r) * scy);
+  if (x0 < 0) x0 = 0;
+  if (y0 < 0) y0 = 0;
+  if (x1 > tw) x1 = tw;
+  if (y1 > th) y1 = th;
+  if (x1 <= x0 || y1 <= y0)
+    { x0 = tw - 1; y0 = th - 1; x1 = tw; y1 = th; }  /* effectively clip out */
+  MTLScissorRect sc = { (NSUInteger) x0, (NSUInteger) y0,
+                        (NSUInteger) (x1 - x0), (NSUInteger) (y1 - y0) };
+  [self.encoder setScissorRect:sc];
+}
+
+- (void)clearClipRect
+{
+  if (!self.encoder || !self.staticTexture) return;
+  MTLScissorRect sc = { 0, 0, self.staticTexture.width,
+                        self.staticTexture.height };
+  [self.encoder setScissorRect:sc];
+}
 
 /* Open a render command encoder targeting the static texture.  CLEAR wipes it to
    the frame background (only for a fresh/resized texture); otherwise LOAD
@@ -2481,14 +2518,24 @@ mtl_draw_glyph_string (struct glyph_string *s)
      state leak into the next click/redisplay.  Committing per draw keeps the
      pipeline clean, and deferring the present lets mtl_flush_display show the
      whole sequence in one composite. */
+  /* Clip to the same rect the NS backend uses (window area; narrowed to the
+     physical cursor box for DRAW_CURSOR strings, which is what keeps the
+     filled-box cursor character-sized on tall image rows). */
+  NSRect clip;
+  get_glyph_string_clip_rect (s, &clip);
+
   if (fd.encoder)
     {
+      [fd applyClipRect:clip];
       mtl_draw_glyph_string_impl (s);
+      [fd clearClipRect];
     }
   else
     {
       [fd beginFrame];
+      [fd applyClipRect:clip];
       mtl_draw_glyph_string_impl (s);
+      [fd clearClipRect];
       [fd endFramePresent:NO];
     }
 }
