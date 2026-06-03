@@ -250,6 +250,8 @@ static int               g_atlas_row_h   = 0;
    logical pixels.  Reset the atlas when this changes (e.g. window moves to a
    monitor with a different DPI).  See TODO.org Fase C-bis. */
 static CGFloat           g_atlas_scale   = 1.0;
+/* Color-glyph (emoji) cache lives further down; cleared on scale change. */
+static void mtl_color_glyph_cache_clear (void);
 
 /* Phase 4: global animation configuration (Lisp-configurable) */
 MtlCursorMode   g_mtl_cursor_mode    = MTL_CURSOR_SPRING;
@@ -1186,6 +1188,7 @@ easing_apply (MtlScrollEasing mode, float t)
       g_atlas_scale  = scale;
       g_atlas_next_x = g_atlas_next_y = g_atlas_row_h = 0;
       glyph_cache_init ();
+      mtl_color_glyph_cache_clear ();   /* color glyphs are scale-baked too */
     }
 
   /* Ensure staticTexture exists and matches drawable size.
@@ -1930,6 +1933,111 @@ mtl_draw_image_texture (MtlFrameData *fd, id<MTLTexture> tex,
 }
 
 /* -----------------------------------------------------------------------
+   Color glyphs (Apple Color Emoji).  The main atlas is R8 grayscale
+   coverage, which renders emoji as dark silhouettes; color-font glyphs are
+   rasterized into small BGRA textures instead and drawn with the image
+   pipeline.  Cached per (font, glyph) like the grayscale atlas.
+   ----------------------------------------------------------------------- */
+
+@interface MtlColorGlyph : NSObject
+@property (nonatomic, strong) id<MTLTexture> tex;
+@property (nonatomic, assign) int w, h;          /* physical pixels */
+@property (nonatomic, assign) int bearing_x, bearing_y;
+@property (nonatomic, assign) float advance_x;   /* logical pixels */
+@end
+@implementation MtlColorGlyph
+@end
+
+static NSMutableDictionary<NSNumber *, MtlColorGlyph *> *g_color_glyph_cache;
+
+/* Called when g_atlas_scale changes: color glyphs are baked at physical
+   resolution too, so they must re-rasterize at the new scale. */
+static void
+mtl_color_glyph_cache_clear (void)
+{
+  [g_color_glyph_cache removeAllObjects];
+}
+
+static MtlColorGlyph *
+mtl_color_glyph (CTFontRef font, CGGlyph g)
+{
+  if (!g_device || !font || g == 0) return nil;
+  uint64_t key = ((uint64_t)(uintptr_t)font * 6364136223846793005ULL) ^ (uint64_t)g;
+  if (!g_color_glyph_cache)
+    g_color_glyph_cache = [NSMutableDictionary new];
+  NSNumber *k = @(key);
+  MtlColorGlyph *cg = g_color_glyph_cache[k];
+  if (cg) return cg;
+
+  /* Same conventions as mtl_rasterize_glyph_id: physical resolution via a
+     scaled font copy, +2px padding, origin at floor(-bbox)+1, bearing_y =
+     bh - raster_oy. */
+  CGFloat s = g_atlas_scale;
+  CTFontRef rfont = (s != 1.0)
+    ? CTFontCreateCopyWithAttributes (font, CTFontGetSize (font) * s, NULL, NULL)
+    : (CTFontRef) CFRetain (font);
+
+  CGRect bbox = CTFontGetBoundingRectsForGlyphs (rfont,
+                  kCTFontOrientationDefault, &g, NULL, 1);
+  CGSize adv;
+  CTFontGetAdvancesForGlyphs (rfont, kCTFontOrientationDefault, &g, &adv, 1);
+  int bw = (int)ceil (bbox.size.width)  + 2;
+  int bh = (int)ceil (bbox.size.height) + 2;
+  if (bw <= 2 || bh <= 2) { CFRelease (rfont); return nil; }
+
+  CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB ();
+  size_t bpr  = (size_t)bw * 4;
+  uint8_t *px = (uint8_t *)calloc (1, bpr * (size_t)bh);
+  CGContextRef ctx = CGBitmapContextCreate (px, (size_t)bw, (size_t)bh, 8, bpr, cs,
+    (CGBitmapInfo)(kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little));
+  CGColorSpaceRelease (cs);
+  if (!ctx) { free (px); CFRelease (rfont); return nil; }
+
+  CGPoint origin = CGPointMake (floor (-bbox.origin.x) + 1,
+                                 floor (-bbox.origin.y) + 1);
+  CTFontDrawGlyphs (rfont, &g, &origin, 1, ctx);   /* renders color for sbix fonts */
+  CGContextRelease (ctx);
+  CFRelease (rfont);
+
+  MTLTextureDescriptor *td =
+    [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                                       width:(NSUInteger)bw
+                                                      height:(NSUInteger)bh
+                                                   mipmapped:NO];
+  td.usage = MTLTextureUsageShaderRead;
+  td.storageMode = MTLStorageModeShared;
+  id<MTLTexture> tex = [g_device newTextureWithDescriptor:td];
+  [tex replaceRegion:MTLRegionMake2D (0, 0, (NSUInteger)bw, (NSUInteger)bh)
+         mipmapLevel:0 withBytes:px bytesPerRow:bpr];
+  free (px);
+
+  int raster_oy = (int)(floor (-bbox.origin.y) + 1);
+  cg = [MtlColorGlyph new];
+  cg.tex       = tex;
+  cg.w         = bw;
+  cg.h         = bh;
+  cg.bearing_x = (int)(floor (-bbox.origin.x) + 1);
+  cg.bearing_y = bh - raster_oy;
+  cg.advance_x = (float)(adv.width / s);
+  g_color_glyph_cache[k] = cg;
+  return cg;
+}
+
+/* Draw color glyph G of FONT with its origin (pen) at X and baseline at Y,
+   exactly like drawGlyph: does for grayscale atlas entries. */
+static void
+mtl_draw_color_glyph (MtlFrameData *fd, CTFontRef font, CGGlyph g,
+                      float x, float y)
+{
+  MtlColorGlyph *cg = mtl_color_glyph (font, g);
+  if (!cg) return;
+  CGFloat s = g_atlas_scale;
+  mtl_draw_image_texture (fd, cg.tex,
+                          x - cg.bearing_x / s, y - cg.bearing_y / s,
+                          cg.w / s, cg.h / s, 1.0f);
+}
+
+/* -----------------------------------------------------------------------
    redisplay_interface — all file-static, called by xdisp.c engine
    ----------------------------------------------------------------------- */
 
@@ -2067,14 +2175,27 @@ static void
 mtl_draw_cmp_run (struct glyph_string *s, MtlFrameData *fd, CTFontRef ctfont,
                   unsigned long fg, int from, int to, int x, int y)
 {
+  BOOL color_font =
+    (CTFontGetSymbolicTraits (ctfont) & kCTFontTraitColorGlyphs) != 0;
   float pen = (float) x;
   for (int k = from; k < to; k++)
     {
-      MtlGlyphCacheEntry *ge = mtl_cache_glyph_id (ctfont, (CGGlyph) s->char2b[k]);
-      if (!ge) continue;
-      if (ge->width > 0)
-        [fd drawGlyph:ge at:CGPointMake (pen, (float) y) color:fg];
-      pen += ge->advance_x;
+      CGGlyph g = (CGGlyph) s->char2b[k];
+      if (color_font)
+        {
+          MtlColorGlyph *cg = mtl_color_glyph (ctfont, g);
+          if (!cg) continue;
+          mtl_draw_color_glyph (fd, ctfont, g, pen, (float) y);
+          pen += cg.advance_x;
+        }
+      else
+        {
+          MtlGlyphCacheEntry *ge = mtl_cache_glyph_id (ctfont, g);
+          if (!ge) continue;
+          if (ge->width > 0)
+            [fd drawGlyph:ge at:CGPointMake (pen, (float) y) color:fg];
+          pen += ge->advance_x;
+        }
     }
 }
 
@@ -2228,6 +2349,11 @@ mtl_draw_glyph_string_impl (struct glyph_string *s)
       CTFontRef ctfont = mtl_ctfont_for_face (face);
       if (!ctfont) { mtl_dgs_nofont_count++; return; }
 
+      /* Color fonts (Apple Color Emoji) can't go through the R8 coverage
+         atlas; draw them as small BGRA textures. */
+      BOOL color_font =
+        (CTFontGetSymbolicTraits (ctfont) & kCTFontTraitColorGlyphs) != 0;
+
       /* Advance using Emacs's own integer glyph grid
          (first_glyph[i].pixel_width), NOT the CoreText float advance.
          Re-advancing by the font's fractional advance drifts away from the
@@ -2248,16 +2374,25 @@ mtl_draw_glyph_string_impl (struct glyph_string *s)
 
           if (glyphId)
             {
-              MtlGlyphCacheEntry *ge = mtl_cache_glyph_id (ctfont, glyphId);
-              if (ge && ge->width > 0)
+              if (color_font)
                 {
                   mtl_dgs_drawn_count++;
-                  /* bearing_y: distance from glyph top-left to baseline.  In
-                     our top-left coord system, glyph top = baseline_y -
-                     bearing_y. */
-                  [fd drawGlyph:ge at:CGPointMake ((float)pen_x,
-                                                   (float)baseline_y)
-                          color:fg];
+                  mtl_draw_color_glyph (fd, ctfont, glyphId,
+                                        (float)pen_x, (float)baseline_y);
+                }
+              else
+                {
+                  MtlGlyphCacheEntry *ge = mtl_cache_glyph_id (ctfont, glyphId);
+                  if (ge && ge->width > 0)
+                    {
+                      mtl_dgs_drawn_count++;
+                      /* bearing_y: distance from glyph top-left to baseline.
+                         In our top-left coord system, glyph top = baseline_y -
+                         bearing_y. */
+                      [fd drawGlyph:ge at:CGPointMake ((float)pen_x,
+                                                       (float)baseline_y)
+                              color:fg];
+                    }
                 }
             }
 
