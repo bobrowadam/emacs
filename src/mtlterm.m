@@ -2060,6 +2060,99 @@ mtl_underline_metrics (struct glyph_string *s, int *position, int *thickness)
   *thickness = th;
 }
 
+/* Draw glyph IDs s->char2b[FROM..TO) sequentially from (X, Y baseline),
+   advancing each glyph by its natural font advance (composition runs are laid
+   out by font metrics, not by the Emacs column grid). */
+static void
+mtl_draw_cmp_run (struct glyph_string *s, MtlFrameData *fd, CTFontRef ctfont,
+                  unsigned long fg, int from, int to, int x, int y)
+{
+  float pen = (float) x;
+  for (int k = from; k < to; k++)
+    {
+      MtlGlyphCacheEntry *ge = mtl_cache_glyph_id (ctfont, (CGGlyph) s->char2b[k]);
+      if (!ge) continue;
+      if (ge->width > 0)
+        [fd drawGlyph:ge at:CGPointMake (pen, (float) y) color:fg];
+      pen += ge->advance_x;
+    }
+}
+
+/* Draw a composition glyph string: combining accents, ligatures and shaped
+   scripts (Arabic, Indic).  Mirrors ns_draw_composite_glyph_string_foreground
+   but renders through the Metal glyph atlas instead of font->driver->draw.
+   char2b[] holds glyph IDs indexed by the composition/gstring index (see
+   fill_composite_glyph_string / fill_gstring_glyph_string) and s->font is the
+   composition's font (it can differ from the face font). */
+static void
+mtl_draw_composite_glyph_string (struct glyph_string *s, MtlFrameData *fd,
+                                 unsigned long fg)
+{
+  int x;
+  if (s->face && s->face->box != FACE_NO_BOX && s->first_glyph->left_box_line_p)
+    x = s->x + max (s->face->box_vertical_line_width, 0);
+  else
+    x = s->x;
+
+  CTFontRef ctfont = s->font ? (CTFontRef) macfont_get_nsctfont (s->font) : NULL;
+  if (!ctfont || s->font_not_found_p)
+    {
+      /* Placeholder outline when the composition's font is missing. */
+      if (s->cmp_from == 0)
+        {
+          unsigned long cc = ns_color_to_pixel (FRAME_CURSOR_COLOR (s->f));
+          [fd fillRect:NSMakeRect (s->x, s->y, s->width - 1, 1) color:cc];
+          [fd fillRect:NSMakeRect (s->x, s->y + s->height - 2, s->width - 1, 1) color:cc];
+          [fd fillRect:NSMakeRect (s->x, s->y, 1, s->height - 1) color:cc];
+          [fd fillRect:NSMakeRect (s->x + s->width - 2, s->y, 1, s->height - 1) color:cc];
+        }
+      return;
+    }
+
+  if (!s->first_glyph->u.cmp.automatic)
+    {
+      /* Static composition: each glyph at an explicit offset from the table. */
+      int y = s->ybase;
+      int i, j;
+      for (i = 0, j = s->cmp_from; i < s->nchars; i++, j++)
+        if (COMPOSITION_GLYPH (s->cmp, j) != '\t')
+          {
+            int xx = x + s->cmp->offsets[j * 2];
+            int yy = y - s->cmp->offsets[j * 2 + 1];
+            mtl_draw_cmp_run (s, fd, ctfont, fg, j, j + 1, xx, yy);
+          }
+    }
+  else
+    {
+      /* Automatic composition (shaping): LGLYPHs, some with adjustments. */
+      Lisp_Object gstring = composition_gstring_from_id (s->cmp_id);
+      int y = s->ybase;
+      int width = 0, i, j;
+
+      for (i = j = s->cmp_from; i < s->cmp_to; i++)
+        {
+          Lisp_Object glyph = LGSTRING_GLYPH (gstring, i);
+          if (NILP (LGLYPH_ADJUSTMENT (glyph)))
+            width += LGLYPH_WIDTH (glyph);
+          else
+            {
+              if (j < i)
+                {
+                  mtl_draw_cmp_run (s, fd, ctfont, fg, j, i, x, y);
+                  x += width;
+                }
+              mtl_draw_cmp_run (s, fd, ctfont, fg, i, i + 1,
+                                x + LGLYPH_XOFF (glyph), y + LGLYPH_YOFF (glyph));
+              x += LGLYPH_WADJUST (glyph);
+              width = 0;
+              j = i + 1;
+            }
+        }
+      if (j < i)
+        mtl_draw_cmp_run (s, fd, ctfont, fg, j, i, x, y);
+    }
+}
+
 static void
 mtl_draw_glyph_string_impl (struct glyph_string *s)
 {
@@ -2124,42 +2217,52 @@ mtl_draw_glyph_string_impl (struct glyph_string *s)
   /* Skip stretch glyphs (background already filled) */
   if (s->first_glyph->type == STRETCH_GLYPH) return;
 
-  /* Get CoreText font */
-  CTFontRef ctfont = mtl_ctfont_for_face (face);
-  if (!ctfont) { mtl_dgs_nofont_count++; return; }
-
-
-  /* Advance using Emacs's own integer glyph grid (first_glyph[i].pixel_width),
-     NOT the CoreText float advance.  Re-advancing by the font's fractional
-     advance drifts away from the layout Emacs computed: glyphs land at
-     fractional positions (linear sampling blurs them) and progressively
-     overlap/clip across the line.  Keeping integer pen positions also makes the
-     1:1 blit pixel-crisp. */
-  int pen_x = s->x;
-  int baseline_y = s->ybase;
-
-  for (int i = 0; i < s->nchars; i++)
+  if (s->first_glyph->type == COMPOSITE_GLYPH)
     {
-      /* char2b contains GLYPH IDs for the macfont backend — NOT Unicode codepoints.
-         Use mtl_cache_glyph_id which calls CoreText with the ID directly. */
-      CGGlyph glyphId = s->char2b ? (CGGlyph)s->char2b[i] : 0;
-      int adv = (i < s->nchars) ? s->first_glyph[i].pixel_width
-                                : FRAME_COLUMN_WIDTH (f);
+      /* Combining accents, ligatures, shaped scripts. */
+      mtl_draw_composite_glyph_string (s, fd, fg);
+    }
+  else
+    {
+      /* Get CoreText font */
+      CTFontRef ctfont = mtl_ctfont_for_face (face);
+      if (!ctfont) { mtl_dgs_nofont_count++; return; }
 
-      if (glyphId)
+      /* Advance using Emacs's own integer glyph grid
+         (first_glyph[i].pixel_width), NOT the CoreText float advance.
+         Re-advancing by the font's fractional advance drifts away from the
+         layout Emacs computed: glyphs land at fractional positions (linear
+         sampling blurs them) and progressively overlap/clip across the line.
+         Keeping integer pen positions also makes the 1:1 blit pixel-crisp. */
+      int pen_x = s->x;
+      int baseline_y = s->ybase;
+
+      for (int i = 0; i < s->nchars; i++)
         {
-          MtlGlyphCacheEntry *ge = mtl_cache_glyph_id (ctfont, glyphId);
-          if (ge && ge->width > 0)
-            {
-              mtl_dgs_drawn_count++;
-              /* bearing_y: distance from glyph top-left to baseline.
-                 In our top-left coord system, glyph top = baseline_y - bearing_y. */
-              [fd drawGlyph:ge at:CGPointMake ((float)pen_x, (float)baseline_y)
-                      color:fg];
-            }
-        }
+          /* char2b contains GLYPH IDs for the macfont backend — NOT Unicode
+             codepoints.  Use mtl_cache_glyph_id which calls CoreText with the
+             ID directly. */
+          CGGlyph glyphId = s->char2b ? (CGGlyph)s->char2b[i] : 0;
+          int adv = (i < s->nchars) ? s->first_glyph[i].pixel_width
+                                    : FRAME_COLUMN_WIDTH (f);
 
-      pen_x += adv;
+          if (glyphId)
+            {
+              MtlGlyphCacheEntry *ge = mtl_cache_glyph_id (ctfont, glyphId);
+              if (ge && ge->width > 0)
+                {
+                  mtl_dgs_drawn_count++;
+                  /* bearing_y: distance from glyph top-left to baseline.  In
+                     our top-left coord system, glyph top = baseline_y -
+                     bearing_y. */
+                  [fd drawGlyph:ge at:CGPointMake ((float)pen_x,
+                                                   (float)baseline_y)
+                          color:fg];
+                }
+            }
+
+          pen_x += adv;
+        }
     }
 
   /* Underline.  Wave FIRST: FACE_UNDERLINE_WAVE is above FACE_UNDERLINE_SINGLE
