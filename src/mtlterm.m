@@ -118,6 +118,11 @@ fragment float4 glyph_fragment(GlyphOut in [[stage_in]],
                                 texture2d<float> atlas [[texture(0)]],
                                 sampler smp           [[sampler(0)]]) {
   float coverage = atlas.sample(smp, in.texCoord).r;
+  // F3: the NS (CoreGraphics) backend renders on-screen text slightly heavier
+  // (more ink at every level) thanks to its coverage gamma / stem darkening.
+  // Plain linear coverage leaves Metal text a touch lighter than NS. Apply a
+  // mild gamma (<1) to lift coverage uniformly and match NS's weight.
+  coverage = pow(coverage, 0.82);
   return float4(in.color.rgb, in.color.a * coverage);
 }
 
