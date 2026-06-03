@@ -2498,10 +2498,24 @@ mtl_clear_frame (struct frame *f)
 {
   MtlFrameData *fd = mtl_get_frame_data (f);
   if (!fd) return;
+
+  /* clear_garbaged_frames calls this BEFORE update_begin (no encoder), e.g.
+     when the minibuffer resizes back after a two-line message.  The redraw
+     that follows assumes the frame is really clear and only paints rows with
+     content, so silently dropping this fill left stale pixels behind (a
+     leftover continuation arrow in the echo area's fringe).  Run it as a
+     committed immediate frame with a deferred present, like
+     mtl_draw_glyph_string. */
+  BOOL immediate = (fd.encoder == nil);
+  if (immediate) [fd beginFrame];
+
   NSRect bounds = fd.metalLayer ? CGRectMake (0, 0,
                     fd.metalLayer.frame.size.width,
                     fd.metalLayer.frame.size.height) : NSZeroRect;
   [fd fillRect:bounds color:ns_color_to_pixel (FRAME_BACKGROUND_COLOR (f))];
+
+  if (immediate)
+    [fd endFramePresent:NO];
 }
 
 static void
@@ -2808,7 +2822,15 @@ static void mtl_draw_fringe_bitmap (struct window *w,
   (void)row;
   struct frame *f = WINDOW_XFRAME (w);
   MtlFrameData *fd = mtl_get_frame_data (f);
-  if (!fd || !fd.encoder) return;
+  if (!fd) return;
+
+  /* Like mtl_draw_glyph_string: fringe updates can arrive outside the
+     update_begin/end cycle (e.g. clearing the continuation arrow when the
+     echo area shrinks back to one line).  Dropping them left stale bitmaps
+     behind; wrap the draw in its own committed frame with a deferred
+     present. */
+  BOOL immediate = (fd.encoder == nil);
+  if (immediate) [fd beginFrame];
 
   struct face *face = p->face;
   unsigned long bg = face ? face->background
@@ -2823,19 +2845,23 @@ static void mtl_draw_fringe_bitmap (struct window *w,
       [fd fillRect:NSMakeRect (p->x, p->y, p->wd, p->h) color:bg];
     }
 
-  if (!p->bits || p->wd <= 0 || p->h <= 0)
-    return;
+  if (p->bits && p->wd > 0 && p->h > 0)
+    {
+      unsigned long color;
+      if (!p->cursor_p)
+        color = face ? face->foreground
+                     : ns_color_to_pixel (FRAME_FOREGROUND_COLOR (f));
+      else if (p->overlay_p)
+        color = bg;
+      else
+        color = ns_color_to_pixel (FRAME_CURSOR_COLOR (f));
 
-  unsigned long color;
-  if (!p->cursor_p)
-    color = face ? face->foreground : ns_color_to_pixel (FRAME_FOREGROUND_COLOR (f));
-  else if (p->overlay_p)
-    color = bg;
-  else
-    color = ns_color_to_pixel (FRAME_CURSOR_COLOR (f));
+      [fd drawFringeBits:p->bits dh:p->dh wd:p->wd h:p->h
+                     atX:p->x y:p->y color:color];
+    }
 
-  [fd drawFringeBits:p->bits dh:p->dh wd:p->wd h:p->h
-                 atX:p->x y:p->y color:color];
+  if (immediate)
+    [fd endFramePresent:NO];
 }
 
 static void mtl_define_fringe_bitmap (int w, unsigned short *b, int h, int wd)
