@@ -1035,6 +1035,7 @@ easing_apply (MtlScrollEasing mode, float t)
 @interface MtlFrameData ()
 - (void)openRenderEncoderClear:(BOOL)clear;
 - (void)scrollRunFrom:(int)fromY to:(int)toY x:(int)x width:(int)w height:(int)h;
+- (void)shiftGlyphsX:(int)x y:(int)y width:(int)w height:(int)h by:(int)shift;
 - (void)drawFringeBits:(unsigned short *)bits dh:(int)dh wd:(int)wd h:(int)h
                    atX:(int)x y:(int)y color:(unsigned long)color;
 @end
@@ -1108,6 +1109,57 @@ easing_apply (MtlScrollEasing mode, float t)
              sourceSize:MTLSizeMake ((NSUInteger) pw, (NSUInteger) ph, 1)
               toTexture:self.staticTexture destinationSlice:0 destinationLevel:0
       destinationOrigin:MTLOriginMake ((NSUInteger) px, (NSUInteger) pto, 0)];
+  [blit endEncoding];
+
+  if (hadEncoder)
+    [self openRenderEncoderClear:NO];
+  else
+    { [self.cmdBuf commit]; self.cmdBuf = nil; }
+}
+
+/* E3 / RIF shift_glyphs_for_insert: move an area horizontally by SHIFT logical
+   pixels (insert/delete-char optimization: shift the rest of the line instead
+   of redrawing it).  Mirrors ns_shift_glyphs_for_insert; same scratch-texture
+   bounce and encoder handling as scrollRunFrom: since src and dst overlap. */
+- (void)shiftGlyphsX:(int)x y:(int)y width:(int)w height:(int)h by:(int)shift
+{
+  if (!self.staticTexture || !self.scratchTexture
+      || w <= 0 || h <= 0 || shift == 0)
+    return;
+
+  CGSize dsz = self.metalLayer.drawableSize;
+  NSSize lsz = self.metalLayer.frame.size;
+  double scx = lsz.width  > 0 ? dsz.width  / lsz.width  : 1.0;
+  double scy = lsz.height > 0 ? dsz.height / lsz.height : 1.0;
+
+  long px  = lround (x * scx), pw = lround (w * scx);
+  long py  = lround (y * scy), ph = lround (h * scy);
+  long pto = lround ((x + shift) * scx);
+  long tw  = (long) self.staticTexture.width;
+  long tht = (long) self.staticTexture.height;
+
+  if (px < 0 || py < 0 || pto < 0) return;
+  if (px >= tw || py >= tht || pto >= tw) return;
+  if (px + pw > tw)  pw = tw - px;
+  if (pto + pw > tw) pw = tw - pto;
+  if (py + ph > tht) ph = tht - py;
+  if (pw <= 0 || ph <= 0) return;
+
+  BOOL hadEncoder = (self.encoder != nil);
+  if (self.encoder) { [self.encoder endEncoding]; self.encoder = nil; }
+  if (!self.cmdBuf) self.cmdBuf = [g_queue commandBuffer];
+
+  id<MTLBlitCommandEncoder> blit = [self.cmdBuf blitCommandEncoder];
+  [blit copyFromTexture:self.staticTexture sourceSlice:0 sourceLevel:0
+           sourceOrigin:MTLOriginMake ((NSUInteger) px, (NSUInteger) py, 0)
+             sourceSize:MTLSizeMake ((NSUInteger) pw, (NSUInteger) ph, 1)
+              toTexture:self.scratchTexture destinationSlice:0 destinationLevel:0
+      destinationOrigin:MTLOriginMake (0, 0, 0)];
+  [blit copyFromTexture:self.scratchTexture sourceSlice:0 sourceLevel:0
+           sourceOrigin:MTLOriginMake (0, 0, 0)
+             sourceSize:MTLSizeMake ((NSUInteger) pw, (NSUInteger) ph, 1)
+              toTexture:self.staticTexture destinationSlice:0 destinationLevel:0
+      destinationOrigin:MTLOriginMake ((NSUInteger) pto, (NSUInteger) py, 0)];
   [blit endEncoding];
 
   if (hadEncoder)
@@ -2532,7 +2584,11 @@ mtl_define_frame_cursor (struct frame *f, Emacs_Cursor c)
 static void
 mtl_shift_glyphs_for_insert (struct frame *f, int x, int y,
                                int w, int h, int by)
-{ (void)x;(void)y;(void)w;(void)h;(void)by;(void)f; }
+{
+  MtlFrameData *fd = mtl_get_frame_data (f);
+  if (!fd) return;
+  [fd shiftGlyphsX:x y:y width:w height:h by:by];
+}
 
 static void
 mtl_show_hourglass (struct frame *f)
