@@ -2148,10 +2148,23 @@ mtl_draw_glyph_string_impl (struct glyph_string *s)
       pen_x += adv;
     }
 
-  /* Underline.  Single/double lines (the common case for buttons and links)
-     use font-derived position/thickness; wave falls back to a straight line at
-     the same position for now. */
-  if (face && face->underline >= FACE_UNDERLINE_SINGLE)
+  /* Underline.  Wave FIRST: FACE_UNDERLINE_WAVE is above FACE_UNDERLINE_SINGLE
+     in the enum, so the >= SINGLE branch would otherwise swallow it (NS checks
+     wave first too). */
+  if (face && face->underline == FACE_UNDERLINE_WAVE)
+    {
+      /* Zigzag wave matching ns_draw_underwave: wave_height 3, wave_length 2,
+         drawn at ybase..ybase+2 (y = ybase - wave_height + 3).  One 1px cell
+         per column following the triangle pattern 0,1,2,1; indexing by the
+         absolute column keeps the wave continuous across adjacent strings,
+         like NS's a.x = x - (x % dx) phase anchoring. */
+      unsigned long uc = face->underline_defaulted_p ? fg : face->underline_color;
+      static const int wave[4] = {0, 1, 2, 1};
+      int wy = s->ybase;
+      for (int cx = s->x; cx < s->x + s->width; cx++)
+        [fd fillRect:NSMakeRect (cx, wy + wave[cx & 3], 1, 1) color:uc];
+    }
+  else if (face && face->underline >= FACE_UNDERLINE_SINGLE)
     {
       int position, thickness;
       mtl_underline_metrics (s, &position, &thickness);
@@ -2167,14 +2180,6 @@ mtl_draw_glyph_string_impl (struct glyph_string *s)
           [fd fillRect:NSMakeRect (s->x, s->ybase + p2, s->width, thickness)
                  color:uc];
         }
-    }
-  else if (face && face->underline == FACE_UNDERLINE_WAVE)
-    {
-      int position, thickness;
-      mtl_underline_metrics (s, &position, &thickness);
-      unsigned long uc = face->underline_defaulted_p ? fg : face->underline_color;
-      [fd fillRect:NSMakeRect (s->x, s->ybase + position, s->width, thickness)
-             color:uc];
     }
 
   /* Overline: 1px at the top of the string (NS ignores overline_margin too). */
