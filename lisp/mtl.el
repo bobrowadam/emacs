@@ -90,13 +90,13 @@
 ;; ---------------------------------------------------------------------------
 ;; Customizable variables
 
-(defcustom mtl-cursor-animation 'spring
+(defcustom mtl-cursor-animation 'sonicboom
   "Cursor animation mode for the Metal GPU backend.
 Possible values:
   `block'      Static filled rectangle (no animation)
-  `spring'     Critically-damped spring physics (default)
+  `spring'     Critically-damped spring physics
   `torpedo'    Trail of last N cursor positions
-  `sonicboom'  Expanding ring when cursor jumps far
+  `sonicboom'  Expanding ring when cursor jumps far (default)
   `ripple'     Three concentric expanding rings
   `pixiedust'  Radial particle burst on jump
   `hollow'     Hollow outline box

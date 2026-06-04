@@ -255,7 +255,9 @@ static void mtl_color_glyph_cache_clear (void);
 static struct gfx_driver mtl_gfx_driver;
 
 /* Phase 4: global animation configuration (Lisp-configurable) */
-MtlCursorMode   g_mtl_cursor_mode    = MTL_CURSOR_SPRING;
+/* Sonicboom is the user's pick as the default for tests and demos
+   (animations themselves stay opt-in behind g_mtl_animations_enabled).  */
+MtlCursorMode   g_mtl_cursor_mode    = MTL_CURSOR_SONICBOOM;
 MtlScrollEasing g_mtl_scroll_easing  = MTL_EASE_OUT_QUAD;
 float           g_mtl_scroll_duration = 0.15f;
 NSUInteger      g_mtl_trail_len       = 20;
