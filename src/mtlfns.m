@@ -50,7 +50,7 @@ void syms_of_mtlfns (void);
    DEFUN: mtl-open-connection — initialize Metal terminal
    ----------------------------------------------------------------------- */
 
-DEFUN ("mtl-open-connection", Fmtl_open_connection, Smtl_open_connection,
+DEFUN ("gpu-open-connection", Fmtl_open_connection, Smtl_open_connection,
        3, 3, 0,
        doc: /* Initialize the Metal GPU backend.
 DISPLAY, XRM-STRING and MUST-SUCCEED are ignored.  */)
@@ -68,7 +68,7 @@ DISPLAY, XRM-STRING and MUST-SUCCEED are ignored.  */)
    DEFUN: mtl-backend-p — detect Metal GPU support
    ----------------------------------------------------------------------- */
 
-DEFUN ("mtl-backend-p", Fmtl_backend_p, Smtl_backend_p, 0, 0, 0,
+DEFUN ("gpu-backend-p", Fmtl_backend_p, Smtl_backend_p, 0, 0, 0,
        doc: /* Return t if Metal GPU backend is available on this system.  */)
   (void)
 {
@@ -80,7 +80,7 @@ DEFUN ("mtl-backend-p", Fmtl_backend_p, Smtl_backend_p, 0, 0, 0,
    DEFUN: mtl-device-name
    ----------------------------------------------------------------------- */
 
-DEFUN ("mtl-device-name", Fmtl_device_name, Smtl_device_name, 0, 0, 0,
+DEFUN ("gpu-device-name", Fmtl_device_name, Smtl_device_name, 0, 0, 0,
        doc: /* Return the Metal GPU device name as a string.  */)
   (void)
 {
@@ -101,7 +101,7 @@ DEFUN ("mtl-device-name", Fmtl_device_name, Smtl_device_name, 0, 0, 0,
           (mtl-enable-for-frame (make-frame))
    ----------------------------------------------------------------------- */
 
-DEFUN ("mtl-enable-for-frame", Fmtl_enable_for_frame, Smtl_enable_for_frame,
+DEFUN ("gpu-enable-for-frame", Fmtl_enable_for_frame, Smtl_enable_for_frame,
        1, 1, 0,
        doc: /* Add Metal GPU rendering to an existing Emacs frame FRAME.
 Adds a CAMetalLayer sublayer on top of the NS EmacsView and registers
@@ -113,14 +113,14 @@ FRAME must be a live graphical NS frame.  */)
   struct frame *f = XFRAME (frame);
 
   if (!FRAME_NS_P (f))
-    error ("mtl-enable-for-frame: FRAME must be an NS (macOS) frame");
+    error ("gpu-enable-for-frame: FRAME must be an NS (macOS) frame");
 
   block_input ();
   MtlFrameData *fd = mtl_setup_frame (f);
   unblock_input ();
 
   if (!fd)
-    error ("mtl-enable-for-frame: failed to set up Metal layer (Metal not available?)");
+    error ("gpu-enable-for-frame: failed to set up Metal layer (Metal not available?)");
 
   /* Replace the terminal's redisplay_interface (rif) with our Metal rif.
      This redirects all rendering calls (draw_glyph_string, draw_window_cursor,
@@ -147,7 +147,7 @@ FRAME must be a live graphical NS frame.  */)
    DEFUN: mtl-open-test-window — standalone GPU test (no Emacs frame)
    ----------------------------------------------------------------------- */
 
-DEFUN ("mtl-open-test-window", Fmtl_open_test_window, Smtl_open_test_window,
+DEFUN ("gpu-open-test-window", Fmtl_open_test_window, Smtl_open_test_window,
        0, 0, 0,
        doc: /* Open a standalone Metal GPU test window.
 Creates a bare NSWindow with a CAMetalLayer, renders text, and displays it.
@@ -211,7 +211,7 @@ Returns t on success, nil if Metal is not available.  */)
    DEFUN: mtl-render-to-png — GPU off-screen render to PNG file
    ----------------------------------------------------------------------- */
 
-DEFUN ("mtl-render-to-png", Fmtl_render_to_png, Smtl_render_to_png, 1, 1, 0,
+DEFUN ("gpu-render-to-png", Fmtl_render_to_png, Smtl_render_to_png, 1, 1, 0,
        doc: /* Render a Metal GPU frame off-screen and save it as PNG at PATH.
 Rasterizes text via CoreText into the Metal glyph atlas and renders textured
 quads to an off-screen MTLTexture.  Returns t on success.  */)
@@ -226,7 +226,7 @@ quads to an off-screen MTLTexture.  Returns t on success.  */)
    Used for visual regression testing and debugging rendering issues.
    ----------------------------------------------------------------------- */
 
-DEFUN ("mtl-capture-frame", Fmtl_capture_frame, Smtl_capture_frame, 1, 2, 0,
+DEFUN ("gpu-capture-frame", Fmtl_capture_frame, Smtl_capture_frame, 1, 2, 0,
        doc: /* Save the Metal staticTexture for FRAME (or selected frame) to PATH.
 Returns t on success.  The PNG shows exactly what Metal has rendered into
 the intermediate texture, before cursor/animation overlay.  */)
@@ -300,7 +300,7 @@ the intermediate texture, before cursor/animation overlay.  */)
    DEFUN: mtl-create-frame (stub — use mtl-enable-for-frame instead)
    ----------------------------------------------------------------------- */
 
-DEFUN ("mtl-create-frame", Fmtl_create_frame, Smtl_create_frame, 1, 1, 0,
+DEFUN ("gpu-create-frame", Fmtl_create_frame, Smtl_create_frame, 1, 1, 0,
        doc: /* Create a new frame and enable Metal GPU rendering for it.
 PARAMETERS is an alist of frame parameters, same as `make-frame'.
 Returns the new frame with Metal rendering enabled.  */)
@@ -319,7 +319,7 @@ Returns the new frame with Metal rendering enabled.  */)
    Phase 4: Animation configuration Lisp functions
    ----------------------------------------------------------------------- */
 
-DEFUN ("mtl-cursor-mode", Fmtl_cursor_mode, Smtl_cursor_mode, 1, 1, 0,
+DEFUN ("gpu-cursor-mode", Fmtl_cursor_mode, Smtl_cursor_mode, 1, 1, 0,
        doc: /* Set the Metal cursor animation mode.
 MODE is an integer 0-7:
   0 = block (static filled rectangle)
@@ -356,7 +356,7 @@ MODE is an integer 0-7:
   return mode;
 }
 
-DEFUN ("mtl-scroll-effect", Fmtl_scroll_effect, Smtl_scroll_effect, 1, 1, 0,
+DEFUN ("gpu-scroll-effect", Fmtl_scroll_effect, Smtl_scroll_effect, 1, 1, 0,
        doc: /* Set the Metal scroll animation easing.
 EFFECT is an integer 0-5:
   0 = none (instant)
@@ -386,7 +386,7 @@ EFFECT is an integer 0-5:
   return effect;
 }
 
-DEFUN ("mtl-scroll-duration", Fmtl_scroll_duration, Smtl_scroll_duration,
+DEFUN ("gpu-scroll-duration", Fmtl_scroll_duration, Smtl_scroll_duration,
        1, 1, 0,
        doc: /* Set scroll animation duration in seconds (default 0.15).  */)
   (Lisp_Object secs)
@@ -398,7 +398,7 @@ DEFUN ("mtl-scroll-duration", Fmtl_scroll_duration, Smtl_scroll_duration,
   return secs;
 }
 
-DEFUN ("mtl-trail-length", Fmtl_trail_length, Smtl_trail_length, 1, 1, 0,
+DEFUN ("gpu-trail-length", Fmtl_trail_length, Smtl_trail_length, 1, 1, 0,
        doc: /* Set torpedo cursor trail length (1-40, default 20).  */)
   (Lisp_Object len)
 {
@@ -410,7 +410,7 @@ DEFUN ("mtl-trail-length", Fmtl_trail_length, Smtl_trail_length, 1, 1, 0,
   return len;
 }
 
-DEFUN ("mtl-animations", Fmtl_animations, Smtl_animations, 0, 1, 0,
+DEFUN ("gpu-animations", Fmtl_animations, Smtl_animations, 0, 1, 0,
        doc: /* Enable or disable the Metal GPU animation layer.
 With ENABLE non-nil, turn on the animated cursor effects, particles and the
 CADisplayLink 60fps compositor overlay.  With ENABLE nil (the default state),
@@ -441,7 +441,7 @@ Returns t when animations are enabled, nil otherwise.  */)
   return g_mtl_animations_enabled ? Qt : Qnil;
 }
 
-DEFUN ("mtl-draw-stats", Fmtl_draw_stats, Smtl_draw_stats, 0, 0, 0,
+DEFUN ("gpu-draw-stats", Fmtl_draw_stats, Smtl_draw_stats, 0, 0, 0,
        doc: /* Return diagnostic counters for Metal glyph rendering.
 Returns an alist with: total-calls, no-fd (no encoder), no-font, glyphs-drawn.  */)
   (void)
@@ -453,7 +453,7 @@ Returns an alist with: total-calls, no-fd (no encoder), no-font, glyphs-drawn.  
     Fcons (intern ("glyphs-drawn"),  make_fixnum (mtl_dgs_drawn_count)));
 }
 
-DEFUN ("mtl-animation-status", Fmtl_animation_status, Smtl_animation_status,
+DEFUN ("gpu-animation-status", Fmtl_animation_status, Smtl_animation_status,
        0, 0, 0,
        doc: /* Return an alist with current Metal animation configuration.  */)
   (void)
@@ -474,7 +474,7 @@ DEFUN ("mtl-animation-status", Fmtl_animation_status, Smtl_animation_status,
    Inline video
    --------------------------------------------------------------------------- */
 
-DEFUN ("mtl-video-open", Fmtl_video_open, Smtl_video_open, 5, 7, 0,
+DEFUN ("gpu-video-open", Fmtl_video_open, Smtl_video_open, 5, 7, 0,
        doc: /* Play video FILE over FRAME at X, Y sized WIDTH x HEIGHT pixels.
 X and Y are frame-relative logical pixels (top-left origin).  The video
 is decoded by AVFoundation straight into Metal textures and composited
@@ -503,7 +503,7 @@ new one replaces the previous.  Returns t on success.  */)
   return ok ? Qt : Qnil;
 }
 
-DEFUN ("mtl-video-close", Fmtl_video_close, Smtl_video_close, 0, 1, 0,
+DEFUN ("gpu-video-close", Fmtl_video_close, Smtl_video_close, 0, 1, 0,
        doc: /* Stop and remove the inline video on FRAME.
 FRAME defaults to the selected frame.  Returns t if a video was open.  */)
   (Lisp_Object frame)
@@ -517,7 +517,7 @@ FRAME defaults to the selected frame.  Returns t if a video was open.  */)
   return ok ? Qt : Qnil;
 }
 
-DEFUN ("mtl-video-pause", Fmtl_video_pause, Smtl_video_pause, 1, 2, 0,
+DEFUN ("gpu-video-pause", Fmtl_video_pause, Smtl_video_pause, 1, 2, 0,
        doc: /* Pause (PAUSED non-nil) or resume the inline video on FRAME.
 FRAME defaults to the selected frame.  Returns t if a video is open.  */)
   (Lisp_Object paused, Lisp_Object frame)
@@ -531,7 +531,7 @@ FRAME defaults to the selected frame.  Returns t if a video is open.  */)
   return ok ? Qt : Qnil;
 }
 
-DEFUN ("mtl-video-move", Fmtl_video_move, Smtl_video_move, 4, 6, 0,
+DEFUN ("gpu-video-move", Fmtl_video_move, Smtl_video_move, 4, 6, 0,
        doc: /* Move/resize the inline video on FRAME to X, Y, WIDTH, HEIGHT.
 Frame-relative logical pixels.  Optional CLIP is a list (LEFT TOP RIGHT
 BOTTOM), also frame-relative, that confines the video to a window's
@@ -565,7 +565,7 @@ Returns t if a video is open.  */)
   return ok ? Qt : Qnil;
 }
 
-DEFUN ("mtl-video-tick", Fmtl_video_tick, Smtl_video_tick, 0, 1, 0,
+DEFUN ("gpu-video-tick", Fmtl_video_tick, Smtl_video_tick, 0, 1, 0,
        doc: /* Present a fresh frame of the inline video on FRAME.
 Driven by a Lisp timer in mtl.el (Emacs's event loop starves the
 CADisplayLink while idle).  Returns t while a video is open, nil
@@ -581,12 +581,12 @@ otherwise (letting the timer cancel itself).  */)
   return ok ? Qt : Qnil;
 }
 
-DEFUN ("mtl-anim-tick", Fmtl_anim_tick, Smtl_anim_tick, 0, 2, 0,
+DEFUN ("gpu-anim-tick", Fmtl_anim_tick, Smtl_anim_tick, 0, 2, 0,
        doc: /* Advance the GPU cursor animations one step and present.
 DT is the step in seconds (default 0.033).  Driven by a Lisp timer while
 animations are enabled: Emacs's event loop starves the CADisplayLink
 when idle, so rings/trails would freeze between input events otherwise
-(same mechanism as `mtl-video-tick').  FRAME defaults to the selected
+(same mechanism as `gpu-video-tick').  FRAME defaults to the selected
 frame.  Returns t while animations are enabled, nil otherwise.  */)
   (Lisp_Object dt, Lisp_Object frame)
 {
@@ -607,7 +607,7 @@ frame.  Returns t while animations are enabled, nil otherwise.  */)
   return Qt;
 }
 
-DEFUN ("mtl-vsync", Fmtl_vsync, Smtl_vsync, 1, 2, 0,
+DEFUN ("gpu-vsync", Fmtl_vsync, Smtl_vsync, 1, 2, 0,
        doc: /* Enable (non-nil) or disable display sync for FRAME's GPU layer.
 With vsync on (default) presents wait for the display refresh: redisplay
 is capped at the panel rate, which keeps CPU/GPU use minimal.  With it
@@ -628,7 +628,7 @@ FRAME defaults to the selected frame.  */)
   return enable;
 }
 
-DEFUN ("mtl-transition-start", Fmtl_transition_start, Smtl_transition_start,
+DEFUN ("gpu-transition-start", Fmtl_transition_start, Smtl_transition_start,
        1, 2, 0,
        doc: /* Crossfade the current frame content over the next redraw.
 Snapshot what FRAME shows now and fade it out over DURATION seconds

@@ -54,7 +54,7 @@ Honest reading:
   less CPU under flat-out scrolling because it stops rendering frames
   nobody can see. Human-paced input is unaffected (the cap is ~52
   machine-paced updates/s; keyboard auto-repeat tops out well below
-  that). `(mtl-vsync nil)` switches to uncapped, stock-like behavior.
+  that). `(gpu-vsync nil)` switches to uncapped, stock-like behavior.
 - Idle cost is identical and the GPU resources add ~4 MB of RSS.
 
 > Status: experimental, under active development.
@@ -66,7 +66,7 @@ Honest reading:
 ## Demos
 
 Inline video playing inside a buffer, decoded by AVFoundation straight
-into Metal textures (`mtl-video-insert`):
+into Metal textures (`gpu-video-insert`):
 
 ![Inline video](.github/assets/inline-video.gif)
 
@@ -75,7 +75,7 @@ composited by the GPU:
 
 ![Animated GIF and code](.github/assets/gif-and-code.gif)
 
-GPU cursor effects (`mtl-animations`), here the *sonicboom* mode:
+GPU cursor effects (`gpu-animations`), here the *sonicboom* mode:
 
 ![Sonicboom cursor](.github/assets/cursor-sonicboom.gif)
 
@@ -109,21 +109,21 @@ instead).  In a source build, switch a frame to Metal with:
 
 ```elisp
 (add-to-list 'load-path "/path/to/emacs-gpu/lisp")
-(require 'mtl)
-(mtl-enable)
+(require 'gpu)
+(gpu-enable)
 ```
 
 ## Commands and options
 
 | Command | What it does |
 |---|---|
-| `M-x mtl-status` | Show backend state: GPU device, animations, cursor mode |
-| `M-: (mtl-draw-stats)` | Renderer counters; `glyphs-drawn` growing proves the GPU is painting |
-| `M-x mtl-toggle-animations` | Toggle GPU cursor effects (on by default) |
-| `M-x mtl-set-cursor` | Pick the cursor effect: `sonicboom` (default), `torpedo` (comet trail), `spring`, `ripple`, `pixiedust`, `hollow`, `beam`, `block` |
-| `M-: (mtl-vsync nil)` | Uncap presents from the display refresh (lower latency, more power) |
-| `M-: (mtl-video-insert "clip.mp4" 480 270 t)` | Play a video inline at point; follows scrolling |
-| `M-x mtl-video-stop` | Stop the inline video |
+| `M-x gpu-status` | Show backend state: GPU device, animations, cursor mode |
+| `M-: (gpu-draw-stats)` | Renderer counters; `glyphs-drawn` growing proves the GPU is painting |
+| `M-x gpu-toggle-animations` | Toggle GPU cursor effects (on by default) |
+| `M-x gpu-set-cursor` | Pick the cursor effect: `sonicboom` (default), `torpedo` (comet trail), `spring`, `ripple`, `pixiedust`, `hollow`, `beam`, `block` |
+| `M-: (gpu-vsync nil)` | Uncap presents from the display refresh (lower latency, more power) |
+| `M-: (gpu-video-insert "clip.mp4" 480 270 t)` | Play a video inline at point; follows scrolling |
+| `M-x gpu-video-stop` | Stop the inline video |
 
 Cursor effects trigger on cursor jumps (`M-<`, `M->`, isearch hits),
 not on single-character movement.
@@ -131,8 +131,8 @@ not on single-character movement.
 Buffer switches cross-fade by default; tune or disable with:
 
 ```elisp
-(setq mtl-buffer-transition-duration 0.15) ; seconds
-(setq mtl-buffer-transitions nil)          ; turn it off
+(setq gpu-buffer-transition-duration 0.15) ; seconds
+(setq gpu-buffer-transitions nil)          ; turn it off
 ```
 
 ## How it works
