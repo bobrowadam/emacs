@@ -301,12 +301,16 @@ at the end.  One video per frame; a previous one is replaced."
 ;; ---------------------------------------------------------------------------
 ;; Startup integration
 
-(defun mtl--maybe-enable-on-startup (&optional _frame)
-  "Enable Metal on the initial frame if `mtl-enable-on-startup' is set."
+(defun mtl--maybe-enable-on-startup (&optional frame)
+  "Enable Metal on FRAME (or the selected frame) per `mtl-enable-on-startup'."
   (when (and mtl-enable-on-startup
              (fboundp 'mtl-backend-p)
              (mtl-backend-p))
-    (mtl-enable (selected-frame))))
+    (let ((f (or frame (selected-frame))))
+      ;; New frames pass through here mid-creation; tooltip/child/TTY
+      ;; frames must not abort frame creation with an error.
+      (when (display-graphic-p f)
+        (ignore-errors (mtl-enable f))))))
 
 (add-hook 'after-make-frame-functions #'mtl--maybe-enable-on-startup)
 
