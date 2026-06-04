@@ -13,6 +13,24 @@ behind a small driver interface (`src/gfxdrv.h`); an OpenGL driver only
 needs to implement that interface (`src/glterm.c` is the documented
 skeleton). Contributions welcome.
 
+## Why a GPU backend?
+
+Beyond raw rendering, it enables things the stock backend cannot do:
+
+- **Inline video playback**: AVFoundation decodes straight into Metal
+  textures (zero copies) and the frames are composited inside the
+  buffer, following scrolling and clipped to the window. No xwidgets,
+  no embedded browser.
+- **GPU cursor effects** (opt-in): expanding rings, comet trails and
+  friends are drawn as a compositor overlay, without ever touching the
+  buffer content underneath.
+- **A path to cheap visual effects**: buffer transitions, smooth
+  scrolling or any future eye candy is one more shader pass over the
+  composited frame, not a rewrite of the display engine.
+
+Text is rasterized once into a GPU glyph atlas and drawn as textured
+quads; scrolling moves already-rendered pixels with a texture blit.
+
 > Status: experimental, under active development.
 >
 > **Note:** I am not answering issues for now. Feel free to open them as
