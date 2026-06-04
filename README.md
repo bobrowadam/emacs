@@ -13,7 +13,11 @@ behind a small driver interface (`src/gfxdrv.h`); an OpenGL driver only
 needs to implement that interface (`src/glterm.c` is the documented
 skeleton). Contributions welcome.
 
-> Status: experimental. Use it, break it, open issues.
+> Status: experimental, under active development.
+>
+> **Note:** I am not answering issues for now. Feel free to open them as
+> a public record (they will be read eventually), but do not expect a
+> reply at this stage.
 
 ## Building on macOS
 
