@@ -146,7 +146,8 @@ cursor effects, particles and the 60fps compositor."
   :set (lambda (sym val)
          (set-default sym val)
          (when (fboundp 'mtl-animations)
-           (mtl-animations val)))
+           (mtl-animations val)
+           (when val (mtl--anim-pump-start))))
   :group 'mtl)
 
 (defcustom mtl-enable-on-startup nil
@@ -179,13 +180,31 @@ The NS backend still handles events, menus, and scrollbars."
     (mtl-scroll-duration mtl-scroll-duration)
     (mtl-trail-length mtl-trail-length)
     (mtl-animations mtl-animations-enabled)
+    (when mtl-animations-enabled (mtl--anim-pump-start))
     (message "Metal GPU enabled on frame: %s (device: %s, animations: %s)"
              f (mtl-device-name) (if mtl-animations-enabled "on" "off"))))
+
+(defvar mtl--anim-timer nil
+  "30fps timer driving cursor animations while they are enabled.")
+
+(defun mtl--anim-pump ()
+  "Advance GPU cursor animations; cancel the timer when they turn off."
+  (unless (and (fboundp 'mtl-anim-tick) (mtl-anim-tick))
+    (when (timerp mtl--anim-timer) (cancel-timer mtl--anim-timer))
+    (setq mtl--anim-timer nil)))
+
+(defun mtl--anim-pump-start ()
+  "Start the animation pump timer (idempotent).
+Emacs's event loop starves the CADisplayLink while idle, so without
+this Lisp timer the cursor effects only animate during user input."
+  (unless (timerp mtl--anim-timer)
+    (setq mtl--anim-timer (run-at-time 0 0.033 #'mtl--anim-pump))))
 
 (defun mtl-toggle-animations ()
   "Toggle the Metal GPU animation layer on or off."
   (interactive)
   (setopt mtl-animations-enabled (not mtl-animations-enabled))
+  (when mtl-animations-enabled (mtl--anim-pump-start))
   (message "Metal animations %s" (if mtl-animations-enabled "enabled" "disabled")))
 
 (defun mtl-status ()

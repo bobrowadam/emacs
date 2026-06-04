@@ -148,6 +148,10 @@ typedef struct mtl_spring {
 /* Called every animation tick (CADisplayLink target) */
 - (void)animationTick:(CADisplayLink *)link;
 
+/* One animation step + composite, drivable from a Lisp timer (the display
+   link starves while Emacs idles). */
+- (void)tickWithDt:(float)dt;
+
 /* Spawn particles at cursor for pixiedust/sonicboom/ripple modes */
 - (void)spawnParticlesAtX:(float)x y:(float)y;
 

@@ -581,6 +581,31 @@ otherwise (letting the timer cancel itself).  */)
   return ok ? Qt : Qnil;
 }
 
+DEFUN ("mtl-anim-tick", Fmtl_anim_tick, Smtl_anim_tick, 0, 2, 0,
+       doc: /* Advance the GPU cursor animations one step and present.
+DT is the step in seconds (default 0.033).  Driven by a Lisp timer while
+animations are enabled: Emacs's event loop starves the CADisplayLink
+when idle, so rings/trails would freeze between input events otherwise
+(same mechanism as `mtl-video-tick').  FRAME defaults to the selected
+frame.  Returns t while animations are enabled, nil otherwise.  */)
+  (Lisp_Object dt, Lisp_Object frame)
+{
+  if (NILP (frame)) frame = Fselected_frame ();
+  if (!FRAME_LIVE_P (XFRAME (frame))) return Qnil;
+  if (!g_mtl_animations_enabled) return Qnil;
+  MtlFrameData *fd = mtl_get_frame_data (XFRAME (frame));
+  if (!fd || !fd.animator) return Qnil;
+
+  float step = 0.033f;
+  if (NUMBERP (dt))
+    step = (float) XFLOATINT (dt);
+  block_input ();
+  if (!fd.encoder)
+    [fd.animator tickWithDt:step];
+  unblock_input ();
+  return Qt;
+}
+
 void
 syms_of_mtlfns (void)
 {
@@ -606,6 +631,7 @@ syms_of_mtlfns (void)
   defsubr (&Smtl_video_pause);
   defsubr (&Smtl_video_move);
   defsubr (&Smtl_video_tick);
+  defsubr (&Smtl_anim_tick);
 }
 
 #endif /* HAVE_MTL */

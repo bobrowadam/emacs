@@ -972,13 +972,24 @@ mtl_log_seq_p (void)
       p->vy    = sinf(angle) * speed;
       p->age   = 0.0f;
       p->size  = (self.cursorMode == MTL_CURSOR_SONICBOOM) ? 6.0f : 3.0f;
-      p->color = 0x88C0D0; /* Nord frost */
+      /* Real cursor color: a hardcoded pale tint was invisible on light
+         backgrounds. */
+      p->color = self.cursorColor ? self.cursorColor : 0x88C0D0;
     }
 }
 
 - (void)animationTick:(CADisplayLink *)link
 {
-  float dt = (float)link.duration;
+  [self tickWithDt:(float) link.duration];
+}
+
+/* One animation step + composite.  Factored out of the CADisplayLink
+   callback so a Lisp-level timer can drive it too: Emacs's event loop
+   starves the display link while idle (it stops firing after a couple of
+   ticks), so timer-driven cursor movements would spawn rings/trails that
+   never animate.  Same medicine as video playback (mtl-video-tick). */
+- (void)tickWithDt:(float)dt
+{
   MtlFrameData *fd = mtl_get_frame_data (self.emacsFrame);
   if (!fd || !fd.metalLayer) return;
 
@@ -2528,6 +2539,12 @@ mtl_drv_note_cursor (struct frame *f, int x, int y, int w, int h,
     return false;
   fd.animator.cursorColor = color;
   [fd.animator setCursorX:x y:y width:w height:h];
+  /* Cursor-only motion takes redisplay's fast path: no render cycle gets
+     opened, so nothing would present the moved overlay (the display link
+     does not fire while Emacs idles).  Composite now so the cursor is
+     never left painted at its old position. */
+  if (!fd.encoder)
+    [fd compositeToScreen];
   return true;
 }
 
