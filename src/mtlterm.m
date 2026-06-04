@@ -1549,20 +1549,76 @@ mtl_log_seq_p (void)
   [self endFramePresent:YES];
 }
 
+/* How close two presents may be before the second one is deferred:
+   redisplay runs several update cycles back-to-back (buffer window +
+   echo area) and, with display sync on, every present blocks on a
+   drawable -- two blocking presents per keystroke halved typing
+   throughput.  Half a 60 Hz frame keeps coalescing inside one refresh
+   while never delaying a visible update by more than ~8 ms.  */
+#define MTL_PRESENT_COALESCE 0.008
+
+/* Schedule the deferred present: a one-shot main-queue block flushes it
+   shortly after, unless an earlier present already absorbed it.  */
+- (void)schedulePresent
+{
+  if (self.presentScheduled) return;
+  self.presentScheduled = YES;
+  dispatch_after (dispatch_time (DISPATCH_TIME_NOW,
+                                 (int64_t) (MTL_PRESENT_COALESCE * NSEC_PER_SEC)),
+                  dispatch_get_main_queue (), ^{
+    self.presentScheduled = NO;
+    if (self.needsPresent && !self.encoder)
+      [self compositeToScreen];
+  });
+}
+
+- (void)presentCoalesced
+{
+  if (CACurrentMediaTime () - self.lastPresentTime < MTL_PRESENT_COALESCE)
+    {
+      self.needsPresent = YES;
+      [self schedulePresent];
+    }
+  else
+    [self compositeToScreen];
+}
+
 /* Commit the static-texture draws.  When PRESENT is NO, only the static texture
    is updated and the on-screen present is deferred (needsPresent), so a sequence
    of immediate draws (clear_mouse_face + show_mouse_face) is shown in a single
-   composite by flush_display instead of flickering through each step. */
+   composite by flush_display instead of flickering through each step.
+   When presenting, the composite pass is encoded on the SAME command
+   buffer as the cycle's draws (one commit instead of two).  */
 - (void)endFramePresent:(BOOL)present
 {
   if (!self.encoder) return;
   [self.encoder endEncoding];
-  [self.cmdBuf commit];
   self.encoder = nil;
-  self.cmdBuf  = nil;
   self.drawable = nil;
+
+  if (present
+      && CACurrentMediaTime () - self.lastPresentTime >= MTL_PRESENT_COALESCE
+      && self.staticTexture && g_blit_pipeline)
+    {
+      id<CAMetalDrawable> drawable = [self.metalLayer nextDrawable];
+      if (drawable)
+        {
+          [self encodeCompositeOn:self.cmdBuf drawable:drawable];
+          [self.cmdBuf commit];
+          self.cmdBuf = nil;
+          return;
+        }
+    }
+
+  [self.cmdBuf commit];
+  self.cmdBuf  = nil;
   if (present)
-    [self compositeToScreen];
+    {
+      /* Too soon after the previous present: defer (the next cycle's
+         present or the scheduled block makes it visible).  */
+      self.needsPresent = YES;
+      [self schedulePresent];
+    }
   else
     self.needsPresent = YES;
 }
@@ -1574,6 +1630,18 @@ mtl_log_seq_p (void)
   id<CAMetalDrawable> drawable = [self.metalLayer nextDrawable];
   if (!drawable) return;
 
+  id<MTLCommandBuffer> cmd = [g_queue commandBuffer];
+  [self encodeCompositeOn:cmd drawable:drawable];
+  [cmd commit];
+}
+
+/* Encode the full composite (static blit + video + animation overlays)
+   targeting DRAWABLE on CMD, and queue its present.  Shared by the
+   standalone present (compositeToScreen) and the single-commit path in
+   endFramePresent:.  */
+- (void)encodeCompositeOn:(id<MTLCommandBuffer>)cmd
+                 drawable:(id<CAMetalDrawable>)drawable
+{
   MTL_SEQ ("PRESENT layer=%.0fx%.0f drawable=%lux%lu static=%lux%lu",
            self.metalLayer.frame.size.width, self.metalLayer.frame.size.height,
            (unsigned long) drawable.texture.width,
@@ -1582,6 +1650,7 @@ mtl_log_seq_p (void)
            (unsigned long) self.staticTexture.height);
 
   self.needsPresent = NO;   /* about to present whatever is in the static texture */
+  self.lastPresentTime = CACurrentMediaTime ();
 
   NSSize sz = self.metalLayer.frame.size;
   MtlAnimator *anim = self.animator;
@@ -1596,7 +1665,6 @@ mtl_log_seq_p (void)
   rpd.colorAttachments[0].loadAction = MTLLoadActionDontCare;
   rpd.colorAttachments[0].storeAction = MTLStoreActionStore;
 
-  id<MTLCommandBuffer> cmd = [g_queue commandBuffer];
   id<MTLRenderCommandEncoder> enc = [cmd renderCommandEncoderWithDescriptor:rpd];
   [enc setVertexBuffer:self.uniformBuffer offset:0 atIndex:1];
   [enc setFragmentBuffer:self.uniformBuffer offset:0 atIndex:1];
@@ -1773,7 +1841,6 @@ mtl_log_seq_p (void)
 
   [enc endEncoding];
   [cmd presentDrawable:drawable];
-  [cmd commit];
 }
 
 @end
@@ -2377,7 +2444,7 @@ mtl_drv_end_frame (struct frame *f, bool present_p)
 static void
 mtl_drv_present (struct frame *f)
 {
-  [mtl_get_frame_data (f) compositeToScreen];
+  [mtl_get_frame_data (f) presentCoalesced];
 }
 
 static bool

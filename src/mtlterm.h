@@ -222,6 +222,23 @@ typedef struct mtl_spring {
    the expose substitute -- lives in gfxterm.c, not here.) */
 @property (nonatomic, assign) BOOL                        needsPresent;
 
+/* Present coalescing: a redisplay pass can run several update cycles
+   back-to-back (buffer window + echo area), and with display sync each
+   present blocks on a drawable -- two blocking presents per keystroke
+   halved the typing rate.  Presents within kMtlPresentCoalesce seconds of
+   the previous one are deferred and flushed by a one-shot main-queue
+   block (or absorbed by the next cycle's present).  */
+@property (nonatomic, assign) CFTimeInterval              lastPresentTime;
+@property (nonatomic, assign) BOOL                        presentScheduled;
+
+/* Coalesced present: present now, unless one landed very recently (then
+   schedule a deferred one).  Use for "make the frame visible" paths.  */
+- (void)presentCoalesced;
+
+/* Encode blit+overlays to DRAWABLE on CMD and queue its present.  */
+- (void)encodeCompositeOn:(id<MTLCommandBuffer>)cmd
+                 drawable:(id<CAMetalDrawable>)drawable;
+
 /* Active inline video (one per frame for now), drawn by
    compositeToScreen over the static texture. */
 @property (nonatomic, strong) MtlVideoPlayer             *videoPlayer;

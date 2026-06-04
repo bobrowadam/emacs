@@ -31,6 +31,32 @@ Beyond raw rendering, it enables things the stock backend cannot do:
 Text is rasterized once into a GPU glyph atlas and drawn as textured
 quads; scrolling moves already-rendered pixels with a texture blit.
 
+## Performance
+
+Measured on an Apple M1 Pro (Emacs 32 development build, 120x45 frame,
+font-locked `xdisp.c`, same binary with and without the GPU backend;
+`/usr/bin/time -l` over scripted workloads):
+
+| Workload | Stock (Cocoa) | GPU, vsync on (default) | GPU, vsync off |
+|---|---|---|---|
+| Sustained scroll, redisplays/s | 481 | 324 | 475 |
+| CPU for 15 s of that scroll | 16.0 s | **10.5 s** | 15.5 s |
+| Typing throughput (chars/s, machine-paced) | 108 | 52 | 106 |
+| Idle (8 s) CPU | 1.21 s | 1.19 s | same |
+| Peak RSS | ~140 MB | ~144 MB | same |
+
+Honest reading:
+
+- **Machine-paced throughput and CPU cost match the stock backend**
+  (vsync off). There is no GPU tax.
+- With vsync on (the default), presents wait for the display refresh:
+  the screen shows the same 60 fps either way, but Emacs burns ~35%
+  less CPU under flat-out scrolling because it stops rendering frames
+  nobody can see. Human-paced input is unaffected (the cap is ~52
+  machine-paced updates/s; keyboard auto-repeat tops out well below
+  that). `(mtl-vsync nil)` switches to uncapped, stock-like behavior.
+- Idle cost is identical and the GPU resources add ~4 MB of RSS.
+
 > Status: experimental, under active development.
 >
 > **Note:** I am not answering issues for now. Feel free to open them as
