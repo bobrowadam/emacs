@@ -995,6 +995,25 @@ mtl_log_seq_p (void)
 
   BOOL needsComposite = NO;
 
+  /* Mirror the engine's cursor visibility (blink-cursor-mode toggles it
+     via internal-show-cursor -> erase_phys_cursor, which never reaches
+     the rif: it just repaints the glyph, invisible to an overlay
+     cursor).  Poll it here so the animated cursor blinks too.  */
+  struct frame *f = self.emacsFrame;
+  if (f && WINDOWP (f->selected_window))
+    {
+      struct window *w = XWINDOW (f->selected_window);
+      /* cursor_off_p is the blink phase itself (set by
+         internal-show-cursor); phys_cursor_on_p alone can stay set when
+         the erase path is optimized away.  */
+      BOOL hidden = w->cursor_off_p;
+      if (hidden != self.cursorHidden)
+        {
+          self.cursorHidden = hidden;
+          needsComposite = YES;
+        }
+    }
+
   /* Update spring cursor (spring mode only; torpedo snaps instantly) */
   if (self.cursorMode == MTL_CURSOR_SPRING)
     {
@@ -1660,12 +1679,17 @@ mtl_log_seq_p (void)
       float cy = anim.cursorMode == MTL_CURSOR_SPRING ? anim.springY.pos : anim.curTargetY;
       float cw = anim.curTargetW, ch = anim.curTargetH;
 
-      /* Real frame cursor color (fed by mtl_draw_window_cursor), not cyan. */
+      /* Real frame cursor color (fed by note_cursor); before the first
+         cursor draw, fall back to the frame's cursor color, not cyan. */
       float ccr, ccg, ccb;
-      unpack_color (anim.cursorColor ? anim.cursorColor : 0x88C0D0, &ccr, &ccg, &ccb);
+      unsigned long cc = anim.cursorColor;
+      if (!cc && self.emacsFrame)
+        cc = ns_color_to_pixel (FRAME_CURSOR_COLOR (self.emacsFrame));
+      unpack_color (cc ? cc : 0x88C0D0, &ccr, &ccg, &ccb);
 
-      /* 2. Torpedo trail */
-      if (anim.cursorMode == MTL_CURSOR_TORPEDO && anim.trailCount > 0)
+      /* 2. Torpedo trail (hidden together with the cursor body) */
+      if (anim.cursorMode == MTL_CURSOR_TORPEDO && anim.trailCount > 0
+          && !anim.cursorHidden)
         {
           NSUInteger tlen = MIN(anim.trailCount, g_mtl_trail_len);
           for (NSUInteger i = 0; i < tlen; i++)
@@ -1700,7 +1724,9 @@ mtl_log_seq_p (void)
             }
         }
 
-      /* 3. Cursor (spring-interpolated position) */
+      /* 3. Cursor (spring-interpolated position).  Hidden during the
+         blink-off phase; effects in flight keep animating.  */
+      if (!anim.cursorHidden)
       {
         float x0=cx, y0=cy, x1=cx+cw, y1=cy+ch;
         float fr=ccr,fg=ccg,fb=ccb;
@@ -2537,6 +2563,19 @@ mtl_drv_note_cursor (struct frame *f, int x, int y, int w, int h,
   MtlFrameData *fd = mtl_get_frame_data (f);
   if (!fd || !g_mtl_animations_enabled || !fd.animator)
     return false;
+  /* W/H <= 0: blink-off phase.  Hide the overlay cursor and show the
+     change; effects in flight keep animating via the pump.  */
+  if (w <= 0 || h <= 0)
+    {
+      if (!fd.animator.cursorHidden)
+        {
+          fd.animator.cursorHidden = YES;
+          if (!fd.encoder)
+            [fd compositeToScreen];
+        }
+      return true;
+    }
+  fd.animator.cursorHidden = NO;
   fd.animator.cursorColor = color;
   [fd.animator setCursorX:x y:y width:w height:h];
   /* Cursor-only motion takes redisplay's fast path: no render cycle gets
@@ -2856,6 +2895,11 @@ mtl_patch_terminal_rif (struct frame *f)
      functions are replaced with Metal equivalents. */
   if (!mtl_ns_rif_copy)
     {
+      /* Capture the ORIGINAL NS implementations first: the policy
+         delegates to them for frames the GPU backend is not enabled on
+         (tooltips, child frames, frames without mtl-enable).  */
+      gfx_fallback.rif = term->rif;
+
       mtl_ns_rif_copy = xmalloc (sizeof (struct redisplay_interface));
       *mtl_ns_rif_copy = *term->rif;  /* copy all NS functions as baseline */
 
@@ -2884,6 +2928,15 @@ mtl_patch_terminal_rif (struct frame *f)
   /* Patch render cycle hooks so Metal manages the frame pixel lifecycle.
      The NS backend's update_begin calls [view lockFocus] for CoreGraphics;
      we bypass that entirely and use Metal command buffers instead. */
+  if (term->update_begin_hook != gfx_update_begin)
+    {
+      /* Same for the terminal hooks (guarded: this function runs again
+         on every mtl-enable-for-frame).  */
+      gfx_fallback.update_begin     = term->update_begin_hook;
+      gfx_fallback.update_end       = term->update_end_hook;
+      gfx_fallback.clear_frame      = term->clear_frame_hook;
+      gfx_fallback.frame_up_to_date = term->frame_up_to_date_hook;
+    }
   term->update_begin_hook     = gfx_update_begin;
   term->update_end_hook       = gfx_update_end;
   term->clear_frame_hook      = gfx_clear_frame;

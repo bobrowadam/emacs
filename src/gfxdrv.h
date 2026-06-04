@@ -172,6 +172,22 @@ struct gfx_driver
    Metal sets it in mtl_setup_frame).  One driver per process.  */
 extern struct gfx_driver *gfx_drv;
 
+/* Original platform implementations, captured before the rif/terminal
+   hooks were patched.  The patched hooks are TERMINAL-wide, but only
+   frames the user enabled the GPU backend on have driver data: every
+   other frame on the terminal (tooltips, child frames like posframe,
+   frames created later without mtl-enable) must keep rendering through
+   the platform's own backend, or they come up blank.  */
+struct gfx_fallback_fns
+{
+  struct redisplay_interface *rif;
+  void (*update_begin) (struct frame *f);
+  void (*update_end) (struct frame *f);
+  void (*clear_frame) (struct frame *f);
+  void (*frame_up_to_date) (struct frame *f);
+};
+extern struct gfx_fallback_fns gfx_fallback;
+
 /* -----------------------------------------------------------------------
    Platform-neutral drawing policy (gfxterm.c): the redisplay_interface /
    terminal hook implementations shared by every gfx driver.

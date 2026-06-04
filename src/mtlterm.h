@@ -117,6 +117,8 @@ typedef struct mtl_spring {
 @property (nonatomic, assign) unsigned long cursorColor;     /* real frame cursor color */
 @property (nonatomic, assign) MtlSpring1D springX, springY;  /* animated pos */
 @property (nonatomic, assign) BOOL cursorDirty;
+/* Blink-off phase: hide the cursor body (trails/particles keep animating). */
+@property (nonatomic, assign) BOOL cursorHidden;
 
 /* Trail history (torpedo mode) */
 @property (nonatomic, assign) NSUInteger trailHead;

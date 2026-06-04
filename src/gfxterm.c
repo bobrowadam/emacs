@@ -51,6 +51,13 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.
    before any policy function can run.  */
 struct gfx_driver *gfx_drv = NULL;
 
+/* Original platform implementations for frames the GPU backend is NOT
+   enabled on (tooltips, child frames, frames made without mtl-enable):
+   the patched rif/hooks are terminal-wide, so without this delegation
+   those frames would render nothing at all.  Captured by the platform
+   glue before patching (mtl_patch_terminal_rif).  */
+struct gfx_fallback_fns gfx_fallback = { NULL, NULL, NULL, NULL, NULL };
+
 /* Diagnostic counters surfaced by mtl-draw-stats.  */
 int mtl_dgs_call_count   = 0;  /* total draw_glyph_string calls */
 int mtl_dgs_nofd_count   = 0;  /* no driver data or no cycle */
@@ -426,9 +433,12 @@ gfx_underline_metrics (struct glyph_string *s, int *position, int *thickness)
   if (!s->face->underline_pixels_above_descent_line)
     pos = max (pos, minimum_offset);
 
-  /* Keep the underline inside the cell.  */
-  if (descent <= pos)        { pos = descent - 1; th = 1; }
-  else if (descent < pos + th) th = 1;
+  /* Keep the underline inside the cell.  NS computes DESCENT as
+     unsigned, so a :position larger than the descent UNDERFLOWS and the
+     first clamp snaps it to the row bottom; mirror that (pos < 0 below)
+     or a big :position would cross the glyphs instead.  */
+  if (pos < 0 || descent <= pos) { pos = descent - 1; th = 1; }
+  else if (descent < pos + th)     th = 1;
 
   *position = pos;
   *thickness = th;
@@ -724,14 +734,38 @@ gfx_draw_glyph_string_impl (struct glyph_string *s)
       s->underline_position  = position;
       unsigned long uc = face->underline_defaulted_p
                          ? fg : face->underline_color;
-      gfx_drv->fill_rect (f, s->x, s->ybase + position,
-                          s->width, thickness, uc);
-      /* Second line above the first for double underline.  */
-      if (face->underline == FACE_UNDERLINE_DOUBLE_LINE)
+      if (face->underline == FACE_UNDERLINE_DOTS
+          || face->underline == FACE_UNDERLINE_DASHES)
         {
-          int p2 = position - thickness - 1;
-          gfx_drv->fill_rect (f, s->x, s->ybase + p2,
+          /* Port of ns_draw_dash: [SEGMENT on, SEGMENT off] anchored at
+             the absolute x (phase = s->x in NS), so the pattern stays
+             continuous across adjacent glyph strings.  Dots use a
+             segment of THICKNESS, dashes 3*THICKNESS.  */
+          int seg = (face->underline == FACE_UNDERLINE_DOTS
+                     ? thickness : thickness * 3);
+          int cycle = seg * 2;
+          int x0 = s->x, x1 = s->x + s->width;
+          int cx = x0 - (((x0 % cycle) + cycle) % cycle);
+          for (; cx < x1; cx += cycle)
+            {
+              int from = max (cx, x0);
+              int to = min (cx + seg, x1);
+              if (to > from)
+                gfx_drv->fill_rect (f, from, s->ybase + position,
+                                    to - from, thickness, uc);
+            }
+        }
+      else
+        {
+          gfx_drv->fill_rect (f, s->x, s->ybase + position,
                               s->width, thickness, uc);
+          /* Second line above the first for double underline.  */
+          if (face->underline == FACE_UNDERLINE_DOUBLE_LINE)
+            {
+              int p2 = position - thickness - 1;
+              gfx_drv->fill_rect (f, s->x, s->ybase + p2,
+                                  s->width, thickness, uc);
+            }
         }
     }
 
@@ -776,7 +810,12 @@ gfx_draw_glyph_string_impl (struct glyph_string *s)
 void
 gfx_draw_glyph_string (struct glyph_string *s)
 {
-  if (!gfx_ready (s->f)) return;
+  if (!gfx_ready (s->f))
+    {
+      if (gfx_fallback.rif && gfx_fallback.rif->draw_glyph_string)
+        gfx_fallback.rif->draw_glyph_string (s);
+      return;
+    }
 
   if (gfx_drv->in_cycle (s->f))
     {
@@ -803,7 +842,12 @@ gfx_draw_glyph_string (struct glyph_string *s)
 void
 gfx_clear_frame (struct frame *f)
 {
-  if (!gfx_ready (f)) return;
+  if (!gfx_ready (f))
+    {
+      if (gfx_fallback.clear_frame)
+        gfx_fallback.clear_frame (f);
+      return;
+    }
 
   /* clear_garbaged_frames calls this BEFORE update_begin (no cycle), e.g.
      when the minibuffer resizes back after a two-line message.  The
@@ -827,7 +871,12 @@ gfx_clear_frame (struct frame *f)
 void
 gfx_clear_frame_area (struct frame *f, int x, int y, int width, int height)
 {
-  if (!gfx_ready (f)) return;
+  if (!gfx_ready (f))
+    {
+      if (gfx_fallback.rif && gfx_fallback.rif->clear_frame_area)
+        gfx_fallback.rif->clear_frame_area (f, x, y, width, height);
+      return;
+    }
   gfx_drv->fill_rect (f, x, y, width, height,
                       gfx_drv->frame_background (f));
 }
@@ -835,13 +884,43 @@ gfx_clear_frame_area (struct frame *f, int x, int y, int width, int height)
 void
 gfx_clear_under_internal_border (struct frame *f)
 {
-  int b = FRAME_INTERNAL_BORDER_WIDTH (f);
-  if (b <= 0) return;
-  int w = FRAME_PIXEL_WIDTH (f), h = FRAME_PIXEL_HEIGHT (f);
-  gfx_clear_frame_area (f, 0, 0,     w,  b);
-  gfx_clear_frame_area (f, 0, h-b,   w,  b);
-  gfx_clear_frame_area (f, 0, 0,     b,  h);
-  gfx_clear_frame_area (f, w-b, 0,   b,  h);
+  if (!gfx_ready (f))
+    {
+      if (gfx_fallback.rif && gfx_fallback.rif->clear_under_internal_border)
+        gfx_fallback.rif->clear_under_internal_border (f);
+      return;
+    }
+
+  int border = FRAME_INTERNAL_BORDER_WIDTH (f);
+  if (border <= 0 || !FRAME_LIVE_P (f)) return;
+
+  /* Port of ns_clear_under_internal_border: the border is painted with
+     the internal-border face background (child-frame-border for child
+     frames), honoring face remapping, and skips the top margin rows
+     (menu/tool/tab bars).  */
+  int width = FRAME_PIXEL_WIDTH (f);
+  int height = FRAME_PIXEL_HEIGHT (f);
+  int margin = FRAME_TOP_MARGIN_HEIGHT (f);
+  int bottom_margin = FRAME_BOTTOM_MARGIN_HEIGHT (f);
+  int face_id =
+    (FRAME_PARENT_FRAME (f)
+     ? (!NILP (Vface_remapping_alist)
+        ? lookup_basic_face (NULL, f, CHILD_FRAME_BORDER_FACE_ID)
+        : CHILD_FRAME_BORDER_FACE_ID)
+     : (!NILP (Vface_remapping_alist)
+        ? lookup_basic_face (NULL, f, INTERNAL_BORDER_FACE_ID)
+        : INTERNAL_BORDER_FACE_ID));
+  struct face *face = FACE_FROM_ID_OR_NULL (f, face_id);
+  if (!face)
+    face = FACE_FROM_ID_OR_NULL (f, DEFAULT_FACE_ID);
+  unsigned long bg = face ? face->background
+                          : gfx_drv->frame_background (f);
+
+  gfx_drv->fill_rect (f, 0, margin, width, border, bg);
+  gfx_drv->fill_rect (f, 0, 0, border, height, bg);
+  gfx_drv->fill_rect (f, width - border, 0, border, height, bg);
+  gfx_drv->fill_rect (f, 0, height - bottom_margin - border,
+                      width, border, bg);
 }
 
 /* -----------------------------------------------------------------------
@@ -854,7 +933,12 @@ gfx_flush_display (struct frame *f)
   /* Present the current cycle if one is in progress.  Do NOT start a new
      one here -- that is update_begin's responsibility (starting one here
      once left an orphaned encoder that never got closed).  */
-  if (!gfx_ready (f)) return;
+  if (!gfx_ready (f))
+    {
+      if (gfx_fallback.rif && gfx_fallback.rif->flush_display)
+        gfx_fallback.rif->flush_display (f);
+      return;
+    }
   GFX_SEQ ("flush_display (in_cycle=%d pending=%d)",
            (int) gfx_drv->in_cycle (f), (int) gfx_drv->pending_present (f));
   if (gfx_drv->in_cycle (f))
@@ -868,7 +952,12 @@ gfx_flush_display (struct frame *f)
 void
 gfx_update_begin (struct frame *f)
 {
-  if (!gfx_ready (f)) return;
+  if (!gfx_ready (f))
+    {
+      if (gfx_fallback.update_begin)
+        gfx_fallback.update_begin (f);
+      return;
+    }
   struct gfx_frame_state *st = gfx_state (f);
 
   /* Guard: if a cycle is already open (e.g. from a re-entrant redisplay),
@@ -908,7 +997,12 @@ gfx_update_begin (struct frame *f)
 void
 gfx_update_end (struct frame *f)
 {
-  if (!gfx_ready (f)) return;
+  if (!gfx_ready (f))
+    {
+      if (gfx_fallback.update_end)
+        gfx_fallback.update_end (f);
+      return;
+    }
   struct gfx_frame_state *st = gfx_state (f);
 
   /* A cycle that only cleared the garbaged frame (no content drawn)
@@ -927,7 +1021,12 @@ gfx_frame_up_to_date (struct frame *f)
 {
   /* Called when the frame display is fully up to date.  If a cycle was
      begun but not ended (unusual), end it now.  */
-  if (!gfx_ready (f)) return;
+  if (!gfx_ready (f))
+    {
+      if (gfx_fallback.frame_up_to_date)
+        gfx_fallback.frame_up_to_date (f);
+      return;
+    }
   if (gfx_drv->in_cycle (f))
     gfx_drv->end_frame (f, true);
 }
@@ -940,7 +1039,12 @@ void
 gfx_scroll_run (struct window *w, struct run *run)
 {
   struct frame *f = WINDOW_XFRAME (w);
-  if (!gfx_ready (f)) return;
+  if (!gfx_ready (f))
+    {
+      if (gfx_fallback.rif && gfx_fallback.rif->scroll_run_hook)
+        gfx_fallback.rif->scroll_run_hook (w, run);
+      return;
+    }
 
   /* Move the already-rendered block of pixels inside the render target,
      the same geometry the NS backend uses (ns_scroll_run): the text area
@@ -966,14 +1070,26 @@ void
 gfx_shift_glyphs_for_insert (struct frame *f, int x, int y,
                              int w, int h, int by)
 {
-  if (!gfx_ready (f) || by == 0) return;
+  if (!gfx_ready (f))
+    {
+      if (gfx_fallback.rif && gfx_fallback.rif->shift_glyphs_for_insert)
+        gfx_fallback.rif->shift_glyphs_for_insert (f, x, y, w, h, by);
+      return;
+    }
+  if (by == 0) return;
   gfx_drv->copy_region (f, x, y, w, h, x + by, y);
 }
 
 void
 gfx_after_update_window_line (struct window *w, struct glyph_row *desired_row)
 {
-  (void) w; (void) desired_row;
+  struct frame *f = WINDOW_XFRAME (w);
+  if (!gfx_ready (f))
+    {
+      if (gfx_fallback.rif && gfx_fallback.rif->after_update_window_line_hook)
+        gfx_fallback.rif->after_update_window_line_hook (w, desired_row);
+      return;
+    }
 }
 
 /* -----------------------------------------------------------------------
@@ -989,8 +1105,21 @@ gfx_draw_window_cursor (struct window *w,
   (void) x; (void) y; (void) active_p;
 
   struct frame *f = WINDOW_XFRAME (w);
-  if (!gfx_ready (f)) return;
-  if (!on_p) return;
+  if (!gfx_ready (f))
+    {
+      if (gfx_fallback.rif && gfx_fallback.rif->draw_window_cursor)
+        gfx_fallback.rif->draw_window_cursor (w, row, x, y, cursor_type,
+                                              cursor_width, on_p, active_p);
+      return;
+    }
+  if (!on_p)
+    {
+      /* Blink-off phase: hide the animated overlay too, or a GPU cursor
+         would never blink (the overlay persists across presents).  */
+      if (gfx_drv->note_cursor)
+        gfx_drv->note_cursor (f, 0, 0, 0, 0, 0);
+      return;
+    }
 
   w->phys_cursor_type = cursor_type;
   w->phys_cursor_on_p = on_p;
@@ -1085,7 +1214,12 @@ void
 gfx_draw_vertical_window_border (struct window *w, int x, int y0, int y1)
 {
   struct frame *f = WINDOW_XFRAME (w);
-  if (!gfx_ready (f)) return;
+  if (!gfx_ready (f))
+    {
+      if (gfx_fallback.rif && gfx_fallback.rif->draw_vertical_window_border)
+        gfx_fallback.rif->draw_vertical_window_border (w, x, y0, y1);
+      return;
+    }
   struct face *face = FACE_FROM_ID_OR_NULL (f, VERTICAL_BORDER_FACE_ID);
   unsigned long color = face ? face->foreground
                              : gfx_drv->frame_foreground (f);
@@ -1096,7 +1230,12 @@ void
 gfx_draw_window_divider (struct window *w, int x0, int x1, int y0, int y1)
 {
   struct frame *f = WINDOW_XFRAME (w);
-  if (!gfx_ready (f)) return;
+  if (!gfx_ready (f))
+    {
+      if (gfx_fallback.rif && gfx_fallback.rif->draw_window_divider)
+        gfx_fallback.rif->draw_window_divider (w, x0, x1, y0, y1);
+      return;
+    }
 
   struct face *face = FACE_FROM_ID_OR_NULL (f, WINDOW_DIVIDER_FACE_ID);
   struct face *face_first
@@ -1130,9 +1269,13 @@ void
 gfx_draw_fringe_bitmap (struct window *w, struct glyph_row *row,
                         struct draw_fringe_bitmap_params *p)
 {
-  (void) row;
   struct frame *f = WINDOW_XFRAME (w);
-  if (!gfx_ready (f)) return;
+  if (!gfx_ready (f))
+    {
+      if (gfx_fallback.rif && gfx_fallback.rif->draw_fringe_bitmap)
+        gfx_fallback.rif->draw_fringe_bitmap (w, row, p);
+      return;
+    }
 
   /* Like gfx_draw_glyph_string: fringe updates can arrive outside the
      update_begin/end cycle (e.g. clearing the continuation arrow when
@@ -1175,15 +1318,32 @@ gfx_draw_fringe_bitmap (struct window *w, struct glyph_row *row,
 
 void
 gfx_define_fringe_bitmap (int which, unsigned short *bits, int h, int wd)
-{ (void) which; (void) bits; (void) h; (void) wd; }
+{
+  /* The gfx policy reads p->bits directly, but bitmap definitions are
+     GLOBAL: keep the platform backend's registry alive for the frames
+     that still render through it.  */
+  if (gfx_fallback.rif && gfx_fallback.rif->define_fringe_bitmap)
+    gfx_fallback.rif->define_fringe_bitmap (which, bits, h, wd);
+}
 
 void
 gfx_destroy_fringe_bitmap (int which)
-{ (void) which; }
+{
+  if (gfx_fallback.rif && gfx_fallback.rif->destroy_fringe_bitmap)
+    gfx_fallback.rif->destroy_fringe_bitmap (which);
+}
 
 void
 gfx_compute_glyph_string_overhangs (struct glyph_string *s)
-{ s->left_overhang = s->right_overhang = 0; }
+{
+  if (!gfx_ready (s->f))
+    {
+      if (gfx_fallback.rif && gfx_fallback.rif->compute_glyph_string_overhangs)
+        gfx_fallback.rif->compute_glyph_string_overhangs (s);
+      return;
+    }
+  s->left_overhang = s->right_overhang = 0;
+}
 
 void
 gfx_warm_glyph_cache (struct frame *f)
