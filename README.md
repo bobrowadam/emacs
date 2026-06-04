@@ -19,6 +19,22 @@ skeleton). Contributions welcome.
 > a public record (they will be read eventually), but do not expect a
 > reply at this stage.
 
+## Demos
+
+Inline video playing inside a buffer, decoded by AVFoundation straight
+into Metal textures (`mtl-video-insert`):
+
+![Inline video](.github/assets/inline-video.gif)
+
+An animated GIF playing next to font-locked code scrolling, all
+composited by the GPU:
+
+![Animated GIF and code](.github/assets/gif-and-code.gif)
+
+GPU cursor effects (`mtl-animations`), here the *sonicboom* mode:
+
+![Sonicboom cursor](.github/assets/cursor-sonicboom.gif)
+
 ## Building on macOS
 
 Requires Xcode (or the Command Line Tools) and the usual Emacs build

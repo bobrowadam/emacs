@@ -22,6 +22,7 @@
 .*
 !.clang-format
 !.clangd
+!.github
 !.dir-locals.el
 !.gitattributes
 !.gitignore
