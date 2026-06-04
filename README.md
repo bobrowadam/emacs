@@ -79,6 +79,10 @@ GPU cursor effects (`mtl-animations`), here the *sonicboom* mode:
 
 ![Sonicboom cursor](.github/assets/cursor-sonicboom.gif)
 
+Buffer switches cross-fade on the GPU (on by default, configurable):
+
+![Buffer cross-fade](.github/assets/buffer-crossfade.gif)
+
 ## Building on macOS
 
 Requires Xcode (or the Command Line Tools) and the usual Emacs build
