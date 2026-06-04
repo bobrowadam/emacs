@@ -262,6 +262,11 @@ MtlScrollEasing g_mtl_scroll_easing  = MTL_EASE_OUT_QUAD;
 float           g_mtl_scroll_duration = 0.15f;
 NSUInteger      g_mtl_trail_len       = 20;
 
+/* When false, presents do not wait for the display refresh
+   (CAMetalLayer.displaySyncEnabled): redisplay never blocks on a
+   drawable, trading the 60 fps power cap for NS-like latency.  */
+BOOL g_mtl_vsync_enabled = YES;
+
 /* Master switch for the GPU animation layer (cursor effects, particles,
    CADisplayLink @60fps).  OFF by default: the goal is pixel-correct parity
    with the NS backend first.  When off, the cursor is drawn directly into the
@@ -781,6 +786,7 @@ mtl_setup_frame (struct frame *f)
   layer.device        = g_device;
   layer.pixelFormat   = MTLPixelFormatBGRA8Unorm;
   layer.framebufferOnly = YES;
+  layer.displaySyncEnabled = g_mtl_vsync_enabled;
   layer.frame         = view.bounds;
   layer.autoresizingMask = kCALayerWidthSizable | kCALayerHeightSizable;
 

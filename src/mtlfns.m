@@ -606,6 +606,27 @@ frame.  Returns t while animations are enabled, nil otherwise.  */)
   return Qt;
 }
 
+DEFUN ("mtl-vsync", Fmtl_vsync, Smtl_vsync, 1, 2, 0,
+       doc: /* Enable (non-nil) or disable display sync for FRAME's GPU layer.
+With vsync on (default) presents wait for the display refresh: redisplay
+is capped at the panel rate, which keeps CPU/GPU use minimal.  With it
+off, presents return immediately (lower latency, uncapped, more power).
+FRAME defaults to the selected frame.  */)
+  (Lisp_Object enable, Lisp_Object frame)
+{
+  if (NILP (frame)) frame = Fselected_frame ();
+  CHECK_LIVE_FRAME (frame);
+  g_mtl_vsync_enabled = !NILP (enable);
+  MtlFrameData *fd = mtl_get_frame_data (XFRAME (frame));
+  if (fd && fd.metalLayer)
+    {
+      block_input ();
+      fd.metalLayer.displaySyncEnabled = g_mtl_vsync_enabled;
+      unblock_input ();
+    }
+  return enable;
+}
+
 void
 syms_of_mtlfns (void)
 {
@@ -632,6 +653,7 @@ syms_of_mtlfns (void)
   defsubr (&Smtl_video_move);
   defsubr (&Smtl_video_tick);
   defsubr (&Smtl_anim_tick);
+  defsubr (&Smtl_vsync);
 }
 
 #endif /* HAVE_MTL */
