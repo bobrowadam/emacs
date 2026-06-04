@@ -1,4 +1,4 @@
-/* Metal (GPU) backend for GNU Emacs on macOS — Phase 2: Text rendering.
+/* Metal driver for the GNU Emacs GPU display backend (macOS).
    Copyright (C) 2026 Free Software Foundation, Inc.
 
 This file is part of GNU Emacs.
@@ -248,7 +248,7 @@ static int               g_atlas_row_h   = 0;
    Retina).  Glyphs are baked at physical resolution so they stay crisp on the
    physical-pixel static texture; draw sites divide the physical metrics back to
    logical pixels.  Reset the atlas when this changes (e.g. window moves to a
-   monitor with a different DPI).  See TODO.org Fase C-bis. */
+   monitor with a different DPI).  */
 static CGFloat           g_atlas_scale   = 1.0;
 /* Color-glyph (emoji) cache lives further down; cleared on scale change. */
 static void mtl_color_glyph_cache_clear (void);
@@ -265,8 +265,8 @@ NSUInteger      g_mtl_trail_len       = 20;
 /* Master switch for the GPU animation layer (cursor effects, particles,
    CADisplayLink @60fps).  OFF by default: the goal is pixel-correct parity
    with the NS backend first.  When off, the cursor is drawn directly into the
-   static texture (like NS) and no compositor overlay is drawn.  See TODO.org
-   Fase A.  Toggle from Lisp with (mtl-animations t). */
+   static texture (like NS) and no compositor overlay is drawn.  Toggle from
+   Lisp with (mtl-animations t). */
 BOOL            g_mtl_animations_enabled = NO;
 
 /* Phase 4: additional global pipeline state */
@@ -805,11 +805,11 @@ mtl_setup_frame (struct frame *f)
   fd.emacsFrame   = f;
 
   /* Phase 4: create animator.  Only start the 60fps loop when the animation
-     layer is explicitly enabled (Fase A: correctness first, animation opt-in). */
+     layer is explicitly enabled (correctness first, animation opt-in). */
   MtlAnimator *anim = [[MtlAnimator alloc] initWithFrame:f];
   fd.animator = anim;
 
-  /* Fase I: register the Metal implementation of the gfx driver vtable
+  /* Register the Metal implementation of the gfx driver vtable
      (the neutral policy in gfxterm.c draws through it).  */
   gfx_drv = &mtl_gfx_driver;
   if (g_mtl_animations_enabled)
@@ -1046,7 +1046,7 @@ mtl_log_seq_p (void)
       needsComposite = YES;
     }
 
-  /* Fase H2: while a video plays, every tick presents so the compositor
+  /* While a video plays, every tick presents so the compositor
      samples the freshest decoded frame. */
   if (fd.videoPlayer && [fd.videoPlayer isPlaying])
     needsComposite = YES;
@@ -1061,7 +1061,7 @@ mtl_log_seq_p (void)
 @end
 
 /* -----------------------------------------------------------------------
-   @implementation MtlVideoPlayer (Fase H2: inline video)
+   @implementation MtlVideoPlayer (inline video)
    ----------------------------------------------------------------------- */
 
 @implementation MtlVideoPlayer
@@ -1580,7 +1580,7 @@ mtl_log_seq_p (void)
     [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
   }
 
-  /* Fase H2: inline video overlay.  Drawn over the static texture so the
+  /* Inline video overlay.  Drawn over the static texture so the
      redisplay engine can keep treating the placeholder area as ordinary
      buffer background. */
   MtlVideoPlayer *vp = self.videoPlayer;
@@ -2308,7 +2308,7 @@ mtl_draw_color_glyph (MtlFrameData *fd, CTFontRef font, CGGlyph g,
 }
 
 /* -----------------------------------------------------------------------
-   gfx driver (Fase I): the small vtable the platform-neutral drawing
+   gfx driver: the small vtable the platform-neutral drawing
    policy in gfxterm.c renders through.  Each op is a thin wrapper over
    MtlFrameData / the atlas; the policy never touches ObjC.
    ----------------------------------------------------------------------- */
@@ -2605,7 +2605,7 @@ mtl_set_horizontal_scroll_bar (struct window *window,
 }
 
 /* ---------------------------------------------------------------------------
-   Fase H2: inline video API (called from mtlfns.m).
+   Inline video API (called from mtlfns.m).
    --------------------------------------------------------------------------- */
 
 bool
@@ -3026,7 +3026,7 @@ mtl_render_text_png (const char *path)
     ^(id<MTLRenderCommandEncoder> enc) {
       /* Header bar */
       mtl_fill_rect_enc (enc, 0, 0, sw, 30, 0x3B4252, sw, sh);
-      mtl_draw_string_enc (enc, bf14, "emacs-gl: Metal GPU Backend",
+      mtl_draw_string_enc (enc, bf14, "emacs-gpu: Metal GPU Backend",
                             10, 20, 0xECEFF4, sw, sh);
 
       /* Body */

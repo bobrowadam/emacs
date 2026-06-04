@@ -6,7 +6,7 @@
 ;; Version: 0.1.0
 ;; Package-Requires: ((emacs "30.1"))
 ;; Keywords: hardware, display, macos, metal, gpu
-;; URL: https://github.com/eval-exec/emacs-gl
+;; URL: https://github.com/tanrax/emacs-gpu
 
 ;; This file is part of GNU Emacs.
 
@@ -18,7 +18,7 @@
 ;;; Commentary:
 
 ;; This module provides user-facing configuration for the Metal GPU
-;; display backend (emacs-gl).
+;; display backend (emacs-gpu).
 ;;
 ;; The Metal backend replaces CoreGraphics rendering with Apple Metal
 ;; for GPU-accelerated text, cursor animations, and scroll effects.
@@ -58,7 +58,7 @@
   "Metal GPU display backend for GNU Emacs on macOS."
   :group 'display
   :prefix "mtl-"
-  :link '(url-link "https://github.com/eval-exec/emacs-gl"))
+  :link '(url-link "https://github.com/tanrax/emacs-gpu"))
 
 ;; ---------------------------------------------------------------------------
 ;; Helper functions (must be defined before defcustom :set functions use them)
@@ -224,7 +224,7 @@ The NS backend still handles events, menus, and scrollbars."
   (setopt mtl-scroll-easing easing))
 
 ;; ---------------------------------------------------------------------------
-;; Inline video (Fase H2)
+;; Inline video
 
 (defvar mtl--video-state nil
   "Active inline video: (MARKER WIDTH HEIGHT TIMER FRAME), or nil.")

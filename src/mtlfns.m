@@ -1,5 +1,21 @@
-/* Metal backend Lisp interface — Phase 2.
-   Copyright (C) 2026 Free Software Foundation, Inc.  (GPL-3+)  */
+/* Lisp interface to the Metal GPU display backend.
+   Copyright (C) 2026 Free Software Foundation, Inc.
+
+This file is part of GNU Emacs.
+
+GNU Emacs is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or (at
+your option) any later version.
+
+GNU Emacs is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
+
 
 #include <config.h>
 
@@ -455,7 +471,7 @@ DEFUN ("mtl-animation-status", Fmtl_animation_status, Smtl_animation_status,
    ----------------------------------------------------------------------- */
 
 /* ---------------------------------------------------------------------------
-   Fase H2: inline video
+   Inline video
    --------------------------------------------------------------------------- */
 
 DEFUN ("mtl-video-open", Fmtl_video_open, Smtl_video_open, 5, 7, 0,
@@ -584,7 +600,7 @@ syms_of_mtlfns (void)
   defsubr (&Smtl_animations);
   defsubr (&Smtl_capture_frame);
   defsubr (&Smtl_draw_stats);
-  /* Fase H2: inline video */
+  /* Inline video */
   defsubr (&Smtl_video_open);
   defsubr (&Smtl_video_close);
   defsubr (&Smtl_video_pause);

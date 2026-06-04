@@ -1,5 +1,21 @@
-/* Metal (GPU) backend for GNU Emacs on macOS.
-   Copyright (C) 2026 Free Software Foundation, Inc.  (GPL-3+)  */
+/* Metal driver for the GNU Emacs GPU display backend (macOS).
+   Copyright (C) 2026 Free Software Foundation, Inc.
+
+This file is part of GNU Emacs.
+
+GNU Emacs is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or (at
+your option) any later version.
+
+GNU Emacs is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.
+*/
 
 #ifndef EMACS_MTLTERM_H
 #define EMACS_MTLTERM_H
@@ -138,7 +154,7 @@ typedef struct mtl_spring {
 @end
 
 /* -----------------------------------------------------------------------
-   MtlVideoPlayer — inline video playback (Fase H2).
+   MtlVideoPlayer — inline video playback.
    AVPlayer decodes; AVPlayerItemVideoOutput hands BGRA pixel buffers that
    CVMetalTextureCache wraps as Metal textures with zero copies; the
    compositor draws the current frame as a textured quad over the static
@@ -200,7 +216,7 @@ typedef struct mtl_spring {
    the expose substitute -- lives in gfxterm.c, not here.) */
 @property (nonatomic, assign) BOOL                        needsPresent;
 
-/* Fase H2: active inline video (one per frame for now), drawn by
+/* Active inline video (one per frame for now), drawn by
    compositeToScreen over the static texture. */
 @property (nonatomic, strong) MtlVideoPlayer             *videoPlayer;
 
@@ -270,7 +286,7 @@ extern MtlCursorMode   g_mtl_cursor_mode;
 extern MtlScrollEasing g_mtl_scroll_easing;
 extern float           g_mtl_scroll_duration; /* seconds, default 0.15 */
 extern NSUInteger      g_mtl_trail_len;        /* default 20 */
-extern BOOL            g_mtl_animations_enabled; /* default NO (Fase A) */
+extern BOOL            g_mtl_animations_enabled; /* default NO (animations are opt-in) */
 
 /* -----------------------------------------------------------------------
    Global Metal display list
@@ -296,7 +312,7 @@ MtlGlyphCacheEntry *mtl_cache_glyph (CTFontRef font, uint32_t codepoint);
 /* Pre-rasterize printable ASCII for FRAME's default face (atlas warm-up). */
 extern void mtl_warm_glyph_cache (struct frame *f);
 
-/* Fase H2: inline video (one player per frame). */
+/* Inline video (one player per frame). */
 extern bool mtl_video_open (struct frame *f, const char *path,
                             int x, int y, int w, int h, bool loop);
 extern bool mtl_video_close (struct frame *f);
