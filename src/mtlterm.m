@@ -2943,13 +2943,12 @@ static const char mtl_resize_obs_key;
       self.layer.frame = view.bounds;
     }
 
-  /* Notify Emacs that the frame pixel size changed */
+  /* Only the layer geometry is ours to manage: the EmacsView's own
+     resize path already drives Emacs's change_frame_size machinery.
+     Writing FRAME_PIXEL_* directly here bypassed it and skewed window
+     layout (a split landed one line off compared to the NS backend). */
   if (self.emacsFrame)
-    {
-      FRAME_PIXEL_WIDTH  (self.emacsFrame) = (int)sz.width;
-      FRAME_PIXEL_HEIGHT (self.emacsFrame) = (int)sz.height;
-      SET_FRAME_GARBAGED (self.emacsFrame);
-    }
+    SET_FRAME_GARBAGED (self.emacsFrame);
 }
 
 @end

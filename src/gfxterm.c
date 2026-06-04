@@ -1220,10 +1220,14 @@ gfx_draw_vertical_window_border (struct window *w, int x, int y0, int y1)
         gfx_fallback.rif->draw_vertical_window_border (w, x, y0, y1);
       return;
     }
+  bool immediate = !gfx_drv->in_cycle (f);
+  if (immediate) gfx_begin_frame (f);
   struct face *face = FACE_FROM_ID_OR_NULL (f, VERTICAL_BORDER_FACE_ID);
   unsigned long color = face ? face->foreground
                              : gfx_drv->frame_foreground (f);
   gfx_drv->fill_rect (f, x, y0, 1, y1 - y0, color);
+  if (immediate)
+    gfx_drv->end_frame (f, false);
 }
 
 void
@@ -1236,6 +1240,12 @@ gfx_draw_window_divider (struct window *w, int x0, int x1, int y0, int y1)
         gfx_fallback.rif->draw_window_divider (w, x0, x1, y0, y1);
       return;
     }
+
+  /* Bottom dividers are drawn outside the update cycle (the vertical
+     ones come in-cycle); open a self-contained one or the fill is
+     silently dropped.  */
+  bool immediate = !gfx_drv->in_cycle (f);
+  if (immediate) gfx_begin_frame (f);
 
   struct face *face = FACE_FROM_ID_OR_NULL (f, WINDOW_DIVIDER_FACE_ID);
   struct face *face_first
@@ -1263,6 +1273,9 @@ gfx_draw_window_divider (struct window *w, int x0, int x1, int y0, int y1)
     }
   else
     gfx_drv->fill_rect (f, x0, y0, x1 - x0, y1 - y0, color);
+
+  if (immediate)
+    gfx_drv->end_frame (f, false);
 }
 
 void
