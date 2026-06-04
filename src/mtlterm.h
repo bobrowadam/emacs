@@ -18,19 +18,14 @@
 #include "font.h"
 #include "sysselect.h"
 
+#include "gfxdrv.h"
+
 /* -----------------------------------------------------------------------
-   Glyph atlas cache entry.
+   Glyph atlas cache entry: the driver-side name for the neutral
+   struct gfx_glyph (gfxdrv.h) the policy layer sees.
    ----------------------------------------------------------------------- */
 
-typedef struct mtl_glyph_cache_entry
-{
-  uint64_t cache_key;   /* (font_ptr << 21) ^ codepoint */
-  int  atlas_x, atlas_y;
-  int  width, height;
-  int  bearing_x, bearing_y;
-  float advance_x;
-  bool valid;
-} MtlGlyphCacheEntry;
+typedef struct gfx_glyph MtlGlyphCacheEntry;
 
 #define MTL_ATLAS_WIDTH  2048
 #define MTL_ATLAS_HEIGHT 2048
@@ -198,28 +193,12 @@ typedef struct mtl_spring {
 /* Phase 4: animator */
 @property (nonatomic, strong) MtlAnimator                *animator;
 
-/* D1: scroll bar gutter rects (NSValue-wrapped NSRect, logical pixels) queued
-   by the scroll bar hooks during the layout phase and flushed to background at
-   the start of the next frame, when a render encoder is active. */
-@property (nonatomic, strong) NSMutableArray             *pendingClears;
-
 /* F1: immediate draws (mouse-face highlight, etc.) commit to the static texture
-   but defer presenting; this flag tells flush_display a present is pending so
-   the whole clear+redraw sequence is shown in one go (no flicker). */
+   but defer presenting; this flag tells the policy's flush a present is pending
+   so the whole clear+redraw sequence is shown in one go (no flicker).
+   (Render-cycle POLICY state -- clear-only deferral, pending gutter clears,
+   the expose substitute -- lives in gfxterm.c, not here.) */
 @property (nonatomic, assign) BOOL                        needsPresent;
-
-/* Expose substitute: last known pixel height of the minibuffer window.  When it
-   changes, update_begin clears the affected bottom strip (NS relies on its
-   drawRect: expose path for the uncovered pixels; Metal has none). */
-@property (nonatomic, assign) int                         lastMiniHeight;
-
-/* Within the current update cycle: clear_frame ran / real content was drawn.
-   A cycle that only cleared (a garbaged frame, e.g. the first switch to a tab
-   whose faces are not realized yet) must NOT present, or the user sees a blank
-   flash before the follow-up cycle paints the actual content.  NS does not
-   flash there because AppKit coalesces the backing-store flushes. */
-@property (nonatomic, assign) BOOL                        cycleSawClear;
-@property (nonatomic, assign) BOOL                        cycleSawDraw;
 
 /* Fase H2: active inline video (one per frame for now), drawn by
    compositeToScreen over the static texture. */

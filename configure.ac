@@ -573,6 +573,11 @@ On by default on macOS.])],[],[with_ns=maybe])
 AC_ARG_WITH([mtl],[AS_HELP_STRING([--with-mtl],
 [use Metal GPU backend for macOS (experimental; requires macOS 13+).])],
 [],[with_mtl=no])
+AC_ARG_WITH([gl],[AS_HELP_STRING([--with-gl],
+[use OpenGL GPU backend (RESERVED, not implemented yet: the gfx driver
+abstraction in src/gfxdrv.h + src/gfxterm.c is the integration point;
+implement a gl driver vtable like mtlterm.m's and wire it here).])],
+[],[with_gl=no])
 OPTION_DEFAULT_OFF([w32], [use native MS Windows GUI in a Cygwin build])
 OPTION_DEFAULT_OFF([pgtk], [use GTK to support window systems other than X])
 
@@ -2952,6 +2957,12 @@ HAVE_MTL=no
 MTL_OBJ=
 MTL_OBJC_OBJ=
 MTL_LIBS=
+if test "${with_gl}" = yes; then
+  AC_MSG_ERROR([--with-gl is reserved and not implemented yet.  The GPU
+drawing policy is already platform-neutral (src/gfxterm.c over the driver
+vtable in src/gfxdrv.h); an OpenGL driver needs to implement that vtable
+(see mtlterm.m's mtl_gfx_driver for the reference implementation).])
+fi
 if test "${with_mtl}" = yes; then
   if test "${opsys}" != darwin; then
     AC_MSG_ERROR([--with-mtl is only supported on macOS (darwin).])
@@ -2966,6 +2977,9 @@ if test "${with_mtl}" = yes; then
     [AC_MSG_ERROR([Metal/Metal.h not found. Install Xcode or the Command Line Tools.])])
   AC_LANG_POP([Objective C])
   if test "${HAVE_MTL}" = yes; then
+    dnl gfxterm.o: the platform-neutral drawing policy shared by every
+    dnl gfx driver (Fase I); mtlterm.o implements the driver vtable.
+    MTL_OBJ="gfxterm.o"
     MTL_OBJC_OBJ="mtlterm.o mtlfns.o"
     dnl AVFoundation/CoreMedia/CoreVideo: inline video (AVPlayerItemVideoOutput
     dnl decoded straight into Metal textures via CVMetalTextureCache).
