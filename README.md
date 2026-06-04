@@ -83,6 +83,17 @@ Buffer switches cross-fade on the GPU (on by default, configurable):
 
 ![Buffer cross-fade](.github/assets/buffer-crossfade.gif)
 
+## Installing
+
+With Homebrew (Apple Silicon, macOS 26+):
+
+```sh
+brew install --cask tanrax/tap/emacs-gpu
+```
+
+Or grab the signed, self-contained `Emacs.app` from the
+[releases](https://github.com/tanrax/emacs-gpu/releases).
+
 ## Building on macOS
 
 Requires Xcode (or the Command Line Tools) and the usual Emacs build
