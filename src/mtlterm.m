@@ -1222,7 +1222,8 @@ mtl_log_seq_p (void)
 - (void)openRenderEncoderClear:(BOOL)clear;
 - (void)scrollRunFrom:(int)fromY to:(int)toY x:(int)x width:(int)w height:(int)h;
 - (void)shiftGlyphsX:(int)x y:(int)y width:(int)w height:(int)h by:(int)shift;
-- (void)drawFringeBits:(unsigned short *)bits dh:(int)dh wd:(int)wd h:(int)h
+- (void)drawFringeBits:(unsigned short *)bits dh:(int)dh bw:(int)bw
+                    wd:(int)wd h:(int)h
                    atX:(int)x y:(int)y color:(unsigned long)color;
 - (void)applyClipRect:(NSRect)r;
 - (void)clearClipRect;
@@ -1502,11 +1503,13 @@ mtl_log_seq_p (void)
    is row r; the visible window is [dh, dh+h).  A fresh texture per call avoids
    the deferred-sampling hazard of reusing one texture across queued draws; the
    command buffer retains it until completion, and fringes are few per frame. */
-- (void)drawFringeBits:(unsigned short *)bits dh:(int)dh wd:(int)wd h:(int)h
+- (void)drawFringeBits:(unsigned short *)bits dh:(int)dh bw:(int)bw
+                    wd:(int)wd h:(int)h
                    atX:(int)x y:(int)y color:(unsigned long)color
 {
   if (!self.encoder || !g_glyph_pipeline || !bits || wd <= 0 || h <= 0) return;
   if (wd > 32) wd = 32;
+  if (bw < wd) bw = wd;
 
   MTLTextureDescriptor *td =
     [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm
@@ -1521,8 +1524,10 @@ mtl_log_seq_p (void)
     {
       unsigned short row = bits[dh + r];
       for (int c = 0; c < wd; c++)
-        /* MSB-first: leftmost pixel is the high bit of the wd-wide row. */
-        if ((row >> (wd - 1 - c)) & 1)
+        /* MSB-first within the bitmap's TRUE width: when the fringe is
+           narrower than the bitmap, this shows its left-aligned part
+           (the native backends clip the full bitmap the same way). */
+        if ((row >> (bw - 1 - c)) & 1)
           buf[r * wd + c] = 0xFF;
     }
   [tex replaceRegion:MTLRegionMake2D (0, 0, (NSUInteger) wd, (NSUInteger) h)
@@ -2572,9 +2577,10 @@ mtl_drv_draw_texture (struct frame *f, void *texture,
 
 static void
 mtl_drv_draw_bitmap (struct frame *f, unsigned short *bits, int dh,
-                     int wd, int h, int x, int y, unsigned long color)
+                     int bw, int wd, int h, int x, int y,
+                     unsigned long color)
 {
-  [mtl_get_frame_data (f) drawFringeBits:bits dh:dh wd:wd h:h
+  [mtl_get_frame_data (f) drawFringeBits:bits dh:dh bw:bw wd:wd h:h
                                      atX:x y:y color:color];
 }
 

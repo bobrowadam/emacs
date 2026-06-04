@@ -1308,7 +1308,13 @@ gfx_draw_fringe_bitmap (struct window *w, struct glyph_row *row,
       else
         color = gfx_drv->cursor_color (f);
 
-      gfx_drv->draw_bitmap (f, p->bits, p->dh, p->wd, p->h, p->x, p->y,
+      /* The params carry the CLIPPED display width; the bits stay
+         MSB-aligned within the bitmap's own width.  Fetch it so a
+         fringe narrower than the bitmap shows its left-aligned part
+         (the native backends draw the full bitmap and clip).  */
+      int fbw = fringe_bitmap_width (p->which);
+      int bw = fbw >= p->wd ? fbw : p->wd;
+      gfx_drv->draw_bitmap (f, p->bits, p->dh, bw, p->wd, p->h, p->x, p->y,
                             color);
     }
 
@@ -1319,9 +1325,9 @@ gfx_draw_fringe_bitmap (struct window *w, struct glyph_row *row,
 void
 gfx_define_fringe_bitmap (int which, unsigned short *bits, int h, int wd)
 {
-  /* The gfx policy reads p->bits directly, but bitmap definitions are
-     GLOBAL: keep the platform backend's registry alive for the frames
-     that still render through it.  */
+  /* Bitmap definitions are GLOBAL: keep the platform backend's registry
+     alive for the frames that still render through it.  (The gfx policy
+     itself reads the bits and true width via get_fringe_bitmap_data.)  */
   if (gfx_fallback.rif && gfx_fallback.rif->define_fringe_bitmap)
     gfx_fallback.rif->define_fringe_bitmap (which, bits, h, wd);
 }

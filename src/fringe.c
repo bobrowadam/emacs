@@ -1862,6 +1862,16 @@ gui_define_fringe_bitmap (struct frame *f, int n)
     rif->define_fringe_bitmap (n, fb->bits, fb->height, fb->width);
 }
 
+/* True (unclipped) width of fringe bitmap BN, for display backends
+   whose draw params carry only the clipped display width.  */
+
+int
+fringe_bitmap_width (int bn)
+{
+  struct fringe_bitmap *fb = get_fringe_bitmap_data (bn);
+  return fb ? fb->width : 0;
+}
+
 #ifdef HAVE_NTGUI
 void
 w32_reset_fringes (void)

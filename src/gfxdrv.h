@@ -145,9 +145,14 @@ struct gfx_driver
                         float alpha);
 
   /* --- Fringe bitmaps --- */
-  /* Draw the engine's MSB-first unsigned-short bitmap rows as COLOR.  */
+  /* Draw the engine's unsigned-short bitmap rows as COLOR.  Bits are
+     MSB-aligned within BW (the bitmap's OWN width); WD is the display
+     width -- when the fringe is narrower than the bitmap, draw the
+     LEFT-aligned portion (like the native backends, which clip the
+     full bitmap).  */
   void (*draw_bitmap) (struct frame *f, unsigned short *bits, int dh,
-                       int wd, int h, int x, int y, unsigned long color);
+                       int bw, int wd, int h, int x, int y,
+                       unsigned long color);
 
   /* --- Colors --- */
   /* Relief light/dark for S's face: platform-appearance aware (on macOS
