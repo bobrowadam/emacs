@@ -272,7 +272,7 @@ BOOL g_mtl_vsync_enabled = YES;
    with the NS backend first.  When off, the cursor is drawn directly into the
    static texture (like NS) and no compositor overlay is drawn.  Toggle from
    Lisp with (mtl-animations t). */
-BOOL            g_mtl_animations_enabled = NO;
+BOOL            g_mtl_animations_enabled = YES;
 
 /* Phase 4: additional global pipeline state */
 static id<MTLRenderPipelineState> g_blit_pipeline     = nil;
@@ -1087,6 +1087,10 @@ mtl_log_seq_p (void)
   if (fd.videoPlayer && [fd.videoPlayer isPlaying])
     needsComposite = YES;
 
+  /* Same while a buffer-switch crossfade is in flight. */
+  if (fd.transitionTexture)
+    needsComposite = YES;
+
   if (needsComposite || self.cursorDirty)
     {
       self.cursorDirty = NO;
@@ -1748,6 +1752,33 @@ mtl_log_seq_p (void)
         }
     }
 
+  /* Buffer-switch crossfade: the old content fades out over the new.  */
+  if (self.transitionTexture && self.transitionDuration > 0)
+    {
+      float p = (float) ((CACurrentMediaTime () - self.transitionStart)
+                         / self.transitionDuration);
+      if (p >= 1.0f)
+        self.transitionTexture = nil;   /* done */
+      else
+        {
+          float a = 1.0f - p;
+          a = a * a * (3.0f - 2.0f * a);   /* smoothstep del fade-out */
+          typedef struct { float x, y, u, v, al; } ImgVert;
+          float x1 = (float) sz.width, y1 = (float) sz.height;
+          ImgVert verts[6] = {
+            {0,0, 0,0,a}, {x1,0, 1,0,a}, {0,y1, 0,1,a},
+            {x1,0, 1,0,a}, {x1,y1, 1,1,a}, {0,y1, 0,1,a},
+          };
+          [enc setRenderPipelineState:g_image_pipeline];
+          [enc setVertexBytes:verts length:sizeof (verts) atIndex:0];
+          [enc setVertexBuffer:self.uniformBuffer offset:0 atIndex:1];
+          [enc setFragmentTexture:self.transitionTexture atIndex:0];
+          [enc setFragmentSamplerState:g_nearest_sampler atIndex:0];
+          [enc drawPrimitives:MTLPrimitiveTypeTriangle
+                  vertexStart:0 vertexCount:6];
+        }
+    }
+
   /* Animation overlay (cursor effects, trail, particles) is opt-in.  When off,
      the cursor lives in the static texture (drawn by mtl_draw_window_cursor),
      so the compositor only blits and presents.  This is what kills the stray
@@ -1804,8 +1835,14 @@ mtl_log_seq_p (void)
         }
 
       /* 3. Cursor (spring-interpolated position).  Hidden during the
-         blink-off phase; effects in flight keep animating.  */
-      if (!anim.cursorHidden)
+         blink-off phase; effects in flight keep animating.  Only the
+         body-animated modes draw it here: the burst modes rely on the
+         static (inverted glyph) cursor in the texture.  */
+      if (!anim.cursorHidden
+          && (anim.cursorMode == MTL_CURSOR_SPRING
+              || anim.cursorMode == MTL_CURSOR_TORPEDO
+              || anim.cursorMode == MTL_CURSOR_HOLLOW
+              || anim.cursorMode == MTL_CURSOR_BEAM))
       {
         float x0=cx, y0=cy, x1=cx+cw, y1=cy+ch;
         float fr=ccr,fg=ccg,fb=ccb;
@@ -2663,7 +2700,14 @@ mtl_drv_note_cursor (struct frame *f, int x, int y, int w, int h,
      never left painted at its old position. */
   if (!fd.encoder)
     [fd compositeToScreen];
-  return true;
+  /* Only the modes that ANIMATE the cursor body draw it in the overlay;
+     for the burst modes (sonicboom/ripple/pixiedust) the policy keeps
+     drawing the proper static cursor (inverted glyph) and the overlay
+     adds just the effects -- a solid overlay body would hide the
+     character under the cursor.  */
+  MtlCursorMode mode = fd.animator.cursorMode;
+  return (mode == MTL_CURSOR_SPRING || mode == MTL_CURSOR_TORPEDO
+          || mode == MTL_CURSOR_HOLLOW || mode == MTL_CURSOR_BEAM);
 }
 
 static struct gfx_driver mtl_gfx_driver =
@@ -2812,6 +2856,48 @@ mtl_video_set_clip (struct frame *f, int x, int y, int w, int h)
   MtlFrameData *fd = mtl_get_frame_data (f);
   if (!fd || !fd.videoPlayer) return false;
   fd.videoPlayer.clipRect = NSMakeRect (x, y, w, h);
+  return true;
+}
+
+/* Buffer-switch crossfade: copy the CURRENT static texture into the
+   transition snapshot and arm the fade.  Called from Lisp just before
+   redisplay paints the new buffer (pre-redisplay-functions), so the
+   snapshot still holds the old content. */
+bool
+mtl_transition_start (struct frame *f, float duration)
+{
+  MtlFrameData *fd = mtl_get_frame_data (f);
+  if (!fd || !fd.staticTexture || fd.encoder || duration <= 0)
+    return false;
+
+  id<MTLTexture> src = fd.staticTexture;
+  id<MTLTexture> snap = fd.transitionTexture;
+  if (!snap || snap.width != src.width || snap.height != src.height)
+    {
+      MTLTextureDescriptor *td = [MTLTextureDescriptor
+        texture2DDescriptorWithPixelFormat:src.pixelFormat
+                                     width:src.width
+                                    height:src.height
+                                 mipmapped:NO];
+      td.usage = MTLTextureUsageShaderRead;
+      td.storageMode = MTLStorageModePrivate;
+      snap = [g_device newTextureWithDescriptor:td];
+      fd.transitionTexture = snap;
+      [snap release];
+    }
+
+  id<MTLCommandBuffer> cmd = [g_queue commandBuffer];
+  id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
+  [blit copyFromTexture:src sourceSlice:0 sourceLevel:0
+           sourceOrigin:MTLOriginMake (0, 0, 0)
+             sourceSize:MTLSizeMake (src.width, src.height, 1)
+              toTexture:snap destinationSlice:0 destinationLevel:0
+      destinationOrigin:MTLOriginMake (0, 0, 0)];
+  [blit endEncoding];
+  [cmd commit];
+
+  fd.transitionStart = CACurrentMediaTime ();
+  fd.transitionDuration = duration;
   return true;
 }
 

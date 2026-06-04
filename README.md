@@ -99,8 +99,9 @@ The binary is `src/emacs` (or install the app bundle from `nextstep/`).
 
 ## Enabling the GPU backend
 
-Emacs starts with the regular Cocoa backend; switch a frame to Metal
-with:
+The release app bundle enables it automatically (set the environment
+variable `EMACS_GPU_DISABLE=1` to start with the stock Cocoa backend
+instead).  In a source build, switch a frame to Metal with:
 
 ```elisp
 (add-to-list 'load-path "/path/to/emacs-gpu/lisp")
@@ -108,12 +109,26 @@ with:
 (mtl-enable)
 ```
 
-Extras once enabled:
+## Commands and options
+
+| Command | What it does |
+|---|---|
+| `M-x mtl-status` | Show backend state: GPU device, animations, cursor mode |
+| `M-: (mtl-draw-stats)` | Renderer counters; `glyphs-drawn` growing proves the GPU is painting |
+| `M-x mtl-toggle-animations` | Toggle GPU cursor effects (on by default) |
+| `M-x mtl-set-cursor` | Pick the cursor effect: `sonicboom` (default), `torpedo` (comet trail), `spring`, `ripple`, `pixiedust`, `hollow`, `beam`, `block` |
+| `M-: (mtl-vsync nil)` | Uncap presents from the display refresh (lower latency, more power) |
+| `M-: (mtl-video-insert "clip.mp4" 480 270 t)` | Play a video inline at point; follows scrolling |
+| `M-x mtl-video-stop` | Stop the inline video |
+
+Cursor effects trigger on cursor jumps (`M-<`, `M->`, isearch hits),
+not on single-character movement.
+
+Buffer switches cross-fade by default; tune or disable with:
 
 ```elisp
-(mtl-video-insert "video.mp4" 480 270 t)  ; inline video, follows scrolling
-(mtl-animations t)                        ; GPU cursor effects (experimental)
-(mtl-draw-stats)                          ; renderer counters
+(setq mtl-buffer-transition-duration 0.15) ; seconds
+(setq mtl-buffer-transitions nil)          ; turn it off
 ```
 
 ## How it works

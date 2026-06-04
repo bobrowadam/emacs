@@ -592,9 +592,10 @@ frame.  Returns t while animations are enabled, nil otherwise.  */)
 {
   if (NILP (frame)) frame = Fselected_frame ();
   if (!FRAME_LIVE_P (XFRAME (frame))) return Qnil;
-  if (!g_mtl_animations_enabled) return Qnil;
   MtlFrameData *fd = mtl_get_frame_data (XFRAME (frame));
   if (!fd || !fd.animator) return Qnil;
+  if (!g_mtl_animations_enabled && !fd.transitionTexture && !fd.videoPlayer)
+    return Qnil;
 
   float step = 0.033f;
   if (NUMBERP (dt))
@@ -627,6 +628,25 @@ FRAME defaults to the selected frame.  */)
   return enable;
 }
 
+DEFUN ("mtl-transition-start", Fmtl_transition_start, Smtl_transition_start,
+       1, 2, 0,
+       doc: /* Crossfade the current frame content over the next redraw.
+Snapshot what FRAME shows now and fade it out over DURATION seconds
+while the new content appears underneath.  Driven by mtl.el's
+buffer-switch hook; callable directly for custom effects.  FRAME
+defaults to the selected frame.  Returns t if the snapshot was taken.  */)
+  (Lisp_Object duration, Lisp_Object frame)
+{
+  if (NILP (frame)) frame = Fselected_frame ();
+  CHECK_LIVE_FRAME (frame);
+  CHECK_NUMBER (duration);
+  bool ok;
+  block_input ();
+  ok = mtl_transition_start (XFRAME (frame), (float) XFLOATINT (duration));
+  unblock_input ();
+  return ok ? Qt : Qnil;
+}
+
 void
 syms_of_mtlfns (void)
 {
@@ -654,6 +674,7 @@ syms_of_mtlfns (void)
   defsubr (&Smtl_video_tick);
   defsubr (&Smtl_anim_tick);
   defsubr (&Smtl_vsync);
+  defsubr (&Smtl_transition_start);
 }
 
 #endif /* HAVE_MTL */

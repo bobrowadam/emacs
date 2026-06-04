@@ -87,6 +87,22 @@
     ('ease-in-out-cubic 5)
     (_ 2)))
 
+(defvar mtl--anim-timer nil
+  "30fps timer driving cursor animations while they are enabled.")
+
+(defun mtl--anim-pump ()
+  "Advance GPU cursor animations; cancel the timer when they turn off."
+  (unless (and (fboundp 'mtl-anim-tick) (mtl-anim-tick))
+    (when (timerp mtl--anim-timer) (cancel-timer mtl--anim-timer))
+    (setq mtl--anim-timer nil)))
+
+(defun mtl--anim-pump-start ()
+  "Start the animation pump timer (idempotent).
+Emacs's event loop starves the CADisplayLink while idle, so without
+this Lisp timer the cursor effects only animate during user input."
+  (unless (timerp mtl--anim-timer)
+    (setq mtl--anim-timer (run-at-time 0 0.033 #'mtl--anim-pump))))
+
 ;; ---------------------------------------------------------------------------
 ;; Customizable variables
 
@@ -136,7 +152,7 @@ Lower values are snappier; higher values are more fluid."
   :set #'set-default
   :group 'mtl)
 
-(defcustom mtl-animations-enabled nil
+(defcustom mtl-animations-enabled t
   "If non-nil, enable the Metal GPU animation layer.
 When nil (the default), the cursor is drawn directly into the static
 texture like the NS backend and no compositor overlay is drawn, which is
@@ -181,24 +197,9 @@ The NS backend still handles events, menus, and scrollbars."
     (mtl-trail-length mtl-trail-length)
     (mtl-animations mtl-animations-enabled)
     (when mtl-animations-enabled (mtl--anim-pump-start))
+    (add-hook 'pre-redisplay-functions #'mtl--transition-watch)
     (message "Metal GPU enabled on frame: %s (device: %s, animations: %s)"
              f (mtl-device-name) (if mtl-animations-enabled "on" "off"))))
-
-(defvar mtl--anim-timer nil
-  "30fps timer driving cursor animations while they are enabled.")
-
-(defun mtl--anim-pump ()
-  "Advance GPU cursor animations; cancel the timer when they turn off."
-  (unless (and (fboundp 'mtl-anim-tick) (mtl-anim-tick))
-    (when (timerp mtl--anim-timer) (cancel-timer mtl--anim-timer))
-    (setq mtl--anim-timer nil)))
-
-(defun mtl--anim-pump-start ()
-  "Start the animation pump timer (idempotent).
-Emacs's event loop starves the CADisplayLink while idle, so without
-this Lisp timer the cursor effects only animate during user input."
-  (unless (timerp mtl--anim-timer)
-    (setq mtl--anim-timer (run-at-time 0 0.033 #'mtl--anim-pump))))
 
 (defun mtl-toggle-animations ()
   "Toggle the Metal GPU animation layer on or off."
@@ -241,6 +242,43 @@ this Lisp timer the cursor effects only animate during user input."
                                     "ease-out-cubic" "spring" "ease-in-out-cubic")
                                   nil t))))
   (setopt mtl-scroll-easing easing))
+
+;; ---------------------------------------------------------------------------
+;; Buffer-switch transitions
+
+(defcustom mtl-buffer-transitions t
+  "When non-nil, cross-fade the old content when a window changes buffer.
+The previous frame content fades out over
+`mtl-buffer-transition-duration' seconds while the new buffer appears
+underneath.  Rendered entirely by the GPU compositor."
+  :type 'boolean
+  :group 'mtl)
+
+(defcustom mtl-buffer-transition-duration 0.15
+  "Seconds a buffer-switch cross-fade takes."
+  :type 'number
+  :group 'mtl)
+
+(defvar mtl--transition-armed nil
+  "Non-nil while a snapshot was already taken for the ongoing redisplay.")
+
+(defun mtl--transition-watch (window)
+  "Start a cross-fade when WINDOW is about to display another buffer.
+Runs from `pre-redisplay-functions', before the new content is painted,
+so the GPU snapshot still holds the old pixels."
+  (when (and mtl-buffer-transitions
+             (not (window-minibuffer-p window))
+             (fboundp 'mtl-transition-start))
+    (let ((old (window-parameter window 'mtl--last-buffer))
+          (new (window-buffer window)))
+      (when (and old (not (eq old new)) (not mtl--transition-armed))
+        (setq mtl--transition-armed t)
+        (run-at-time 0 nil (lambda () (setq mtl--transition-armed nil)))
+        (ignore-errors
+          (when (mtl-transition-start (float mtl-buffer-transition-duration)
+                                      (window-frame window))
+            (mtl--anim-pump-start))))
+      (set-window-parameter window 'mtl--last-buffer new))))
 
 ;; ---------------------------------------------------------------------------
 ;; Inline video

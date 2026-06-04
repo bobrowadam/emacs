@@ -231,6 +231,12 @@ typedef struct mtl_spring {
 @property (nonatomic, assign) CFTimeInterval              lastPresentTime;
 @property (nonatomic, assign) BOOL                        presentScheduled;
 
+/* Buffer-switch transition: a snapshot of the previous content cross-
+   fades over the new one (drawn by the compositor while active).  */
+@property (nonatomic, strong) id<MTLTexture>              transitionTexture;
+@property (nonatomic, assign) CFTimeInterval              transitionStart;
+@property (nonatomic, assign) float                       transitionDuration;
+
 /* Coalesced present: present now, unless one landed very recently (then
    schedule a deferred one).  Use for "make the frame visible" paths.  */
 - (void)presentCoalesced;
@@ -344,6 +350,10 @@ extern bool mtl_video_set_paused (struct frame *f, bool paused);
 extern bool mtl_video_set_rect (struct frame *f, int x, int y, int w, int h);
 extern bool mtl_video_set_clip (struct frame *f, int x, int y, int w, int h);
 extern bool mtl_video_tick (struct frame *f);
+
+/* Buffer-switch crossfade: snapshot current content, fade it out over
+   DURATION seconds while the new content shows underneath. */
+extern bool mtl_transition_start (struct frame *f, float duration);
 
 extern bool mtl_render_offscreen_png (const char *path, int w, int h,
                                        void (^draw)(id<MTLRenderCommandEncoder>));
