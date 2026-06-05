@@ -130,8 +130,8 @@ instead).  In a source build, switch a frame to Metal with:
 |---|---|
 | `M-x gpu-status` | Show backend state: GPU device, animations, cursor mode |
 | `M-: (gpu-draw-stats)` | Renderer counters; `glyphs-drawn` growing proves the GPU is painting |
-| `M-x gpu-toggle-animations` | Toggle GPU cursor effects (on by default) |
-| `M-x gpu-set-cursor` | Pick the cursor effect: `sonicboom` (default), `torpedo` (comet trail), `spring`, `ripple`, `pixiedust`, `hollow`, `beam`, `block` |
+| `M-x gpu-toggle-animations` | Toggle the GPU compositor overlay used by cursor effects |
+| `M-x gpu-set-cursor` | Pick the cursor effect: `block` (static, default, no effect), `sonicboom` (ring), `torpedo` (comet trail), `spring`, `ripple`, `pixiedust`, `hollow`, `beam` |
 | `M-: (gpu-vsync nil)` | Uncap presents from the display refresh (lower latency, more power) |
 | `M-: (gpu-video-insert "clip.mp4" 480 270 t)` | Play a video inline at point; follows scrolling |
 | `M-x gpu-video-stop` | Stop the inline video |

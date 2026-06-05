@@ -3,7 +3,7 @@
 ;; Copyright (C) 2026 Free Software Foundation, Inc.
 
 ;; Author: Andros Fenollosa
-;; Version: 0.1.0
+;; Version: 0.1.1
 ;; Package-Requires: ((emacs "30.1"))
 ;; Keywords: hardware, display, macos, metal, gpu
 ;; URL: https://github.com/tanrax/emacs-gpu
@@ -113,18 +113,18 @@ this Lisp timer the cursor effects only animate during user input."
 ;; ---------------------------------------------------------------------------
 ;; Customizable variables
 
-(defcustom gpu-cursor-animation 'sonicboom
+(defcustom gpu-cursor-animation 'block
   "Cursor animation mode for the Metal GPU backend.
 Possible values:
-  `block'      Static filled rectangle (no animation)
+  `block'      Static filled rectangle, no effect (default)
   `spring'     Critically-damped spring physics
   `torpedo'    Trail of last N cursor positions
-  `sonicboom'  Expanding ring when cursor jumps far (default)
+  `sonicboom'  Expanding ring when cursor jumps far
   `ripple'     Three concentric expanding rings
   `pixiedust'  Radial particle burst on jump
   `hollow'     Hollow outline box
   `beam'       Thin vertical bar"
-  :type '(choice (const :tag "Block (static)" block)
+  :type '(choice (const :tag "Block (static, default)" block)
                  (const :tag "Spring (smooth)" spring)
                  (const :tag "Torpedo (trail)" torpedo)
                  (const :tag "Sonicboom (ring)" sonicboom)
@@ -132,7 +132,12 @@ Possible values:
                  (const :tag "Pixiedust (particles)" pixiedust)
                  (const :tag "Hollow (outline)" hollow)
                  (const :tag "Beam (bar)" beam))
-  :set #'set-default
+  :set (lambda (sym val)
+         (set-default sym val)
+         ;; Propagate to the live driver so the change takes effect at
+         ;; runtime, not only on the next `gpu-enable'.
+         (when (fboundp 'gpu-cursor-mode)
+           (gpu-cursor-mode (gpu--cursor-mode-number val))))
   :group 'gpu)
 
 (defcustom gpu-scroll-easing 'ease-out-quad
@@ -239,7 +244,8 @@ The NS backend still handles events, menus, and scrollbars."
                                   '("block" "spring" "torpedo" "sonicboom"
                                     "ripple" "pixiedust" "hollow" "beam")
                                   nil t))))
-  (setopt gpu-cursor-animation mode))
+  (setopt gpu-cursor-animation mode)
+  (message "GPU cursor mode: %s" mode))
 
 (defun gpu-set-scroll (easing)
   "Interactively set scroll EASING."
