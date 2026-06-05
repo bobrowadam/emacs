@@ -3,7 +3,7 @@
 ;; Copyright (C) 2026 Free Software Foundation, Inc.
 
 ;; Author: Andros Fenollosa
-;; Version: 0.1.2
+;; Version: 0.2.0
 ;; Package-Requires: ((emacs "30.1"))
 ;; Keywords: hardware, display, macos, metal, gpu
 ;; URL: https://github.com/tanrax/emacs-gpu
@@ -164,6 +164,32 @@ Lower values are snappier; higher values are more fluid."
   :set #'set-default
   :group 'gpu)
 
+(defcustom gpu-cursor-effects-while-typing nil
+  "If non-nil, the cursor effects also fire while typing.
+By default they are suppressed during text-editing commands (see
+`gpu-cursor-typing-commands'), so only cursor movement and jumps
+trigger the rings, bursts and trail.  This keeps the effects from
+flashing on every inserted or deleted character."
+  :type 'boolean
+  :set #'set-default
+  :group 'gpu)
+
+(defcustom gpu-cursor-typing-commands
+  '(self-insert-command
+    org-self-insert-command
+    newline newline-and-indent electric-newline-and-maybe-indent
+    open-line
+    delete-char delete-backward-char backward-delete-char
+    backward-delete-char-untabify delete-forward-char
+    yank yank-pop)
+  "Commands treated as typing/editing for cursor effects.
+When `gpu-cursor-effects-while-typing' is nil, the motion cursor
+effects do not fire after these commands.  A command also counts as
+typing when its symbol has a non-nil `gpu-typing-command' property."
+  :type '(repeat function)
+  :set #'set-default
+  :group 'gpu)
+
 (defcustom gpu-animations-enabled t
   "If non-nil, enable the Metal GPU animation layer.
 When nil (the default), the cursor is drawn directly into the static
@@ -184,8 +210,29 @@ cursor effects, particles and the 60fps compositor."
   :group 'gpu)
 
 ;; ---------------------------------------------------------------------------
+;; Typing vs. movement detection for the cursor effects
+
+(defun gpu--cursor-typing-p ()
+  "Non-nil if `this-command' is a typing/editing command.
+See `gpu-cursor-typing-commands'."
+  (let ((cmd this-command))
+    (and (symbolp cmd)
+         (or (memq cmd gpu-cursor-typing-commands)
+             (get cmd 'gpu-typing-command)))))
+
+(defun gpu--cursor-pre-command ()
+  "Tell the driver whether the upcoming command is typing or movement.
+Runs from `pre-command-hook' so the next cursor placement knows whether
+to fire the motion effects.  See `gpu-cursor-effects-while-typing'."
+  (when (fboundp 'gpu-cursor-suppress-effects)
+    (gpu-cursor-suppress-effects
+     (and (not gpu-cursor-effects-while-typing)
+          (gpu--cursor-typing-p)))))
+
+;; ---------------------------------------------------------------------------
 ;; Public API
 
+;;;###autoload
 (defun gpu-enable (&optional frame)
   "Enable Metal GPU rendering on FRAME (default: selected frame).
 Adds a CAMetalLayer on top of the EmacsView and replaces the
@@ -210,9 +257,12 @@ The NS backend still handles events, menus, and scrollbars."
     (gpu-animations gpu-animations-enabled)
     (when gpu-animations-enabled (gpu--anim-pump-start))
     (add-hook 'pre-redisplay-functions #'gpu--transition-watch)
+    ;; Distinguish typing from cursor movement for the effects.
+    (add-hook 'pre-command-hook #'gpu--cursor-pre-command)
     (message "Metal GPU enabled on frame: %s (device: %s, animations: %s)"
              f (gpu-device-name) (if gpu-animations-enabled "on" "off"))))
 
+;;;###autoload
 (defun gpu-toggle-animations ()
   "Toggle the Metal GPU animation layer on or off."
   (interactive)
@@ -220,6 +270,7 @@ The NS backend still handles events, menus, and scrollbars."
   (when gpu-animations-enabled (gpu--anim-pump-start))
   (message "Metal animations %s" (if gpu-animations-enabled "enabled" "disabled")))
 
+;;;###autoload
 (defun gpu-status ()
   "Display current Metal GPU backend status in the minibuffer."
   (interactive)
@@ -237,6 +288,7 @@ The NS backend still handles events, menus, and scrollbars."
                       '(none linear ease-out-quad ease-out-cubic spring ease-in-out-cubic))
                  (cdr (assq 'scroll-duration status)))))))
 
+;;;###autoload
 (defun gpu-set-cursor (mode)
   "Interactively set cursor animation MODE."
   (interactive
@@ -247,6 +299,7 @@ The NS backend still handles events, menus, and scrollbars."
   (setopt gpu-cursor-animation mode)
   (message "GPU cursor mode: %s" mode))
 
+;;;###autoload
 (defun gpu-set-scroll (easing)
   "Interactively set scroll EASING."
   (interactive

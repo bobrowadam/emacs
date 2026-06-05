@@ -85,7 +85,7 @@ Buffer switches cross-fade on the GPU (on by default, configurable):
 
 ## Installing
 
-With Homebrew (Apple Silicon, macOS 26+):
+With Homebrew (Apple Silicon, macOS 13 Ventura or newer):
 
 ```sh
 brew install --cask tanrax/tap/emacs-gpu
@@ -114,12 +114,20 @@ The binary is `src/emacs` (or install the app bundle from `nextstep/`).
 
 ## Enabling the GPU backend
 
-The release app bundle enables it automatically (set the environment
-variable `EMACS_GPU_DISABLE=1` to start with the stock Cocoa backend
-instead).  In a source build, switch a frame to Metal with:
+When Emacs is built `--with-mtl` and Metal is available, the GPU backend
+is loaded and enabled automatically on the initial frame at startup. This
+applies to both the release app bundle and source builds. To start with
+the stock Cocoa backend instead, set the environment variable
+`EMACS_GPU_DISABLE` to any non-empty value:
+
+```sh
+EMACS_GPU_DISABLE=1 emacs
+```
+
+You can also enable it manually on a given frame (for example after
+starting with it disabled):
 
 ```elisp
-(add-to-list 'load-path "/path/to/emacs-gpu/lisp")
 (require 'gpu)
 (gpu-enable)
 ```
@@ -137,7 +145,14 @@ instead).  In a source build, switch a frame to Metal with:
 | `M-x gpu-video-stop` | Stop the inline video |
 
 Cursor effects trigger on cursor jumps (`M-<`, `M->`, isearch hits),
-not on single-character movement.
+not on single-character movement. They are also suppressed while
+typing or editing text, so they fire only when you move the cursor,
+not on every inserted or deleted character. To get the effects while
+typing too:
+
+```elisp
+(setq gpu-cursor-effects-while-typing t)
+```
 
 Buffer switches cross-fade by default; tune or disable with:
 

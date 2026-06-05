@@ -317,6 +317,8 @@ extern float           g_mtl_scroll_duration; /* seconds, default 0.15 */
 extern NSUInteger      g_mtl_trail_len;        /* default 20 */
 extern BOOL            g_mtl_animations_enabled; /* default NO (animations are opt-in) */
 extern BOOL            g_mtl_vsync_enabled;       /* default YES (60fps power cap) */
+extern BOOL            g_mtl_cursor_suppress_effects; /* set per-command: skip
+                                                         bursts/trail while typing */
 
 /* -----------------------------------------------------------------------
    Global Metal display list

@@ -948,6 +948,27 @@ This moves point to the current mouse position if
  `dnd-indicate-insertion-point' is enabled."
   (dnd-handle-movement (posn-at-x-y x y frame)))
 
+;; Metal GPU backend (emacs-gpu).  When Emacs is built --with-mtl and Metal
+;; is available, load the `gpu' module and enable the GPU backend on the
+;; initial frame at startup.  Set the environment variable EMACS_GPU_DISABLE
+;; to a non-empty value to start with the stock Cocoa backend instead.
+(declare-function gpu-backend-p "mtlfns.m")
+(declare-function gpu-enable "gpu" (&optional frame))
+(defvar gpu-enable-on-startup)
+(defun ns--maybe-enable-gpu ()
+  "Load and enable the Metal GPU backend on startup when available.
+Honors the EMACS_GPU_DISABLE environment variable as an opt-out."
+  (when (and (member (getenv "EMACS_GPU_DISABLE") '(nil ""))
+             (fboundp 'gpu-backend-p)
+             (gpu-backend-p))
+    (require 'gpu)
+    ;; Also enable graphic frames created later in this session.
+    (setq gpu-enable-on-startup t)
+    (when (display-graphic-p)
+      (ignore-errors (gpu-enable)))))
+
+(add-hook 'window-setup-hook #'ns--maybe-enable-gpu)
+
 (provide 'ns-win)
 (provide 'term/ns-win)
 

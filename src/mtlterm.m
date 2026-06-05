@@ -274,6 +274,12 @@ BOOL g_mtl_vsync_enabled = YES;
    Lisp with (mtl-animations t). */
 BOOL            g_mtl_animations_enabled = YES;
 
+/* Per-command gate set from Lisp (pre-command-hook): when YES, the cursor
+   effects that imply motion (sonicboom/ripple/pixiedust bursts and the
+   torpedo trail) are suppressed for this redisplay, so typing does not
+   trigger them.  Cursor MOVEMENT commands leave it NO.  */
+BOOL            g_mtl_cursor_suppress_effects = NO;
+
 /* Phase 4: additional global pipeline state */
 static id<MTLRenderPipelineState> g_blit_pipeline     = nil;
 static id<MTLRenderPipelineState> g_particle_pipeline = nil;
@@ -933,16 +939,19 @@ mtl_log_seq_p (void)
       self.springY = (MtlSpring1D){fy, 0};
     }
 
-  /* Spawn particles when cursor jumps significantly */
+  /* Spawn particles when cursor jumps significantly, unless this redisplay
+     was caused by a typing/editing command (Lisp sets the suppress flag). */
   float dx = fx - self.curTargetX, dy = fy - self.curTargetY;
-  if ((fabsf(dx) > (float)w * 1.5f || fabsf(dy) > (float)h * 1.5f)
+  if (!g_mtl_cursor_suppress_effects
+      && (fabsf(dx) > (float)w * 1.5f || fabsf(dy) > (float)h * 1.5f)
       && (self.cursorMode == MTL_CURSOR_PIXIEDUST
           || self.cursorMode == MTL_CURSOR_SONICBOOM
           || self.cursorMode == MTL_CURSOR_RIPPLE))
     [self spawnParticlesAtX:self.curTargetX + w/2 y:self.curTargetY + h/2];
 
-  /* Add to trail history */
-  if (self.cursorMode == MTL_CURSOR_TORPEDO
+  /* Add to trail history (skipped while typing). */
+  if (!g_mtl_cursor_suppress_effects
+      && self.cursorMode == MTL_CURSOR_TORPEDO
       && (fabsf(dx) > 1 || fabsf(dy) > 1))
     {
       NSUInteger slot = (self.trailHead + self.trailCount) % MTL_TRAIL_LEN;

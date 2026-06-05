@@ -410,6 +410,20 @@ DEFUN ("gpu-trail-length", Fmtl_trail_length, Smtl_trail_length, 1, 1, 0,
   return len;
 }
 
+DEFUN ("gpu-cursor-suppress-effects", Fmtl_cursor_suppress_effects,
+       Smtl_cursor_suppress_effects, 1, 1, 0,
+       doc: /* Suppress motion cursor effects for the next redisplay when SUPPRESS.
+When SUPPRESS is non-nil, the burst effects (sonicboom, ripple, pixiedust)
+and the torpedo trail are not triggered by the next cursor placement.  This
+lets Lisp distinguish typing from cursor movement: bind it from
+`pre-command-hook' so that editing commands do not fire the effects while
+movement commands still do.  */)
+  (Lisp_Object suppress)
+{
+  g_mtl_cursor_suppress_effects = !NILP (suppress);
+  return suppress;
+}
+
 DEFUN ("gpu-animations", Fmtl_animations, Smtl_animations, 0, 1, 0,
        doc: /* Enable or disable the Metal GPU animation layer.
 With ENABLE non-nil, turn on the animated cursor effects, particles and the
@@ -662,6 +676,7 @@ syms_of_mtlfns (void)
   defsubr (&Smtl_scroll_effect);
   defsubr (&Smtl_scroll_duration);
   defsubr (&Smtl_trail_length);
+  defsubr (&Smtl_cursor_suppress_effects);
   defsubr (&Smtl_animation_status);
   defsubr (&Smtl_animations);
   defsubr (&Smtl_capture_frame);
