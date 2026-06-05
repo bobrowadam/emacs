@@ -898,17 +898,28 @@ mtl_log_seq_p (void)
 
 - (void)startAnimating
 {
-  if (self.displayLink) return;
-  self.displayLink = [NSScreen.mainScreen
-    displayLinkWithTarget:self selector:@selector(animationTick:)];
-  [self.displayLink addToRunLoop:[NSRunLoop mainRunLoop]
-                         forMode:NSRunLoopCommonModes];
+  /* -[NSScreen displayLinkWithTarget:selector:] is macOS 14+.  On older
+     systems this is a no-op: the continuous animation is driven by the
+     Lisp 30fps timer (gpu-anim-tick / gpu-video-tick) anyway, which is
+     also what keeps things moving when the event loop starves the display
+     link while idle.  See the tickWithDt: comment.  */
+  if (@available (macOS 14.0, *))
+    {
+      if (self.displayLink) return;
+      self.displayLink = [NSScreen.mainScreen
+        displayLinkWithTarget:self selector:@selector(animationTick:)];
+      [self.displayLink addToRunLoop:[NSRunLoop mainRunLoop]
+                             forMode:NSRunLoopCommonModes];
+    }
 }
 
 - (void)stopAnimating
 {
-  [self.displayLink invalidate];
-  self.displayLink = nil;
+  if (@available (macOS 14.0, *))
+    {
+      [self.displayLink invalidate];
+      self.displayLink = nil;
+    }
 }
 
 - (void)setCursorX:(int)x y:(int)y width:(int)w height:(int)h
