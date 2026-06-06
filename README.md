@@ -166,6 +166,19 @@ Customize the recognized extensions with `gpu-video-file-extensions`
 (then run `M-x gpu-video-register-auto-mode`). Animated GIFs keep using
 the built-in `image-mode`, which already animates them on the GPU.
 
+Cursor effects are opt-in. Pick one interactively with
+`M-x gpu-set-cursor`, or set it in your init file. For example, to
+enable the *sonicboom* effect (an expanding ring on cursor jumps):
+
+```elisp
+;; `gpu' is loaded at startup, so defer until it is available.
+(with-eval-after-load 'gpu
+  (setopt gpu-cursor-animation 'sonicboom))
+```
+
+Other modes: `block` (default, no effect), `torpedo` (comet trail),
+`spring`, `ripple`, `pixiedust`, `hollow`, `beam`.
+
 Cursor effects trigger on cursor jumps (`M-<`, `M->`, isearch hits),
 not on single-character movement. They are also suppressed while
 typing or editing text, so they fire only when you move the cursor,
