@@ -100,21 +100,36 @@ build ships with native compilation (AOT) and tree-sitter enabled.
 
 ## Building on macOS
 
-Requires Xcode (or the Command Line Tools) and the usual Emacs build
-dependencies (`brew install autoconf automake gnutls texinfo pkg-config`).
+Requires Xcode (or the Command Line Tools) and the build dependencies:
+
+```sh
+brew install autoconf automake gnutls texinfo pkg-config \
+  tree-sitter libgccjit
+```
+
+`tree-sitter` and `libgccjit` are only needed for the `--with-tree-sitter`
+and `--with-native-compilation` options below, which match the release
+build. Drop those options (and the extra flags) for a faster, minimal build.
 
 ```sh
 ./autogen.sh
 
 SDK=$(xcrun --sdk macosx --show-sdk-path)
 CC="xcrun clang" OBJC="xcrun clang" \
-CFLAGS="-isysroot $SDK" CPPFLAGS="-isysroot $SDK" OBJCFLAGS="-isysroot $SDK" \
-./configure --with-ns --with-mtl
+CFLAGS="-isysroot $SDK -I/opt/homebrew/include" \
+CPPFLAGS="-isysroot $SDK -I/opt/homebrew/include" \
+OBJCFLAGS="-isysroot $SDK -I/opt/homebrew/include" \
+LDFLAGS="-L/opt/homebrew/lib -L/opt/homebrew/lib/gcc/current" \
+PKG_CONFIG_PATH="/opt/homebrew/lib/pkgconfig" \
+./configure --with-ns --with-mtl --with-tree-sitter \
+  --with-native-compilation=aot
 
 make -j$(sysctl -n hw.ncpu)
 ```
 
-The binary is `src/emacs` (or install the app bundle from `nextstep/`).
+Native compilation (AOT) makes the first build noticeably longer, as it
+compiles the whole Lisp tree. The binary is `src/emacs` (or build the
+app bundle with `make install`, which writes it to `nextstep/Emacs.app`).
 
 ## Enabling the GPU backend
 
