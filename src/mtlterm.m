@@ -2879,6 +2879,75 @@ mtl_video_set_clip (struct frame *f, int x, int y, int w, int h)
   return true;
 }
 
+/* Total duration of the inline video in seconds, or -1 if there is no
+   video or its duration is not known yet (the item is still loading). */
+double
+mtl_video_duration (struct frame *f)
+{
+  MtlFrameData *fd = mtl_get_frame_data (f);
+  if (!fd || !fd.videoPlayer) return -1.0;
+  AVPlayerItem *item = fd.videoPlayer.player.currentItem;
+  if (!item) return -1.0;
+  CMTime d = item.duration;
+  if (!CMTIME_IS_NUMERIC (d)) return -1.0;
+  return CMTimeGetSeconds (d);
+}
+
+/* Current playback position of the inline video in seconds, or -1 if
+   there is no video. */
+double
+mtl_video_position (struct frame *f)
+{
+  MtlFrameData *fd = mtl_get_frame_data (f);
+  if (!fd || !fd.videoPlayer) return -1.0;
+  CMTime t = fd.videoPlayer.player.currentTime;
+  if (!CMTIME_IS_NUMERIC (t)) return -1.0;
+  return CMTimeGetSeconds (t);
+}
+
+/* Seek the inline video to SECS seconds.  Pulls a fresh frame so the
+   picture updates even while paused.  Returns false if no video. */
+bool
+mtl_video_seek (struct frame *f, double secs)
+{
+  MtlFrameData *fd = mtl_get_frame_data (f);
+  if (!fd || !fd.videoPlayer) return false;
+  if (secs < 0) secs = 0;
+  CMTime t = CMTimeMakeWithSeconds (secs, NSEC_PER_SEC);
+  /* Half-frame tolerance: responsive scrubbing without forcing an exact
+     (and expensive) frame-accurate seek on every drag step. */
+  CMTime tol = CMTimeMakeWithSeconds (0.05, NSEC_PER_SEC);
+  [fd.videoPlayer.player seekToTime:t toleranceBefore:tol toleranceAfter:tol];
+  if (!fd.encoder)
+    [fd compositeToScreen];   /* show the seeked frame immediately */
+  return true;
+}
+
+/* 1 if the inline video is playing, 0 if paused, -1 if there is none. */
+int
+mtl_video_playing (struct frame *f)
+{
+  MtlFrameData *fd = mtl_get_frame_data (f);
+  if (!fd || !fd.videoPlayer) return -1;
+  return [fd.videoPlayer isPlaying] ? 1 : 0;
+}
+
+/* Natural (presentation) size of the inline video in pixels.  Returns
+   false if there is no video or its size is not known yet. */
+bool
+mtl_video_size (struct frame *f, double *w, double *h)
+{
+  MtlFrameData *fd = mtl_get_frame_data (f);
+  if (!fd || !fd.videoPlayer) return false;
+  AVPlayerItem *item = fd.videoPlayer.player.currentItem;
+  if (!item) return false;
+  CGSize sz = item.presentationSize;
+  if (sz.width <= 0 || sz.height <= 0) return false;
+  *w = sz.width;
+  *h = sz.height;
+  return true;
+}
+
 /* Buffer-switch crossfade: copy the CURRENT static texture into the
    transition snapshot and arm the fade.  Called from Lisp just before
    redisplay paints the new buffer (pre-redisplay-functions), so the

@@ -352,6 +352,11 @@ extern bool mtl_video_set_paused (struct frame *f, bool paused);
 extern bool mtl_video_set_rect (struct frame *f, int x, int y, int w, int h);
 extern bool mtl_video_set_clip (struct frame *f, int x, int y, int w, int h);
 extern bool mtl_video_tick (struct frame *f);
+extern double mtl_video_duration (struct frame *f);
+extern double mtl_video_position (struct frame *f);
+extern bool mtl_video_seek (struct frame *f, double secs);
+extern int mtl_video_playing (struct frame *f);
+extern bool mtl_video_size (struct frame *f, double *w, double *h);
 
 /* Buffer-switch crossfade: snapshot current content, fade it out over
    DURATION seconds while the new content shows underneath. */

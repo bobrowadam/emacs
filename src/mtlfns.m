@@ -595,6 +595,83 @@ otherwise (letting the timer cancel itself).  */)
   return ok ? Qt : Qnil;
 }
 
+DEFUN ("gpu-video-duration", Fmtl_video_duration, Smtl_video_duration, 0, 1, 0,
+       doc: /* Return the inline video duration on FRAME in seconds.
+FRAME defaults to the selected frame.  Returns nil if there is no video
+or its duration is not known yet (the item is still loading).  */)
+  (Lisp_Object frame)
+{
+  if (NILP (frame)) frame = Fselected_frame ();
+  if (!FRAME_LIVE_P (XFRAME (frame))) return Qnil;
+  double d;
+  block_input ();
+  d = mtl_video_duration (XFRAME (frame));
+  unblock_input ();
+  return d < 0 ? Qnil : make_float (d);
+}
+
+DEFUN ("gpu-video-position", Fmtl_video_position, Smtl_video_position, 0, 1, 0,
+       doc: /* Return the inline video playback position on FRAME in seconds.
+FRAME defaults to the selected frame.  Returns nil if there is no video.  */)
+  (Lisp_Object frame)
+{
+  if (NILP (frame)) frame = Fselected_frame ();
+  if (!FRAME_LIVE_P (XFRAME (frame))) return Qnil;
+  double p;
+  block_input ();
+  p = mtl_video_position (XFRAME (frame));
+  unblock_input ();
+  return p < 0 ? Qnil : make_float (p);
+}
+
+DEFUN ("gpu-video-seek", Fmtl_video_seek, Smtl_video_seek, 1, 2, 0,
+       doc: /* Seek the inline video on FRAME to SECONDS.
+FRAME defaults to the selected frame.  The seeked frame is shown at once,
+even when the video is paused.  Returns t if a video is open.  */)
+  (Lisp_Object seconds, Lisp_Object frame)
+{
+  CHECK_NUMBER (seconds);
+  if (NILP (frame)) frame = Fselected_frame ();
+  if (!FRAME_LIVE_P (XFRAME (frame))) return Qnil;
+  bool ok;
+  block_input ();
+  ok = mtl_video_seek (XFRAME (frame), XFLOATINT (seconds));
+  unblock_input ();
+  return ok ? Qt : Qnil;
+}
+
+DEFUN ("gpu-video-playing-p", Fmtl_video_playing_p, Smtl_video_playing_p, 0, 1, 0,
+       doc: /* Return t if the inline video on FRAME is playing.
+Return nil if it is paused or there is no video.  FRAME defaults to the
+selected frame.  */)
+  (Lisp_Object frame)
+{
+  if (NILP (frame)) frame = Fselected_frame ();
+  if (!FRAME_LIVE_P (XFRAME (frame))) return Qnil;
+  int s;
+  block_input ();
+  s = mtl_video_playing (XFRAME (frame));
+  unblock_input ();
+  return s == 1 ? Qt : Qnil;
+}
+
+DEFUN ("gpu-video-size", Fmtl_video_size, Smtl_video_size, 0, 1, 0,
+       doc: /* Return the natural size of the inline video on FRAME.
+The value is a cons (WIDTH . HEIGHT) in pixels, or nil if there is no
+video or its size is not known yet.  FRAME defaults to the selected
+frame.  */)
+  (Lisp_Object frame)
+{
+  if (NILP (frame)) frame = Fselected_frame ();
+  if (!FRAME_LIVE_P (XFRAME (frame))) return Qnil;
+  double w = 0, h = 0;
+  bool ok;
+  block_input ();
+  ok = mtl_video_size (XFRAME (frame), &w, &h);
+  unblock_input ();
+  return ok ? Fcons (make_float (w), make_float (h)) : Qnil;
+}
+
 DEFUN ("gpu-anim-tick", Fmtl_anim_tick, Smtl_anim_tick, 0, 2, 0,
        doc: /* Advance the GPU cursor animations one step and present.
 DT is the step in seconds (default 0.033).  Driven by a Lisp timer while
@@ -687,6 +764,11 @@ syms_of_mtlfns (void)
   defsubr (&Smtl_video_pause);
   defsubr (&Smtl_video_move);
   defsubr (&Smtl_video_tick);
+  defsubr (&Smtl_video_duration);
+  defsubr (&Smtl_video_position);
+  defsubr (&Smtl_video_seek);
+  defsubr (&Smtl_video_playing_p);
+  defsubr (&Smtl_video_size);
   defsubr (&Smtl_anim_tick);
   defsubr (&Smtl_vsync);
   defsubr (&Smtl_transition_start);

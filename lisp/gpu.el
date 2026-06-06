@@ -3,7 +3,7 @@
 ;; Copyright (C) 2026 Free Software Foundation, Inc.
 
 ;; Author: Andros Fenollosa
-;; Version: 0.2.0
+;; Version: 0.3.0
 ;; Package-Requires: ((emacs "30.1"))
 ;; Keywords: hardware, display, macos, metal, gpu
 ;; URL: https://github.com/tanrax/emacs-gpu
@@ -401,6 +401,347 @@ at the end.  One video per frame; a previous one is replaced."
       (when (timerp timer) (cancel-timer timer))
       (when (frame-live-p frame) (gpu-video-close frame)))
     (setq gpu--video-state nil)))
+
+;; ---------------------------------------------------------------------------
+;; Video file buffers (gpu-video-mode)
+
+(require 'svg)
+
+(declare-function gpu-video-open "mtlfns.m"
+                  (file x y width height &optional loop frame))
+(declare-function gpu-video-close "mtlfns.m" (&optional frame))
+(declare-function gpu-video-pause "mtlfns.m" (paused &optional frame))
+(declare-function gpu-video-move "mtlfns.m"
+                  (x y width height &optional clip frame))
+(declare-function gpu-video-tick "mtlfns.m" (&optional frame))
+(declare-function gpu-video-duration "mtlfns.m" (&optional frame))
+(declare-function gpu-video-position "mtlfns.m" (&optional frame))
+(declare-function gpu-video-seek "mtlfns.m" (seconds &optional frame))
+(declare-function gpu-video-playing-p "mtlfns.m" (&optional frame))
+(declare-function gpu-video-size "mtlfns.m" (&optional frame))
+
+(defcustom gpu-video-file-extensions '("mp4" "mov" "m4v" "3gp")
+  "File extensions opened in `gpu-video-mode'.
+These are the container formats decoded by AVFoundation.  Changing this
+takes effect on the next call to `gpu-video-register-auto-mode'."
+  :type '(repeat string)
+  :group 'gpu)
+
+(defcustom gpu-video-seek-step 5
+  "Seconds to jump with `gpu-video-seek-forward' and `gpu-video-seek-backward'."
+  :type 'number
+  :group 'gpu)
+
+(defvar-local gpu-video--file nil
+  "Path of the video played in this buffer.")
+(defvar-local gpu-video--frame nil
+  "Frame that owns this buffer's video player.")
+(defvar-local gpu-video--timer nil
+  "Per-buffer sync timer for `gpu-video-mode'.")
+(defvar-local gpu-video--vid-marker nil
+  "Marker at the video placeholder character.")
+(defvar-local gpu-video--ctrl-start nil
+  "Marker where the control area begins.")
+(defvar-local gpu-video--width 16
+  "Current width in pixels of the video rectangle.")
+(defvar-local gpu-video--height 16
+  "Current height in pixels of the video rectangle.")
+(defvar-local gpu-video--paused nil
+  "Non-nil when the user has paused this buffer's video.")
+(defvar-local gpu-video--last-draw 0.0
+  "`float-time' of the last control redraw (throttling).")
+
+(defun gpu-video--format-time (secs)
+  "Format SECS as MM:SS, or \"--:--\" when SECS is nil or negative."
+  (if (and (numberp secs) (>= secs 0))
+      (let ((s (floor secs)))
+        (format "%02d:%02d" (/ s 60) (% s 60)))
+    "--:--"))
+
+(defun gpu-video--bar-svg (width fraction)
+  "Return an SVG progress bar WIDTH pixels wide, FRACTION (0..1) filled."
+  (let* ((w (max 1 width))
+         (h 16)
+         (cy (/ h 2))
+         (track 4)
+         (fillw (max 0 (min w (round (* w (or fraction 0))))))
+         (svg (svg-create w h)))
+    (svg-rectangle svg 0 (- cy (/ track 2)) w track
+                   :rx 2 :fill "#808080" :fill-opacity 0.4)
+    (when (> fillw 0)
+      (svg-rectangle svg 0 (- cy (/ track 2)) fillw track
+                     :rx 2 :fill "#4ea1ff"))
+    (svg-circle svg fillw cy 5 :fill "#4ea1ff")
+    (svg-image svg :scale 1 :ascent 'center)))
+
+(defvar gpu-video--button-map
+  (let ((m (make-sparse-keymap)))
+    (define-key m [mouse-1] #'gpu-video-toggle-play)
+    (define-key m [follow-link] 'mouse-face)
+    m)
+  "Keymap on the play/pause button.")
+
+(defvar gpu-video--bar-map
+  (let ((m (make-sparse-keymap)))
+    (define-key m [down-mouse-1] #'gpu-video--bar-drag)
+    m)
+  "Keymap on the timeline bar.")
+
+(defun gpu-video--draw-controls (buf)
+  "Rebuild the control area (play/pause, time, timeline) of BUF."
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (when (and gpu-video--ctrl-start
+                 (marker-position gpu-video--ctrl-start))
+        (let* ((inhibit-read-only t)
+               (frame gpu-video--frame)
+               (pos (and (frame-live-p frame) (gpu-video-position frame)))
+               (dur (and (frame-live-p frame) (gpu-video-duration frame)))
+               (playing (and (frame-live-p frame) (gpu-video-playing-p frame)))
+               (frac (if (and pos dur (> dur 0)) (/ pos dur) 0)))
+          (save-excursion
+            (goto-char gpu-video--ctrl-start)
+            (delete-region gpu-video--ctrl-start (point-max))
+            (insert (propertize (if playing " ⏸ " " ▶ ")
+                                'face 'mode-line-emphasis
+                                'mouse-face 'highlight
+                                'pointer 'hand
+                                'keymap gpu-video--button-map
+                                'help-echo "Play/pause (SPC)"))
+            (insert "   "
+                    (gpu-video--format-time pos) " / "
+                    (gpu-video--format-time dur)
+                    "\n")
+            (if (and (display-graphic-p) (image-type-available-p 'svg))
+                (let ((start (point)))
+                  (insert-image (gpu-video--bar-svg gpu-video--width frac) "-")
+                  (put-text-property start (point) 'keymap gpu-video--bar-map)
+                  (put-text-property start (point) 'pointer 'hand)
+                  (put-text-property start (point)
+                                     'help-echo "Click or drag to seek"))
+              ;; Text fallback (no pixel-precise seeking).
+              (let ((cols (max 1 (/ gpu-video--width
+                                    (max 1 (frame-char-width frame))))))
+                (insert (make-string (round (* cols frac)) ?=)
+                        (make-string (- cols (round (* cols frac))) ?-)))))
+          (set-buffer-modified-p nil))))))
+
+(defun gpu-video--seek-posn (posn)
+  "Seek the video to the timeline position described by POSN."
+  (let* ((xy (posn-object-x-y posn))
+         (dur (and (frame-live-p gpu-video--frame)
+                   (gpu-video-duration gpu-video--frame))))
+    (when (and xy dur (> gpu-video--width 0))
+      (let ((frac (max 0.0 (min 1.0 (/ (float (car xy)) gpu-video--width)))))
+        (gpu-video-seek (* frac dur) gpu-video--frame)))))
+
+(defun gpu-video--bar-drag (event)
+  "Seek on click and follow the pointer while dragging the timeline.
+EVENT is the initiating down-mouse event."
+  (interactive "e")
+  (gpu-video--seek-posn (event-start event))
+  (track-mouse
+    (let (ev)
+      (while (and (setq ev (read-event))
+                  (mouse-movement-p ev))
+        (gpu-video--seek-posn (event-start ev)))))
+  (gpu-video--draw-controls (current-buffer)))
+
+(defun gpu-video-toggle-play ()
+  "Toggle play/pause of the video in the current buffer."
+  (interactive)
+  (let* ((frame gpu-video--frame)
+         (playing (and (frame-live-p frame) (gpu-video-playing-p frame))))
+    (setq gpu-video--paused playing)
+    (when (frame-live-p frame)
+      (gpu-video-pause playing frame))
+    (gpu-video--draw-controls (current-buffer))))
+
+(defun gpu-video--relative-seek (delta)
+  "Seek DELTA seconds relative to the current position."
+  (let ((pos (and (frame-live-p gpu-video--frame)
+                  (gpu-video-position gpu-video--frame))))
+    (when pos
+      (gpu-video-seek (max 0 (+ pos delta)) gpu-video--frame)
+      (gpu-video--draw-controls (current-buffer)))))
+
+(defun gpu-video-seek-forward (&optional n)
+  "Jump forward by N times `gpu-video-seek-step' seconds (N defaults to 1)."
+  (interactive "p")
+  (gpu-video--relative-seek (* (or n 1) gpu-video-seek-step)))
+
+(defun gpu-video-seek-backward (&optional n)
+  "Jump backward by N times `gpu-video-seek-step' seconds (N defaults to 1)."
+  (interactive "p")
+  (gpu-video--relative-seek (- (* (or n 1) gpu-video-seek-step))))
+
+(defun gpu-video-seek-start ()
+  "Seek to the beginning of the video."
+  (interactive)
+  (when (frame-live-p gpu-video--frame)
+    (gpu-video-seek 0 gpu-video--frame)
+    (gpu-video--draw-controls (current-buffer))))
+
+(defun gpu-video--fit (buf win frame)
+  "Size and position BUF's video rectangle inside WIN on FRAME.
+Fits the window width, reserving room for the controls and keeping the
+video's natural aspect ratio when known."
+  (with-current-buffer buf
+    (let* ((edges (window-inside-pixel-edges win))
+           (wpix (- (nth 2 edges) (nth 0 edges)))
+           (hpix (- (nth 3 edges) (nth 1 edges)))
+           (ch (frame-char-height frame))
+           (avail-h (max 16 (- hpix (* 3 ch))))
+           (natural (gpu-video-size frame))
+           (aspect (if (and natural (> (cdr natural) 0))
+                       (/ (float (car natural)) (cdr natural))
+                     (/ 16.0 9.0)))
+           (tw (max 1 wpix))
+           (th (max 1 (round (/ tw aspect)))))
+      (when (> th avail-h)
+        (setq th avail-h
+              tw (max 1 (round (* th aspect)))))
+      (unless (and (= tw gpu-video--width) (= th gpu-video--height))
+        (setq gpu-video--width tw
+              gpu-video--height th)
+        (let ((inhibit-read-only t)
+              (p (marker-position gpu-video--vid-marker)))
+          (when p
+            (put-text-property p (1+ p) 'display
+                               `(space :width (,tw) :height (,th))))))
+      (let ((vis (pos-visible-in-window-p gpu-video--vid-marker win t)))
+        (if (and vis (listp vis))
+            (gpu-video-move (+ (nth 0 edges) (nth 0 vis))
+                            (+ (nth 1 edges) (nth 1 vis))
+                            tw th edges frame)
+          (gpu-video-move 0 -32768 tw th nil frame))))))
+
+(defun gpu-video--claim (buf frame)
+  "Open BUF's video on FRAME and record BUF as the frame's video owner."
+  (with-current-buffer buf
+    (gpu-video-open gpu-video--file 0 -32768
+                    (max 1 gpu-video--width) (max 1 gpu-video--height)
+                    t frame)
+    (set-frame-parameter frame 'gpu-video-owner buf)
+    (setq gpu-video--paused nil)))
+
+(defun gpu-video--sync (buf)
+  "Drive playback for BUF: claim, position, tick and redraw as needed.
+Runs on the per-buffer timer.  Only the buffer shown in its frame's
+selected window plays (one video player per frame)."
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (let* ((frame gpu-video--frame)
+             (win (and (frame-live-p frame) (get-buffer-window buf frame))))
+        (cond
+         ((not (frame-live-p frame))
+          (gpu-video--teardown buf))
+         ((and win (eq buf (window-buffer (frame-selected-window frame))))
+          (unless (eq (frame-parameter frame 'gpu-video-owner) buf)
+            (gpu-video--claim buf frame))
+          (gpu-video--fit buf win frame)
+          (gpu-video-tick frame)
+          (let ((now (float-time)))
+            (when (> (- now gpu-video--last-draw) 0.2)
+              (setq gpu-video--last-draw now)
+              (gpu-video--draw-controls buf))))
+         ((eq (frame-parameter frame 'gpu-video-owner) buf)
+          ;; We own the player but are not focused: park it off-screen.
+          (gpu-video-move 0 -32768
+                          (max 1 gpu-video--width) (max 1 gpu-video--height)
+                          nil frame)
+          (gpu-video-tick frame)))))))
+
+(defun gpu-video--teardown (buf)
+  "Stop playback and free the player for BUF."
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (when (timerp gpu-video--timer)
+        (cancel-timer gpu-video--timer))
+      (setq gpu-video--timer nil)
+      (let ((frame gpu-video--frame))
+        (when (and (frame-live-p frame)
+                   (eq (frame-parameter frame 'gpu-video-owner) buf))
+          (gpu-video-close frame)
+          (set-frame-parameter frame 'gpu-video-owner nil))))))
+
+(defun gpu-video--setup ()
+  "Lay out the video buffer and start playback."
+  (let ((inhibit-read-only t)
+        (file (buffer-file-name)))
+    (unless file
+      (error "gpu-video-mode: buffer is not visiting a file"))
+    (setq gpu-video--file file
+          gpu-video--frame (selected-frame)
+          gpu-video--width 16
+          gpu-video--height 16)
+    (erase-buffer)
+    (buffer-disable-undo)
+    (insert (propertize " "
+                        'display '(space :width (16) :height (16))
+                        'gpu-video t))
+    (setq gpu-video--vid-marker (copy-marker (1- (point))))
+    (insert "\n\n")
+    (setq gpu-video--ctrl-start (copy-marker (point) nil))
+    (gpu-video--draw-controls (current-buffer))
+    (set-buffer-modified-p nil)
+    (setq gpu-video--timer
+          (run-at-time 0 0.04 #'gpu-video--sync (current-buffer)))))
+
+(defun gpu-video--setup-unsupported ()
+  "Show a notice when the GPU backend is not available for playback."
+  (let ((inhibit-read-only t))
+    (erase-buffer)
+    (insert "Video playback requires the GPU (Metal) backend.\n\n"
+            "Enable it with M-x gpu-enable, then revert this buffer\n"
+            "with M-x revert-buffer.")
+    (set-buffer-modified-p nil)))
+
+(defvar gpu-video-mode-map
+  (let ((m (make-sparse-keymap)))
+    (define-key m (kbd "SPC") #'gpu-video-toggle-play)
+    (define-key m (kbd "<left>") #'gpu-video-seek-backward)
+    (define-key m (kbd "<right>") #'gpu-video-seek-forward)
+    (define-key m (kbd "<") #'gpu-video-seek-start)
+    (define-key m (kbd "M-<") #'gpu-video-seek-start)
+    m)
+  "Keymap for `gpu-video-mode'.")
+
+;;;###autoload
+(define-derived-mode gpu-video-mode special-mode "GPU-Video"
+  "Major mode that plays a video file on the GPU.
+The video autoplays and loops, with play/pause and a clickable timeline.
+
+\\{gpu-video-mode-map}"
+  (setq-local cursor-type nil
+              truncate-lines t
+              create-lockfiles nil
+              buffer-offer-save nil)
+  (auto-save-mode -1)
+  (add-hook 'kill-buffer-hook
+            (lambda () (gpu-video--teardown (current-buffer))) nil t)
+  (if (and (fboundp 'gpu-backend-p) (gpu-backend-p) (display-graphic-p))
+      (gpu-video--setup)
+    (gpu-video--setup-unsupported)))
+
+(defun gpu-video-register-auto-mode ()
+  "Register `gpu-video-mode' in `auto-mode-alist'.
+Uses the extensions in `gpu-video-file-extensions'."
+  (setq auto-mode-alist
+        (rassq-delete-all 'gpu-video-mode auto-mode-alist))
+  (when gpu-video-file-extensions
+    (push (cons (concat "\\.\\(?:"
+                        (mapconcat #'regexp-quote gpu-video-file-extensions "\\|")
+                        "\\)\\'")
+                'gpu-video-mode)
+          auto-mode-alist)))
+
+;;;###autoload
+(add-to-list 'auto-mode-alist
+             '("\\.\\(?:mp4\\|mov\\|m4v\\|3gp\\)\\'" . gpu-video-mode))
+
+;; Refresh the mapping from `gpu-video-file-extensions' when this file loads.
+(gpu-video-register-auto-mode)
 
 ;; ---------------------------------------------------------------------------
 ;; Startup integration

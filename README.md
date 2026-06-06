@@ -17,10 +17,13 @@ skeleton). Contributions welcome.
 
 Beyond raw rendering, it enables things the stock backend cannot do:
 
-- **Inline video playback**: AVFoundation decodes straight into Metal
-  textures (zero copies) and the frames are composited inside the
-  buffer, following scrolling and clipped to the window. No xwidgets,
-  no embedded browser.
+- **Video playback**: AVFoundation decodes straight into Metal textures
+  (zero copies) and the frames are composited inside the buffer,
+  following scrolling and clipped to the window. No xwidgets, no
+  embedded browser. Opening a video file (for example with `RET` in
+  Dired) plays it in a dedicated buffer with autoplay, looping, and a
+  clickable play/pause and timeline. Video can also be embedded inline
+  at point.
 - **GPU cursor effects** (opt-in): expanding rings, comet trails and
   friends are drawn as a compositor overlay, without ever touching the
   buffer content underneath.
@@ -92,7 +95,8 @@ brew install --cask tanrax/tap/emacs-gpu
 ```
 
 Or grab the signed, self-contained `Emacs.app` from the
-[releases](https://github.com/tanrax/emacs-gpu/releases).
+[releases](https://github.com/tanrax/emacs-gpu/releases). The release
+build ships with native compilation (AOT) and tree-sitter enabled.
 
 ## Building on macOS
 
@@ -143,6 +147,24 @@ starting with it disabled):
 | `M-: (gpu-vsync nil)` | Uncap presents from the display refresh (lower latency, more power) |
 | `M-: (gpu-video-insert "clip.mp4" 480 270 t)` | Play a video inline at point; follows scrolling |
 | `M-x gpu-video-stop` | Stop the inline video |
+
+### Playing video files
+
+Visiting a video file (`mp4`, `mov`, `m4v`, `3gp`) opens it in
+`gpu-video-mode`: a dedicated buffer that autoplays and loops the video,
+fit to the window, with a play/pause button and a clickable, draggable
+timeline. From Dired just press `RET` on the file.
+
+| Key | Action |
+|---|---|
+| `SPC` | Play / pause |
+| `←` / `→` | Seek backward / forward by `gpu-video-seek-step` seconds (default 5) |
+| `<` | Seek to the start |
+| `mouse-1` on the timeline | Jump to that point (drag to scrub) |
+
+Customize the recognized extensions with `gpu-video-file-extensions`
+(then run `M-x gpu-video-register-auto-mode`). Animated GIFs keep using
+the built-in `image-mode`, which already animates them on the GPU.
 
 Cursor effects trigger on cursor jumps (`M-<`, `M->`, isearch hits),
 not on single-character movement. They are also suppressed while
