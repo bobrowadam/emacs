@@ -54,6 +54,18 @@
 
 ;;; Code:
 
+;; Primitives implemented in C (src/mtlfns.m); declared here so the byte
+;; compiler knows their arity when this file is built without the backend.
+(declare-function gpu-backend-p "mtlfns.m" ())
+(declare-function gpu-device-name "mtlfns.m" ())
+(declare-function gpu-enable-for-frame "mtlfns.m" (frame))
+(declare-function gpu-cursor-mode "mtlfns.m" (mode))
+(declare-function gpu-scroll-effect "mtlfns.m" (effect))
+(declare-function gpu-scroll-duration "mtlfns.m" (duration))
+(declare-function gpu-trail-length "mtlfns.m" (length))
+(declare-function gpu-animations "mtlfns.m" (&optional enable))
+(declare-function gpu-animation-status "mtlfns.m" ())
+
 (defgroup gpu nil
   "Metal GPU display backend for GNU Emacs on macOS."
   :group 'display
@@ -386,7 +398,7 @@ at the end.  One video per frame; a previous one is replaced."
   (let ((marker (copy-marker (1- (point)))))
     ;; Park off-screen; the first sync tick positions it for real.
     (unless (gpu-video-open file 0 -32768 width height loop)
-      (error "gpu-video-open failed for %s" file))
+      (error "Cannot open video file %s" file))
     (setq gpu--video-state
           (list marker width height
                 (run-at-time 0 0.033 #'gpu--video-sync)
@@ -670,7 +682,7 @@ selected window plays (one video player per frame)."
   (let ((inhibit-read-only t)
         (file (buffer-file-name)))
     (unless file
-      (error "gpu-video-mode: buffer is not visiting a file"))
+      (error "Buffer is not visiting a file"))
     (setq gpu-video--file file
           gpu-video--frame (selected-frame)
           gpu-video--width 16
