@@ -655,7 +655,14 @@ gfx_draw_glyph_string_impl (struct glyph_string *s)
     }
   else
     {
-      struct font *sfont = face ? face->font : NULL;
+      /* Use s->font, NOT face->font: char2b holds glyph IDs encoded for
+         s->font.  For a mouse-face highlight over text in a non-default
+         font (e.g. shr / variable-pitch links in elfeed), Emacs swaps
+         s->face to the highlight face while leaving s->font (and char2b)
+         as the original font; looking those glyph IDs up in face->font
+         then renders garbage.  The NS and X backends draw with s->font
+         for the same reason.  */
+      struct font *sfont = s->font ? s->font : (face ? face->font : NULL);
       if (!sfont || !gfx_drv->font_ready_p (sfont))
         { mtl_dgs_nofont_count++; return; }
 
