@@ -222,12 +222,6 @@ typedef struct mtl_spring {
    the expose substitute -- lives in gfxterm.c, not here.) */
 @property (nonatomic, assign) BOOL                        needsPresent;
 
-/* Clip rect for the current glyph string, recorded in logical pixels.
-   Batched quads are clamped against it on the CPU at queue time; the
-   non-batched primitives apply it as a real scissor right before they
-   draw (applyScissorNow).  */
-@property (nonatomic, assign) BOOL                        clipOn;
-@property (nonatomic, assign) NSRect                      clipRect;
 
 /* Present coalescing: a redisplay pass can run several update cycles
    back-to-back (buffer window + echo area), and with display sync each

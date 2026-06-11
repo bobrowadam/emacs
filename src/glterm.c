@@ -37,7 +37,16 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.
    Grayscale glyphs go through an R8 coverage atlas; color glyphs (emoji)
    are rasterized through cairo (which scales the bitmap strike to the
    laid-out size) into premultiplied RGBA textures, drawn with the image
-   program -- see gl_color_glyph_get.  */
+   program -- see gl_color_glyph_get.
+
+   Two structural optimizations shape the draw path.  Glyphs and solid
+   rectangles share one submission-ordered vertex batch (the rects sample
+   a white block reserved in the atlas) whose quads are clipped on the
+   CPU at queue time, so a whole redraw flushes as a handful of draw
+   calls; see gl_batch_append.  And the present blits only what the back
+   buffer is actually missing, derived from EGL_EXT_buffer_age plus a
+   per-swap record of dirty regions, handing the compositor the damaged
+   boxes through eglSwapBuffersWithDamage; see gl_present_to_window.  */
 
 #include <config.h>
 
@@ -1006,9 +1015,15 @@ gl_present_to_window (struct gl_frame_data *fd)
   /* Buffer age: how many swaps ago this back buffer was last presented
      (0 = unknown/undefined).  Queried after make-current, before any
      rendering to the buffer, as the extension requires.  */
+  static int no_damage = -1, log_present = -1;
+  if (no_damage == -1)
+    {
+      no_damage = getenv ("GL_NO_DAMAGE") ? 1 : 0;
+      log_present = getenv ("GL_LOG_PRESENT") ? 1 : 0;
+    }
   EGLint age = 0;
   if (g_has_buffer_age && !overlay && !fd->dirty.all
-      && sw == fd->w && sh == fd->h && !getenv ("GL_NO_DAMAGE"))
+      && sw == fd->w && sh == fd->h && !no_damage)
     eglQuerySurface (g_dpy, fd->surf, EGL_BUFFER_AGE_EXT, &age);
 
   /* Repair set: what this back buffer is missing = the changes since the
@@ -1027,7 +1042,7 @@ gl_present_to_window (struct gl_frame_data *fd)
       full = repair.all;
     }
 
-  if (getenv ("GL_LOG_PRESENT"))
+  if (log_present)
     fprintf (stderr, "[glpresent] fbo=%dx%d window=%dx%d age=%d %s boxes=%d\n",
              fd->w, fd->h, sw, sh, (int) age, full ? "full" : "partial",
              full ? 1 : repair.n);
@@ -1107,7 +1122,7 @@ gl_present_to_window (struct gl_frame_data *fd)
      bands.  Zero rects means full damage, which is also the fallback
      without the extension.  */
   if (g_swap_damage && !overlay && !fd->dirty.all && fd->dirty.n > 0
-      && sw == fd->w && sh == fd->h && !getenv ("GL_NO_DAMAGE"))
+      && sw == fd->w && sh == fd->h && !no_damage)
     {
       EGLint rects[GL_DIRTY_MAX * 4];
       for (int i = 0; i < fd->dirty.n; i++)
@@ -1337,6 +1352,9 @@ gl_batch_append (struct gl_frame_data *fd, float x0, float y0,
                  float x1, float y1, float u0, float v0,
                  float u1, float v1, const float rgba[4])
 {
+  if (x0 >= x1 || y0 >= y1)
+    return;                     /* degenerate quad: nothing to draw */
+
   /* A batch targets one frame's FBO; if the frame changed, flush first.  */
   if (g_glyph_batch_fd && g_glyph_batch_fd != fd)
     gl_flush_glyph_batch ();
@@ -2047,7 +2065,8 @@ gl_drv_note_cursor (struct frame *f, int x, int y, int w, int h,
       gl_anim_spawn (a, a->tx + w / 2.0f, a->ty + h / 2.0f);
       if (getenv ("GL_LOG_ANIM"))
         fprintf (stderr, "[anim] spawn at %.0f,%.0f n=%d mode=%d\n",
-                 a->tx, a->ty, a->n_particles, g_gl_cursor_mode);
+                 (double) a->tx, (double) a->ty, a->n_particles,
+                 g_gl_cursor_mode);
     }
 
   /* Push a trail sample (torpedo).  */
@@ -2612,8 +2631,10 @@ gl_video_overlay (struct gl_frame_data *fd, int sw, int sh)
       int x1 = (int) lround ((v->cx + v->cw) * s);
       int ytop = (int) lround (v->cy * s);
       int ybot = (int) lround ((v->cy + v->ch) * s);
-      if (x0 < 0) x0 = 0; if (x1 > sw) x1 = sw;
-      if (ytop < 0) ytop = 0; if (ybot > sh) ybot = sh;
+      if (x0 < 0) x0 = 0;
+      if (x1 > sw) x1 = sw;
+      if (ytop < 0) ytop = 0;
+      if (ybot > sh) ybot = sh;
       int scw = x1 - x0, sch = ybot - ytop;
       if (scw <= 0 || sch <= 0) return;          /* fully scrolled away */
       glEnable (GL_SCISSOR_TEST);

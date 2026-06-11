@@ -269,6 +269,12 @@ static MtlGlyphVertex   *g_batch        = NULL;
 static int               g_batch_verts  = 0;
 static int               g_batch_cap    = 0;
 static MtlFrameData     *g_batch_fd     = nil;  /* unretained owner */
+/* Clip rect for the current glyph string (logical px).  Lives here, not
+   on MtlFrameData: it is read per QUAD in mtl_batch_append, where an
+   objc_msgSend per access would be measurable, and render cycles never
+   interleave, so a single global pair is correct.  */
+static BOOL              g_clip_on      = NO;
+static NSRect            g_clip_rect;
 static void mtl_flush_batch (void);
 static void mtl_atlas_reset (void);
 
@@ -1313,13 +1319,13 @@ mtl_log_seq_p (void)
    before their draw (applyScissorNow).  */
 - (void)applyClipRect:(NSRect)r
 {
-  self.clipOn = YES;
-  self.clipRect = r;
+  g_clip_on = YES;
+  g_clip_rect = r;
 }
 
 - (void)clearClipRect
 {
-  self.clipOn = NO;
+  g_clip_on = NO;
 }
 
 /* Apply the recorded clip as the encoder's scissor, in physical pixels.
@@ -1330,13 +1336,13 @@ mtl_log_seq_p (void)
   if (!self.encoder || !self.staticTexture) return;
   long tw = (long) self.staticTexture.width;
   long th = (long) self.staticTexture.height;
-  if (!self.clipOn)
+  if (!g_clip_on)
     {
       MTLScissorRect sc = { 0, 0, (NSUInteger) tw, (NSUInteger) th };
       [self.encoder setScissorRect:sc];
       return;
     }
-  NSRect r = self.clipRect;
+  NSRect r = g_clip_rect;
   CGSize dsz = self.metalLayer.drawableSize;
   NSSize lsz = self.metalLayer.frame.size;
   double scx = lsz.width  > 0 ? dsz.width  / lsz.width  : 1.0;
@@ -1504,7 +1510,7 @@ mtl_log_seq_p (void)
      defensive reset, mirroring gl_drv_begin_frame).  */
   g_batch_verts = 0;
   g_batch_fd = nil;
-  self.clipOn = NO;
+  g_clip_on = NO;
 
   /* Track the backing scale so the glyph atlas is baked at physical resolution.
      If it changes (window moved to a different-DPI monitor), drop the atlas so
@@ -1594,13 +1600,16 @@ mtl_batch_append (MtlFrameData *fd, float x0, float y0, float x1, float y1,
                   float u0, float v0, float u1, float v1,
                   float r, float g, float b)
 {
+  if (x0 >= x1 || y0 >= y1)
+    return;                     /* degenerate quad: nothing to draw */
+
   if (g_batch_fd && g_batch_fd != fd)
     mtl_flush_batch ();
   g_batch_fd = fd;
 
-  if (fd.clipOn)
+  if (g_clip_on)
     {
-      NSRect c = fd.clipRect;
+      NSRect c = g_clip_rect;
       float cx0 = (float) NSMinX (c), cy0 = (float) NSMinY (c);
       float cx1 = (float) NSMaxX (c), cy1 = (float) NSMaxY (c);
       if (cx1 <= cx0 || cy1 <= cy0)
