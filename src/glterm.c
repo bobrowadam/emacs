@@ -166,11 +166,16 @@ static EGLConfig  g_cfg;
 /* True when g_dpy is an X11-platform display (window surfaces are usable
    for on-screen present); false for the surfaceless fallback.  */
 static bool      g_dpy_is_x11 = false;
-/* True when window surfaces preserve their back buffer across a swap, so
-   the present can blit only the dirty region instead of the whole frame.
-   Resolved per surface from EGL_SWAP_BEHAVIOR; off disables partial
-   present (full-frame blit, always correct).  */
-static bool      g_preserve_ok = false;
+/* Partial present support.  EGL_EXT_buffer_age reports how many swaps ago
+   the current back buffer was last presented, which tells exactly which
+   frames' changes it is missing; the present then blits only the union of
+   those dirty regions.  Unlike EGL_BUFFER_PRESERVED (which some compositing
+   window managers advertise but do not honor), the age is what the driver
+   actually guarantees about its own buffer rotation, so this is correct
+   under any compositor.  eglSwapBuffersWithDamage additionally hands the
+   compositor the damaged box so it recomposites only that band.  */
+static bool      g_has_buffer_age = false;
+static PFNEGLSWAPBUFFERSWITHDAMAGEKHRPROC g_swap_damage = NULL;
 /* The draw/read surface currently bound to g_ctx, so we never re-issue an
    eglMakeCurrent that would not change anything.  FBO rendering works under
    any bound surface, so the window surface is kept current across frames
@@ -220,6 +225,7 @@ static void gl_video_free (struct gl_frame_data *fd);
 /* Cursor animation overlay + note_cursor.  Config globals are defined with
    the animation types (after struct gl_anim, which holds the enum).  */
 static void gl_anim_overlay (struct gl_frame_data *fd, int sw, int sh);
+static bool gl_anim_overlay_active (struct gl_frame_data *fd);
 static bool gl_drv_note_cursor (struct frame *f, int x, int y, int w, int h,
                                 unsigned long color);
 
@@ -351,6 +357,87 @@ static bool g_gl_animations_enabled = false;
 static int  g_gl_trail_len          = 20;
 static bool g_gl_cursor_suppress    = false;
 
+/* ------------------------------------------------------------------ */
+/* Dirty-region tracking for the partial present.  A single union box
+   degenerates as soon as two distant regions change in one frame (the
+   edited row at the top plus the mode line at the bottom span almost the
+   whole frame), so the set keeps up to GL_DIRTY_MAX disjoint boxes in FBO
+   pixel coordinates (bottom-left origin) and merges on overlap/overflow.  */
+
+#define GL_DIRTY_MAX 8
+
+struct gl_dirty_set
+{
+  bool all;                     /* everything changed: boxes irrelevant */
+  int n;
+  int b[GL_DIRTY_MAX][4];       /* x0, y0, x1, y1 (exclusive) */
+};
+
+static void
+gl_dirty_clear (struct gl_dirty_set *d)
+{
+  d->all = false;
+  d->n = 0;
+}
+
+/* Add a box, growing an existing one when they touch (within SLACK px,
+   so the per-glyph marks of one row coalesce into a single box) and
+   folding into the closest box on overflow.  */
+static void
+gl_dirty_add (struct gl_dirty_set *d, int x0, int y0, int x1, int y1)
+{
+  const int SLACK = 8;
+  if (d->all || x0 >= x1 || y0 >= y1)
+    return;
+  for (int i = 0; i < d->n; i++)
+    {
+      int *b = d->b[i];
+      if (x0 <= b[2] + SLACK && x1 >= b[0] - SLACK
+          && y0 <= b[3] + SLACK && y1 >= b[1] - SLACK)
+        {
+          if (x0 < b[0]) b[0] = x0;
+          if (y0 < b[1]) b[1] = y0;
+          if (x1 > b[2]) b[2] = x1;
+          if (y1 > b[3]) b[3] = y1;
+          return;
+        }
+    }
+  if (d->n < GL_DIRTY_MAX)
+    {
+      int *b = d->b[d->n++];
+      b[0] = x0; b[1] = y0; b[2] = x1; b[3] = y1;
+      return;
+    }
+  /* Full: fold into the box whose union grows the least.  */
+  int best = 0;
+  long best_growth = -1;
+  for (int i = 0; i < d->n; i++)
+    {
+      int *b = d->b[i];
+      long ux0 = min (b[0], x0), uy0 = min (b[1], y0);
+      long ux1 = max (b[2], x1), uy1 = max (b[3], y1);
+      long growth = (ux1 - ux0) * (uy1 - uy0)
+        - (long) (b[2] - b[0]) * (b[3] - b[1]);
+      if (best_growth < 0 || growth < best_growth)
+        { best_growth = growth; best = i; }
+    }
+  int *b = d->b[best];
+  if (x0 < b[0]) b[0] = x0;
+  if (y0 < b[1]) b[1] = y0;
+  if (x1 > b[2]) b[2] = x1;
+  if (y1 > b[3]) b[3] = y1;
+}
+
+/* Union SRC into DST (used to repair an aged back buffer).  */
+static void
+gl_dirty_union (struct gl_dirty_set *dst, const struct gl_dirty_set *src)
+{
+  if (src->all)
+    { dst->all = true; return; }
+  for (int i = 0; i < src->n && !dst->all; i++)
+    gl_dirty_add (dst, src->b[i][0], src->b[i][1], src->b[i][2], src->b[i][3]);
+}
+
 /* Per-frame GL state (the MtlFrameData analogue).  Associated with a
    `struct frame *' through a small process-wide map.  */
 
@@ -365,14 +452,20 @@ struct gl_frame_data
   bool needs_present;
   EGLSurface surf;             /* on-screen window surface, or EGL_NO_SURFACE */
   unsigned long surf_win;      /* X window `surf' was created for (0 = none) */
+  int surf_w, surf_h;          /* cached surface size (re-queried on resize) */
   bool clip_on;
   int clip_x, clip_y, clip_w, clip_h;   /* top-left logical */
-  /* Dirty region of the cycle, in FBO pixel coordinates (bottom-left
-     origin, like glBlitFramebuffer).  When dirty_all is set the whole
-     frame changed and the present blits everything; otherwise only the
-     union box [x0,y0)-(x1,y1) is presented (see gl_present_to_window).  */
-  bool dirty_all;
-  int dirty_x0, dirty_y0, dirty_x1, dirty_y1;
+  /* FBO changes accumulated since the last swap (bottom-left pixel
+     coords).  The present consumes it: after the swap it is recorded in
+     swap_dirty and cleared.  */
+  struct gl_dirty_set dirty;
+  /* What each of the last GL_SWAP_RING swaps changed, newest at
+     (swap_head - 1); `all' also marks overlay frames (their pixels live
+     outside the FBO).  Combined with the back buffer's age this yields
+     exactly the region an aged buffer is missing.  */
+#define GL_SWAP_RING 8
+  struct gl_dirty_set swap_dirty[GL_SWAP_RING];
+  int swap_head;
   /* Buffer-switch cross-fade: a snapshot of the previous frame fades out
      over the new content while trans_dur > 0 (see gl_transition_start).  */
   GLuint trans_tex;
@@ -500,6 +593,19 @@ gl_global_init (void)
   if (!gl_bind_surface (EGL_NO_SURFACE))
     return false;
 
+  /* Partial-present support (see the comment at g_has_buffer_age).  */
+  {
+    const char *ext = eglQueryString (g_dpy, EGL_EXTENSIONS);
+    if (ext && strstr (ext, "EGL_EXT_buffer_age"))
+      g_has_buffer_age = true;
+    if (ext && strstr (ext, "EGL_KHR_swap_buffers_with_damage"))
+      g_swap_damage = (PFNEGLSWAPBUFFERSWITHDAMAGEKHRPROC)
+        eglGetProcAddress ("eglSwapBuffersWithDamageKHR");
+    else if (ext && strstr (ext, "EGL_EXT_swap_buffers_with_damage"))
+      g_swap_damage = (PFNEGLSWAPBUFFERSWITHDAMAGEKHRPROC)
+        eglGetProcAddress ("eglSwapBuffersWithDamageEXT");
+  }
+
   g_prog_rect  = gl_program (VS_RECT,  FS_RECT);
   g_prog_glyph = gl_program (VS_GLYPH, FS_GLYPH);
   g_prog_image = gl_program (VS_IMAGE, FS_IMAGE);
@@ -567,7 +673,7 @@ gl_ensure_target (struct gl_frame_data *fd, int w, int h)
 
   /* Brand-new/resized target: clear to the frame background and present
      the whole frame this cycle (the snapshot underneath is stale).  */
-  fd->dirty_all = true;
+  fd->dirty.all = true;
   glBindFramebuffer (GL_FRAMEBUFFER, fd->fbo);
   glViewport (0, 0, w, h);
   float bg[4];
@@ -577,14 +683,14 @@ gl_ensure_target (struct gl_frame_data *fd, int w, int h)
   glClear (GL_COLOR_BUFFER_BIT);
 }
 
-/* Expand the cycle's dirty box by a top-left logical rect (x,y,w,h),
-   converted to FBO pixel coords (bottom-left) and clamped to the target.
-   The present then blits only this union instead of the whole frame.  */
+/* Mark a top-left logical rect (x,y,w,h) as changed: converted to FBO
+   pixel coords (bottom-left), clamped to the target, and added to the
+   frame's dirty set.  The present then blits only those boxes.  */
 static void
 gl_mark_dirty (struct gl_frame_data *fd, double x, double y,
                double w, double h)
 {
-  if (fd->dirty_all || w <= 0 || h <= 0) return;
+  if (fd->dirty.all || w <= 0 || h <= 0) return;
   double s = fd->scale;
   int px0 = (int) floor (x * s);
   int px1 = (int) ceil ((x + w) * s);
@@ -597,14 +703,7 @@ gl_mark_dirty (struct gl_frame_data *fd, double x, double y,
   if (fy0 < 0) fy0 = 0;
   if (px1 > fd->w) px1 = fd->w;
   if (fy1 > fd->h) fy1 = fd->h;
-  if (px0 >= px1 || fy0 >= fy1) return;
-  if (fd->dirty_x0 == fd->dirty_x1)        /* empty box: seed it */
-    { fd->dirty_x0 = px0; fd->dirty_y0 = fy0;
-      fd->dirty_x1 = px1; fd->dirty_y1 = fy1; return; }
-  if (px0 < fd->dirty_x0) fd->dirty_x0 = px0;
-  if (fy0 < fd->dirty_y0) fd->dirty_y0 = fy0;
-  if (px1 > fd->dirty_x1) fd->dirty_x1 = px1;
-  if (fy1 > fd->dirty_y1) fd->dirty_y1 = fy1;
+  gl_dirty_add (&fd->dirty, px0, fy0, px1, fy1);
 }
 
 /* Scissor in the FBO's bottom-left space, from a top-left logical rect.  */
@@ -799,10 +898,10 @@ gl_drv_begin_frame (struct frame *f)
              (int) (FRAME_PIXEL_HEIGHT (f) * sc));
   int w = (int) (FRAME_PIXEL_WIDTH (f) * fd->scale);
   int h = (int) (FRAME_PIXEL_HEIGHT (f) * fd->scale);
-  /* Reset the dirty box; gl_ensure_target sets dirty_all when it clears a
-     new or resized target (which must be presented whole).  */
-  fd->dirty_all = false;
-  fd->dirty_x0 = fd->dirty_y0 = fd->dirty_x1 = fd->dirty_y1 = 0;
+  /* The dirty box is NOT reset here: it accumulates "changes since the
+     last swap" across cycles (a deferred present spans several) and the
+     present consumes it.  gl_ensure_target sets dirty.all when it clears
+     a new or resized target, which must be presented whole.  */
   gl_ensure_target (fd, w, h);          /* LOAD: clears only if new/resized */
   glBindFramebuffer (GL_FRAMEBUFFER, fd->fbo);
   glViewport (0, 0, fd->w, fd->h);
@@ -851,25 +950,11 @@ gl_present_to_window (struct gl_frame_data *fd)
       fd->surf_win = (unsigned long) win;
       if (fd->surf == EGL_NO_SURFACE)
         return;            /* present unavailable; FBO still has the frame */
-      /* Partial present (blit only the dirty box, keep the rest from the
-         previous swap) needs the back buffer preserved across swaps.  This
-         is OPT-IN (GL_PARTIAL_PRESENT=1): a compositing window manager such
-         as Cinnamon/Muffin reports EGL_BUFFER_PRESERVED as supported yet
-         does not actually carry the old pixels over, so the un-blitted
-         region shows stale garbage (flicker on buffer switch, unreliable
-         mouse-face highlight, undefined first frame).  The default full
-         blit is cheap (a GPU framebuffer blit, not a re-render) and robust
-         under any compositor.  */
-      g_preserve_ok = false;
-      if (getenv ("GL_PARTIAL_PRESENT")
-          && eglSurfaceAttrib (g_dpy, fd->surf, EGL_SWAP_BEHAVIOR,
-                               EGL_BUFFER_PRESERVED))
-        {
-          EGLint beh = 0;
-          if (eglQuerySurface (g_dpy, fd->surf, EGL_SWAP_BEHAVIOR, &beh)
-              && beh == EGL_BUFFER_PRESERVED)
-            g_preserve_ok = true;
-        }
+      /* A fresh surface has no usable swap history: poison the ring so the
+         age-based repair falls back to full blits until it refills.  */
+      for (int i = 0; i < GL_SWAP_RING; i++)
+        { gl_dirty_clear (&fd->swap_dirty[i]); fd->swap_dirty[i].all = true; }
+      fd->surf_w = fd->surf_h = -1;     /* size unknown: query below */
     }
 
   if (!gl_bind_surface (fd->surf))
@@ -884,23 +969,57 @@ gl_present_to_window (struct gl_frame_data *fd)
     eglSwapInterval (g_dpy, vsync);
   }
 
-  EGLint sw = fd->w, sh = fd->h;
-  eglQuerySurface (g_dpy, fd->surf, EGL_WIDTH, &sw);
-  eglQuerySurface (g_dpy, fd->surf, EGL_HEIGHT, &sh);
+  /* Surface size, cached: only re-query while it disagrees with the FBO
+     (a resize in flight), so the steady state pays no per-present
+     round-trips.  */
+  if (fd->surf_w != fd->w || fd->surf_h != fd->h)
+    {
+      EGLint qw = fd->w, qh = fd->h;
+      eglQuerySurface (g_dpy, fd->surf, EGL_WIDTH, &qw);
+      eglQuerySurface (g_dpy, fd->surf, EGL_HEIGHT, &qh);
+      fd->surf_w = qw;
+      fd->surf_h = qh;
+    }
+  EGLint sw = fd->surf_w, sh = fd->surf_h;
 
-  /* Partial present: when the back buffer is preserved and the surface is
-     1:1 with the FBO, blit only the dirty box and let the rest persist
-     from the previous swap.  A cross-fade overlay or a whole-frame change
-     (dirty_all) forces a full blit.  */
-  bool partial = (g_preserve_ok && !fd->dirty_all && fd->trans_dur <= 0
-                  && sw == fd->w && sh == fd->h
-                  && fd->dirty_x0 < fd->dirty_x1
-                  && fd->dirty_y0 < fd->dirty_y1);
+  /* The video / cursor-effect / cross-fade overlays paint straight onto
+     the back buffer after the blit, so their pixels are not in the FBO:
+     any present involving an overlay blits and records full.  An idle
+     burst-mode cursor (no live particles) emits nothing and does not
+     count, so plain typing under the default effect still goes partial.  */
+  bool overlay = (fd->trans_dur > 0 || gl_anim_overlay_active (fd));
+#ifdef HAVE_GSTREAMER
+  overlay = overlay || fd->video != NULL;
+#endif
+
+  /* Buffer age: how many swaps ago this back buffer was last presented
+     (0 = unknown/undefined).  Queried after make-current, before any
+     rendering to the buffer, as the extension requires.  */
+  EGLint age = 0;
+  if (g_has_buffer_age && !overlay && !fd->dirty.all
+      && sw == fd->w && sh == fd->h && !getenv ("GL_NO_DAMAGE"))
+    eglQuerySurface (g_dpy, fd->surf, EGL_BUFFER_AGE_EXT, &age);
+
+  /* Repair set: what this back buffer is missing = the changes since the
+     last swap plus everything the (age - 1) swaps in between wrote.
+     Unknown age, a too-old buffer, or a full-frame slot in the chain
+     falls back to the always-correct full blit.  */
+  struct gl_dirty_set repair = fd->dirty;
+  bool full = true;
+  if (age > 0 && age <= GL_SWAP_RING)
+    {
+      full = false;
+      for (int i = 0; i < age - 1 && !repair.all; i++)
+        gl_dirty_union (&repair,
+                        &fd->swap_dirty[(fd->swap_head - 1 - i + GL_SWAP_RING)
+                                        % GL_SWAP_RING]);
+      full = repair.all;
+    }
 
   if (getenv ("GL_LOG_PRESENT"))
-    fprintf (stderr, "[glpresent] fbo=%dx%d window=%dx%d %s box=%d,%d-%d,%d\n",
-             fd->w, fd->h, sw, sh, partial ? "partial" : "full",
-             fd->dirty_x0, fd->dirty_y0, fd->dirty_x1, fd->dirty_y1);
+    fprintf (stderr, "[glpresent] fbo=%dx%d window=%dx%d age=%d %s boxes=%d\n",
+             fd->w, fd->h, sw, sh, (int) age, full ? "full" : "partial",
+             full ? 1 : repair.n);
 
   /* Both the FBO and the window's default framebuffer use GL bottom-left
      origin, so a straight (unflipped) blit lands right-side-up on screen.
@@ -908,13 +1027,17 @@ gl_present_to_window (struct gl_frame_data *fd)
   glBindFramebuffer (GL_READ_FRAMEBUFFER, fd->fbo);
   glBindFramebuffer (GL_DRAW_FRAMEBUFFER, 0);
   glDisable (GL_SCISSOR_TEST);
-  if (partial)
-    glBlitFramebuffer (fd->dirty_x0, fd->dirty_y0, fd->dirty_x1, fd->dirty_y1,
-                       fd->dirty_x0, fd->dirty_y0, fd->dirty_x1, fd->dirty_y1,
-                       GL_COLOR_BUFFER_BIT, GL_NEAREST);
-  else
+  if (full)
     glBlitFramebuffer (0, 0, fd->w, fd->h, 0, 0, sw, sh,
                        GL_COLOR_BUFFER_BIT, GL_NEAREST);
+  else
+    for (int i = 0; i < repair.n; i++)
+      {
+        const int *b = repair.b[i];
+        glBlitFramebuffer (b[0], b[1], b[2], b[3], b[0], b[1], b[2], b[3],
+                           GL_COLOR_BUFFER_BIT, GL_NEAREST);
+      }
+  /* repair.n == 0: nothing changed since this buffer was shown; just swap.  */
 
 #ifdef HAVE_GSTREAMER
   /* Inline video overlay: draw the latest decoded frame over the static
@@ -967,7 +1090,37 @@ gl_present_to_window (struct gl_frame_data *fd)
         }
     }
 
-  eglSwapBuffers (g_dpy, fd->surf);
+  /* Swap, handing the compositor the regions that differ from what is on
+     screen (the current frame's changes, not the age repairs: those match
+     the screen already).  The compositor then recomposites only those
+     bands.  Zero rects means full damage, which is also the fallback
+     without the extension.  */
+  if (g_swap_damage && !overlay && !fd->dirty.all && fd->dirty.n > 0
+      && sw == fd->w && sh == fd->h && !getenv ("GL_NO_DAMAGE"))
+    {
+      EGLint rects[GL_DIRTY_MAX * 4];
+      for (int i = 0; i < fd->dirty.n; i++)
+        {
+          const int *b = fd->dirty.b[i];
+          rects[i * 4 + 0] = b[0];
+          rects[i * 4 + 1] = b[1];
+          rects[i * 4 + 2] = b[2] - b[0];
+          rects[i * 4 + 3] = b[3] - b[1];
+        }
+      g_swap_damage (g_dpy, fd->surf, rects, fd->dirty.n);
+    }
+  else
+    eglSwapBuffers (g_dpy, fd->surf);
+
+  /* Record what this swap changed, so future presents can repair an aged
+     back buffer, and start a fresh dirty set: everything accumulated so
+     far is on screen now.  Overlay pixels live outside the FBO, so an
+     overlay frame is recorded as full.  */
+  fd->swap_dirty[fd->swap_head] = fd->dirty;
+  if (overlay)
+    fd->swap_dirty[fd->swap_head].all = true;
+  fd->swap_head = (fd->swap_head + 1) % GL_SWAP_RING;
+  gl_dirty_clear (&fd->dirty);
 
   /* Keep the window surface current (FBO rendering does not care which
      surface is bound), so the next frame needs no make-current at all.  */
@@ -1893,6 +2046,29 @@ gl_anim_quad (float *v, int *n, float x0, float y0, float x1, float y1,
   *n += 6;
 }
 
+/* True when gl_anim_overlay would emit at least one quad right now.  The
+   present uses this to decide whether the frame needs a full blit (overlay
+   pixels live only in the back buffer, not the FBO); an idle burst-mode
+   cursor emits nothing, so ordinary typing still presents partially.
+   Mirrors the emission conditions in gl_anim_overlay below.  */
+static bool
+gl_anim_overlay_active (struct gl_frame_data *fd)
+{
+  if (!g_gl_animations_enabled)
+    return false;
+  struct gl_anim *a = &fd->anim;
+  if (a->n_particles > 0)
+    return true;
+  if (a->hidden)
+    return false;
+  if (g_gl_cursor_mode == GL_CURSOR_TORPEDO && a->trail_count > 0)
+    return true;
+  return (g_gl_cursor_mode == GL_CURSOR_SPRING
+          || g_gl_cursor_mode == GL_CURSOR_TORPEDO
+          || g_gl_cursor_mode == GL_CURSOR_HOLLOW
+          || g_gl_cursor_mode == GL_CURSOR_BEAM);
+}
+
 /* Composite the cursor effects over the on-screen framebuffer.  Called from
    gl_present_to_window with the window surface current.  Builds one vertex
    buffer of colored quads (trail + body + particles) and draws it with the
@@ -1905,6 +2081,9 @@ gl_anim_overlay (struct gl_frame_data *fd, int sw, int sh)
   float crgba[4];
   gl_unpack_color (a->color ? a->color : 0x88C0D0, crgba);
   float cr = crgba[0], cg = crgba[1], cb = crgba[2];
+
+  if (!gl_anim_overlay_active (fd))
+    return;
 
   /* Worst case: trail (GL_TRAIL_LEN) + body + particles, 6 verts each.  */
   static float verts[(GL_TRAIL_LEN + 1 + GL_MAX_PARTICLES) * 6 * 6];
