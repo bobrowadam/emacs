@@ -8,8 +8,8 @@ driver interface (`src/gfxdrv.h`), with one driver per platform:
 - **GNU/Linux and other X11 systems**, **OpenGL ES / EGL**
   (`src/glterm.c`): experimental. Renders text, faces, decorations,
   images, fringes, scrolling and the cursor pixel-accurately against the
-  stock GTK/cairo backend, with a GPU buffer-switch cross-fade.
-  Correctness-first: not yet optimized for raw text throughput.
+  stock GTK/cairo backend, with inline video, a GPU buffer-switch
+  cross-fade and animated cursor effects.
 - **macOS**, native **Apple Metal** (`src/mtlterm.m`): feature-complete.
   Text goes through a GPU glyph atlas, images and inline video are
   textures, and the whole frame is composited by the GPU instead of
@@ -52,7 +52,7 @@ quads; scrolling moves already-rendered pixels with a texture blit.
 | Workload | Best backend | Why |
 |---|---|---|
 | Typing, plain editing | **Stock CPU** | cairo touches only the few dirty pixels with near-zero per-frame overhead; both are far faster than perceptible |
-| Static text scroll / redraw | **Stock CPU** (GPU close) | shared redisplay cost dominates; cairo's CPU blit is extremely cheap |
+| Static text scroll / redraw | **Even** (GPU ahead on full redraws) | shared redisplay cost dominates; batching made the GPU side competitive |
 | Animations: smooth scroll, buffer cross-fade | **GPU** | composites cached textures with a shader pass instead of re-rasterizing on the CPU each frame |
 | Inline video playback | **GPU only** | decoded straight into a GPU texture and composited in the buffer; the CPU backend cannot do it (macOS via AVFoundation, GNU/Linux via GStreamer) |
 | Animated cursor effects (rings, trail) | **GPU only** | drawn as a compositor overlay, no CPU equivalent |
@@ -104,14 +104,15 @@ GTK/cairo Emacs (same binary, GPU on vs off):
   over the buffer, following scrolling and clipped to the window.  Built
   when GStreamer development files are present (see the build deps below).
 
-Still slower than cairo on integrated GPUs for raw text throughput,
-though glyph batching closed much of the gap (see
-[Performance](#performance-linux)).
 - **Cursor effects**: the same animated cursors as macOS (spring glide,
   torpedo trail, sonicboom/ripple/pixiedust particle bursts, hollow,
   beam), composited over the frame in the present pass. The default
   effect on the OpenGL backend is `sonicboom`; pick another with
   `(setq gpu-cursor-animation 'spring)` or `M-x gpu-set-cursor`.
+
+Raw text throughput is at or near parity with cairo on an integrated
+GPU -- full-frame redraws are faster, typing is still behind (see
+[Performance](#performance-linux)).
 
 The backend rasterizes glyphs through cairo/FreeType (`ftcr`/`ftcrhb`
 fonts). If Emacs falls back to a legacy **core-X font** (`xfont`) for a
@@ -212,27 +213,32 @@ rather than the 60 Hz cap (median of 3 runs, redisplays per second):
 
 | Workload | Stock (X/cairo) | GPU (OpenGL) | Ratio |
 |---|---:|---:|---:|
-| Line scroll (1 line/frame) | 540 fps | 384 fps | 0.71x |
-| Page scroll | 302 fps | 233 fps | 0.77x |
-| Full-frame redraw | 258 fps | 187 fps | 0.72x |
-| Typing (1 char + redisplay) | 2050 fps | 999 fps | 0.49x |
-| Image scroll | 1516 fps | 952 fps | 0.63x |
+| Line scroll (1 line/frame) | 530 fps | 487 fps | 0.92x |
+| Page scroll | 297 fps | 296 fps | 1.00x |
+| Full-frame redraw | 247 fps | 294 fps | **1.19x** |
+| Typing (1 char + redisplay) | 1857 fps | 1311 fps | 0.71x |
+| Image scroll | 1359 fps | 1239 fps | 0.91x |
 
-The glyph path **batches a whole glyph run into one draw call**, which
-roughly doubled GPU throughput from the first cut (full-frame redraw went
-from 89 to 187 fps). The output stays pixel-identical to stock Emacs.
-(A dirty-region partial present is available behind `GL_PARTIAL_PRESENT=1`
-but is off by default: compositing window managers report a preserved
-back buffer they do not actually honour, so the default does a full blit,
-which is cheap and robust.)
+Two structural optimizations carry these numbers. Glyphs **and** solid
+fills (backgrounds, underlines, boxes) share one submission-ordered
+vertex batch, clipped on the CPU, so a whole redraw flushes as a handful
+of draw calls -- full-frame redraw is now **faster than cairo** on this
+machine. And the present blits only what the back buffer actually
+misses, derived from `EGL_EXT_buffer_age` plus a per-swap record of
+dirty regions, handing the compositor the damaged boxes through
+`eglSwapBuffersWithDamage` (on by default; correct under any compositor
+because the buffer age is what the driver really guarantees, unlike
+`EGL_BUFFER_PRESERVED`, which some compositors advertise but do not
+honour). The output stays pixel-identical to stock Emacs across the
+whole parity suite.
 
-Honest reading: on this integrated GPU the OpenGL backend is still
-**slower than cairo**, which is extremely well optimized for CPU glyph
-blitting. The remaining gap is dominated by per-frame fixed cost (context
-make-current + buffer swap on every redisplay) rather than draw calls.
-In absolute terms every workload is far above what is perceptible (the
-worst case, typing, is ~1 ms per keystroke), so this is a throughput
-ratio, not a responsiveness problem.
+Honest reading: typing and line scrolling on a laptop-sized frame are
+still **slower than cairo**, which is extremely good at small dirty
+rectangles -- our floor is one EGL buffer swap per redisplay, cairo's is
+a tiny damage rectangle with no swapchain. In absolute terms every
+workload is far above what is perceptible (the worst case, typing, is
+~0.8 ms per keystroke), so this is a throughput ratio, not a
+responsiveness problem.
 
 A GPU backend does not beat a mature CPU rasterizer at *static* text:
 cairo only touches the few dirty pixels on the CPU with near-zero
@@ -247,11 +253,11 @@ side excludes on-screen present) flip the result:
 
 | Workload | cairo (CPU) | GPU | Speedup |
 |---|---:|---:|---:|
-| Line scroll | 118 fps | 233 fps | **1.97x** |
-| Page scroll | 104 fps | 105 fps | 1.02x |
-| Full-frame redraw | 66 fps | 81 fps | 1.22x |
-| Typing | 232 fps | 1734 fps | **7.5x** |
-| Image scroll | 116 fps | 1277 fps | **11x** |
+| Line scroll | 117 fps | 240 fps | **2.05x** |
+| Page scroll | 102 fps | 124 fps | 1.22x |
+| Full-frame redraw | 66 fps | 121 fps | **1.84x** |
+| Typing | 238 fps | 1766 fps | **7.4x** |
+| Image scroll | 115 fps | 1328 fps | **11.5x** |
 
 cairo slows down roughly linearly with the pixel count; the GPU barely
 moves. Image scrolling is the extreme case (cairo re-blits the image from
