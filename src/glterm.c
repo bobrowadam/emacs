@@ -217,6 +217,9 @@ static int    g_glyph_batch_verts;     /* vertices queued */
 static int    g_glyph_batch_cap;       /* capacity in vertices */
 static struct gl_frame_data *g_glyph_batch_fd;  /* frame the quads target */
 static void gl_flush_glyph_batch (void);
+static void gl_batch_append (struct gl_frame_data *fd, float x0, float y0,
+                             float x1, float y1, float u0, float v0,
+                             float u1, float v1, const float rgba[4]);
 #ifdef HAVE_GSTREAMER
 static void gl_video_overlay (struct gl_frame_data *fd, int sw, int sh);
 static void gl_video_free (struct gl_frame_data *fd);
@@ -288,15 +291,40 @@ glyph_cache_lookup (unsigned long long key)
   return NULL;
 }
 
+/* Reset the atlas packing and the glyph table, then re-reserve the 4x4
+   white block at (0,0) that batched solid rects sample (the rect quads
+   share the glyph program: a coverage of 1.0 passes the gamma curve
+   unchanged, so one program and one texture cover glyphs and fills and
+   the two never split the batch).  Any queued quads still reference the
+   old layout, so they are flushed first.  */
+static void
+gl_atlas_reset (void)
+{
+  gl_flush_glyph_batch ();
+  memset (g_glyphs, 0, sizeof g_glyphs);
+  g_glyph_count = 0;
+  static const unsigned char white[16] = {
+    255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255,
+  };
+  glBindTexture (GL_TEXTURE_2D, g_atlas);
+  glPixelStorei (GL_UNPACK_ALIGNMENT, 1);
+  glTexSubImage2D (GL_TEXTURE_2D, 0, 0, 0, 4, 4, GL_RED,
+                   GL_UNSIGNED_BYTE, white);
+  g_atlas_next_x = 5;
+  g_atlas_next_y = 0;
+  g_atlas_row_h = 4;
+}
+
+/* Texture coordinates of the white block's center texel.  */
+#define GL_WHITE_U (2.0f / GL_ATLAS_W)
+#define GL_WHITE_V (2.0f / GL_ATLAS_H)
+
 static struct gfx_glyph *
 glyph_cache_insert (unsigned long long key)
 {
   if (g_glyph_count * 4 >= GL_GLYPH_CAP * 3)   /* >75% full: reset atlas */
-    {
-      memset (g_glyphs, 0, sizeof g_glyphs);
-      g_glyph_count = 0;
-      g_atlas_next_x = g_atlas_next_y = g_atlas_row_h = 0;
-    }
+    gl_atlas_reset ();
   unsigned h = (unsigned) (key % GL_GLYPH_CAP);
   for (int i = 0; i < GL_GLYPH_CAP; i++)
     {
@@ -626,6 +654,7 @@ gl_global_init (void)
   glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
   glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
   glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+  gl_atlas_reset ();            /* reserve the white block for rect quads */
 
   glPixelStorei (GL_UNPACK_ALIGNMENT, 1);
   glEnable (GL_BLEND);
@@ -706,13 +735,13 @@ gl_mark_dirty (struct gl_frame_data *fd, double x, double y,
   gl_dirty_add (&fd->dirty, px0, fy0, px1, fy1);
 }
 
-/* Scissor in the FBO's bottom-left space, from a top-left logical rect.  */
+/* Apply FD's recorded clip rect as the GL scissor, in the FBO's
+   bottom-left space.  Only the non-batched primitives (image textures,
+   fringe bitmaps) call this, right before their draw; batched quads are
+   clipped on the CPU at queue time instead (gl_batch_append).  */
 static void
-gl_apply_scissor (struct gl_frame_data *fd)
+gl_scissor_apply_now (struct gl_frame_data *fd)
 {
-  /* Queued glyphs were drawn under the current scissor; emit them before
-     it changes.  */
-  gl_flush_glyph_batch ();
   if (!fd->clip_on)
     {
       glDisable (GL_SCISSOR_TEST);
@@ -806,15 +835,9 @@ gl_rasterize_glyph (struct font *font, unsigned int glyph_id,
       g_atlas_row_h = 0;
     }
   if (g_atlas_next_y + bh > GL_ATLAS_H)
-    {
-      /* The atlas is full and about to be repacked from the top, which
-         overwrites cells that queued glyph quads still reference.  Emit
-         the pending batch first so it samples the old layout.  */
-      gl_flush_glyph_batch ();
-      g_atlas_next_x = g_atlas_next_y = g_atlas_row_h = 0;
-      memset (g_glyphs, 0, sizeof g_glyphs);
-      g_glyph_count = 0;
-    }
+    /* Atlas full: repack from the top (gl_atlas_reset flushes the queued
+       quads that still reference the old layout).  */
+    gl_atlas_reset ();
 
   glBindTexture (GL_TEXTURE_2D, g_atlas);
   glPixelStorei (GL_UNPACK_ALIGNMENT, 1);
@@ -836,32 +859,6 @@ gl_rasterize_glyph (struct font *font, unsigned int glyph_id,
 
   cairo_ft_scaled_font_unlock_face (sf);
   return e;
-}
-
-/* ------------------------------------------------------------------ */
-/* Small immediate-mode draw helpers.  */
-
-static void
-gl_draw_rect_px (struct gl_frame_data *fd, float x, float y, float w,
-                 float h, const float rgba[4])
-{
-  gl_mark_dirty (fd, x, y, w, h);
-  float s = (float) fd->scale;
-  float x0 = x * s, y0 = y * s, x1 = (x + w) * s, y1 = (y + h) * s;
-  float r = rgba[0], gg = rgba[1], b = rgba[2], a = rgba[3];
-  float v[] = {
-    x0,y0, 0,0, r,gg,b,a,  x1,y0, 0,0, r,gg,b,a,  x1,y1, 0,0, r,gg,b,a,
-    x0,y0, 0,0, r,gg,b,a,  x1,y1, 0,0, r,gg,b,a,  x0,y1, 0,0, r,gg,b,a,
-  };
-  glUseProgram (g_prog_rect);
-  glUniform2f (g_u_rect_size, (float) fd->w, (float) fd->h);
-  glBindBuffer (GL_ARRAY_BUFFER, g_vbo);
-  glBufferData (GL_ARRAY_BUFFER, sizeof v, v, GL_STREAM_DRAW);
-  glEnableVertexAttribArray (0);
-  glVertexAttribPointer (0, 2, GL_FLOAT, GL_FALSE, 32, (void *) 0);
-  glEnableVertexAttribArray (2);
-  glVertexAttribPointer (2, 4, GL_FLOAT, GL_FALSE, 32, (void *) 16);
-  glDrawArrays (GL_TRIANGLES, 0, 6);
 }
 
 /* ------------------------------------------------------------------ */
@@ -934,6 +931,11 @@ gl_present_to_window (struct gl_frame_data *fd)
   if (!f || !FRAME_X_P (f)) return;
   Window win = FRAME_X_WINDOW (f);
   if (!win) return;
+
+  /* Quads queued for this frame target its FBO; emit them before the
+     draw framebuffer switches to the window.  */
+  if (g_glyph_batch_fd == fd)
+    gl_flush_glyph_batch ();
 
   /* Create (or recreate, if the window id changed) the window surface.  */
   if (fd->surf == EGL_NO_SURFACE || fd->surf_win != (unsigned long) win)
@@ -1168,6 +1170,11 @@ gl_drv_pending_present (struct frame *f)
   return fd && fd->needs_present;
 }
 
+/* The clip ops only record state: batched quads are clipped on the CPU
+   at queue time (gl_batch_append), and the non-batched primitives apply
+   the recorded rect as a real scissor right before they draw
+   (gl_scissor_apply_now).  Neither needs the batch flushed.  */
+
 static void
 gl_drv_clip_to_glyph_string (struct glyph_string *s)
 {
@@ -1180,7 +1187,6 @@ gl_drv_clip_to_glyph_string (struct glyph_string *s)
   fd->clip_y = r.y;
   fd->clip_w = r.width;
   fd->clip_h = r.height;
-  gl_apply_scissor (fd);
 }
 
 static void
@@ -1188,9 +1194,7 @@ gl_drv_clear_clip (struct frame *f)
 {
   struct gl_frame_data *fd = gl_get_frame_data (f);
   if (!fd) return;
-  gl_flush_glyph_batch ();   /* glyphs queued under the current clip */
   fd->clip_on = false;
-  glDisable (GL_SCISSOR_TEST);
 }
 
 static void
@@ -1198,11 +1202,15 @@ gl_drv_fill_rect (struct frame *f, int x, int y, int w, int h,
                   unsigned long color)
 {
   struct gl_frame_data *fd = gl_get_frame_data (f);
-  if (!fd) return;
-  gl_flush_glyph_batch ();   /* keep submission order vs queued glyphs */
+  if (!fd || w <= 0 || h <= 0) return;
+  /* A solid rect is a quad sampling the atlas' white block: coverage 1.0
+     passes the gamma curve unchanged, so it joins the glyph batch with
+     no program switch and no flush.  */
+  float s = (float) fd->scale;
   float rgba[4];
   gl_unpack_color (color, rgba);
-  gl_draw_rect_px (fd, x, y, w, h, rgba);
+  gl_batch_append (fd, x * s, y * s, (x + w) * s, (y + h) * s,
+                   GL_WHITE_U, GL_WHITE_V, GL_WHITE_U, GL_WHITE_V, rgba);
 }
 
 static void
@@ -1234,7 +1242,6 @@ gl_drv_copy_region (struct frame *f, int x, int y, int w, int h,
                      dx, dy0, dx + sw, dy0 + sh,
                      GL_COLOR_BUFFER_BIT, GL_NEAREST);
   glBindFramebuffer (GL_FRAMEBUFFER, fd->fbo);
-  gl_apply_scissor (fd);
 }
 
 static bool
@@ -1257,15 +1264,18 @@ gl_drv_get_glyph (struct font *font, unsigned int glyph_id)
   return gl_rasterize_glyph (font, glyph_id, key);
 }
 
-/* Emit the queued glyph quads as a single draw call (or nothing when the
-   batch is empty).  The scissor and FBO in effect now are the ones that
-   were active while these glyphs were queued, since every state change
-   flushes first.  */
+/* Emit the queued quads -- glyphs and solid rects share the program, the
+   atlas and one submission-ordered vertex stream -- as a single draw
+   call.  Every quad was clipped on the CPU against the clip rect in
+   effect when it was queued (gl_batch_append), so the draw itself runs
+   scissor-free; the non-batched primitives re-apply the scissor
+   themselves (gl_scissor_apply_now).  */
 static void
 gl_flush_glyph_batch (void)
 {
   if (g_glyph_batch_verts == 0 || !g_glyph_batch_fd) return;
   struct gl_frame_data *fd = g_glyph_batch_fd;
+  glDisable (GL_SCISSOR_TEST);          /* quads are pre-clipped */
   glUseProgram (g_prog_glyph);
   glUniform2f (g_u_glyph_size, (float) fd->w, (float) fd->h);
   glActiveTexture (GL_TEXTURE0);
@@ -1286,35 +1296,52 @@ gl_flush_glyph_batch (void)
   g_glyph_batch_verts = 0;
 }
 
+/* Queue one textured quad (physical pixel coords, top-left origin) into
+   the shared batch.  The quad is clipped here on the CPU against FD's
+   current clip rect -- computed with the same integer casts the GL
+   scissor used, so the pixel result is identical -- with the texture
+   coordinates adjusted proportionally.  Clipping at queue time is what
+   lets the batch run scissor-free and survive across glyph strings: a
+   full-frame redraw becomes a handful of draw calls.  */
 static void
-gl_drv_draw_glyph (struct frame *f, struct gfx_glyph *g,
-                   float x, float ybase, unsigned long color)
+gl_batch_append (struct gl_frame_data *fd, float x0, float y0,
+                 float x1, float y1, float u0, float v0,
+                 float u1, float v1, const float rgba[4])
 {
-  struct gl_frame_data *fd = gl_get_frame_data (f);
-  if (!fd || !g || g->width <= 0 || g->height <= 0) return;
   /* A batch targets one frame's FBO; if the frame changed, flush first.  */
   if (g_glyph_batch_fd && g_glyph_batch_fd != fd)
     gl_flush_glyph_batch ();
   g_glyph_batch_fd = fd;
 
-  float s = (float) fd->scale;
-  /* Mark the glyph's logical box dirty (bearings/size are physical px).  */
-  gl_mark_dirty (fd, x + g->bearing_x / s, ybase - g->bearing_y / s,
-                 g->width / s, g->height / s);
-  /* Stored metrics are physical pixels; draw site is logical, so scale.  */
-  float x0 = (x + g->bearing_x / s) * s;
-  float y0 = (ybase - g->bearing_y / s) * s;
-  float x1 = x0 + g->width;
-  float y1 = y0 + g->height;
-  float u0 = (float) g->atlas_x / GL_ATLAS_W;
-  float v0 = (float) g->atlas_y / GL_ATLAS_H;
-  float u1 = (float) (g->atlas_x + g->width) / GL_ATLAS_W;
-  float v1 = (float) (g->atlas_y + g->height) / GL_ATLAS_H;
-  float rgba[4];
-  gl_unpack_color (color, rgba);
-  float r = rgba[0], gg = rgba[1], b = rgba[2], a = rgba[3];
+  if (fd->clip_on)
+    {
+      double s = fd->scale;
+      float cx0 = (float) (int) (fd->clip_x * s);
+      float cy0 = (float) (int) (fd->clip_y * s);
+      float cx1 = cx0 + (float) (int) (fd->clip_w * s);
+      float cy1 = cy0 + (float) (int) (fd->clip_h * s);
+      if (x0 >= cx1 || x1 <= cx0 || y0 >= cy1 || y1 <= cy0)
+        return;
+      float du = (u1 - u0) / (x1 - x0), dv = (v1 - v0) / (y1 - y0);
+      if (x0 < cx0) { u0 += du * (cx0 - x0); x0 = cx0; }
+      if (x1 > cx1) { u1 -= du * (x1 - cx1); x1 = cx1; }
+      if (y0 < cy0) { v0 += dv * (cy0 - y0); y0 = cy0; }
+      if (y1 > cy1) { v1 -= dv * (y1 - cy1); y1 = cy1; }
+    }
 
-  /* Grow the CPU-side vertex buffer if needed (6 vertices per glyph).  */
+  /* Mark the clipped box dirty (top-left physical -> bottom-left FBO).  */
+  {
+    int px0 = (int) floorf (x0), px1 = (int) ceilf (x1);
+    int fy0 = fd->h - (int) ceilf (y1);
+    int fy1 = fd->h - (int) floorf (y0);
+    if (px0 < 0) px0 = 0;
+    if (fy0 < 0) fy0 = 0;
+    if (px1 > fd->w) px1 = fd->w;
+    if (fy1 > fd->h) fy1 = fd->h;
+    gl_dirty_add (&fd->dirty, px0, fy0, px1, fy1);
+  }
+
+  /* Grow the CPU-side vertex buffer if needed (6 vertices per quad).  */
   if (g_glyph_batch_verts + 6 > g_glyph_batch_cap)
     {
       int cap = g_glyph_batch_cap ? g_glyph_batch_cap * 2 : 4096;
@@ -1325,6 +1352,7 @@ gl_drv_draw_glyph (struct frame *f, struct gfx_glyph *g,
       g_glyph_batch_cap = cap;
     }
 
+  float r = rgba[0], gg = rgba[1], b = rgba[2], a = rgba[3];
   float quad[6][GL_GLYPH_VERT_FLOATS] = {
     {x0,y0, u0,v0, r,gg,b,a}, {x1,y0, u1,v0, r,gg,b,a}, {x1,y1, u1,v1, r,gg,b,a},
     {x0,y0, u0,v0, r,gg,b,a}, {x1,y1, u1,v1, r,gg,b,a}, {x0,y1, u0,v1, r,gg,b,a},
@@ -1332,6 +1360,26 @@ gl_drv_draw_glyph (struct frame *f, struct gfx_glyph *g,
   memcpy (g_glyph_batch + (size_t) g_glyph_batch_verts * GL_GLYPH_VERT_FLOATS,
           quad, sizeof quad);
   g_glyph_batch_verts += 6;
+}
+
+static void
+gl_drv_draw_glyph (struct frame *f, struct gfx_glyph *g,
+                   float x, float ybase, unsigned long color)
+{
+  struct gl_frame_data *fd = gl_get_frame_data (f);
+  if (!fd || !g || g->width <= 0 || g->height <= 0) return;
+  /* Stored metrics are physical pixels; the draw site is logical.  */
+  float s = (float) fd->scale;
+  float x0 = x * s + g->bearing_x;
+  float y0 = ybase * s - g->bearing_y;
+  float rgba[4];
+  gl_unpack_color (color, rgba);
+  gl_batch_append (fd, x0, y0, x0 + g->width, y0 + g->height,
+                   (float) g->atlas_x / GL_ATLAS_W,
+                   (float) g->atlas_y / GL_ATLAS_H,
+                   (float) (g->atlas_x + g->width) / GL_ATLAS_W,
+                   (float) (g->atlas_y + g->height) / GL_ATLAS_H,
+                   rgba);
 }
 
 static void gl_drv_draw_texture (struct frame *f, void *texture,
@@ -1380,9 +1428,7 @@ static int g_cglyph_count;
 static void
 gl_flush_glyph_caches (void)
 {
-  memset (g_glyphs, 0, sizeof g_glyphs);
-  g_glyph_count = 0;
-  g_atlas_next_x = g_atlas_next_y = g_atlas_row_h = 0;
+  gl_atlas_reset ();
   for (int i = 0; i < GL_CGLYPH_CAP; i++)
     if (g_cglyphs[i].valid)
       glDeleteTextures (1, &g_cglyphs[i].tex);
@@ -1657,7 +1703,8 @@ gl_drv_draw_texture (struct frame *f, void *texture,
 {
   struct gl_frame_data *fd = gl_get_frame_data (f);
   if (!fd || !texture) return;
-  gl_flush_glyph_batch ();   /* keep submission order vs queued glyphs */
+  gl_flush_glyph_batch ();   /* keep submission order vs queued quads */
+  gl_scissor_apply_now (fd); /* non-batched: needs the real scissor */
   gl_mark_dirty (fd, x, y, w, h);
   float s = (float) fd->scale;
   float x0 = x * s, y0 = y * s, x1 = (x + w) * s, y1 = (y + h) * s;
@@ -1692,7 +1739,8 @@ gl_drv_draw_bitmap (struct frame *f, unsigned short *bits, int dh,
   struct gl_frame_data *fd = gl_get_frame_data (f);
   (void) bw;
   if (!fd || !bits || wd <= 0 || h <= 0) return;
-  gl_flush_glyph_batch ();   /* binds its own R8 texture; drain glyphs first */
+  gl_flush_glyph_batch ();   /* binds its own R8 texture; drain quads first */
+  gl_scissor_apply_now (fd); /* non-batched: needs the real scissor */
   if (wd > 16) wd = 16;   /* a fringe bitmap row is an unsigned short */
   gl_mark_dirty (fd, x, y, wd, h);
 
@@ -2318,6 +2366,8 @@ gl_capture_frame (struct frame *f, int *w, int *h, unsigned char **out)
 {
   struct gl_frame_data *fd = gl_get_frame_data (f);
   if (!fd || !fd->tex) return false;
+  if (g_glyph_batch_fd == fd)
+    gl_flush_glyph_batch ();    /* the FBO must hold every queued quad */
   int W = fd->w, H = fd->h;
   unsigned char *buf = malloc ((size_t) W * H * 4);
   if (!buf) return false;
