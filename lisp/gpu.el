@@ -3,7 +3,7 @@
 ;; Copyright (C) 2026 Free Software Foundation, Inc.
 
 ;; Author: Andros Fenollosa
-;; Version: 0.4.0
+;; Version: 0.4.1
 ;; Package-Requires: ((emacs "30.1"))
 ;; Keywords: hardware, display, macos, metal, gpu
 ;; URL: https://github.com/tanrax/emacs-gpu
