@@ -1653,6 +1653,29 @@ found."
 
 (setq x-input-coding-function #'x-get-input-coding-system)
 
+;; OpenGL GPU backend (emacs-gpu).  When Emacs is built --with-gpu (which
+;; enables the OpenGL driver on X11) and the backend is available, load the
+;; `gpu' module and enable it on the initial frame at startup, mirroring the
+;; Metal auto-enable on macOS.  Builds without the backend lack
+;; `gpu-backend-p', so this is a no-op there.  Set EMACS_GPU_DISABLE to a
+;; non-empty value to start with the stock CPU renderer instead.
+(declare-function gpu-backend-p "glfns.c")
+(declare-function gpu-enable "gpu" (&optional frame))
+(defvar gpu-enable-on-startup)
+(defun x--maybe-enable-gpu ()
+  "Load and enable the OpenGL GPU backend on startup when available.
+Honors the EMACS_GPU_DISABLE environment variable as an opt-out."
+  (when (and (member (getenv "EMACS_GPU_DISABLE") '(nil ""))
+             (fboundp 'gpu-backend-p)
+             (gpu-backend-p))
+    (require 'gpu)
+    ;; Also enable graphic frames created later in this session.
+    (setq gpu-enable-on-startup t)
+    (when (display-graphic-p)
+      (ignore-errors (gpu-enable)))))
+
+(add-hook 'window-setup-hook #'x--maybe-enable-gpu)
+
 (provide 'x-win)
 (provide 'term/x-win)
 

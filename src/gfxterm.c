@@ -31,7 +31,8 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.
 
 #include <config.h>
 
-#ifdef HAVE_MTL  /* Built whenever a gfx driver exists; today that is Metal. */
+/* Built whenever a gfx driver exists: Metal (macOS) or OpenGL (X11).  */
+#if defined (HAVE_MTL) || defined (HAVE_GFX_GL)
 
 #include <math.h>
 #include <stdio.h>
@@ -158,6 +159,15 @@ gfx_ready (struct frame *f)
   return gfx_drv && gfx_drv->frame_ready (f);
 }
 
+/* Public predicate for the terminal glue (xterm.c): is the GPU backend
+   enabled on F?  Lets the X input-time flush route through the GPU
+   present instead of the X double-buffer swap.  */
+bool
+gfx_frame_gpu_p (struct frame *f)
+{
+  return gfx_ready (f);
+}
+
 /* Open a render cycle and flush any queued scroll-bar gutter clears (they
    were queued during layout, when no cycle was open).  Every place the
    policy opens a cycle goes through here.  */
@@ -225,9 +235,15 @@ gfx_relief_colors (struct glyph_string *s, unsigned long *light,
   *dark  = gfx_shade_color (base, 0.4, false);
 }
 
-/* Draw a relief inside the rect with simple rectangle edges (subset of
-   ns_draw_relief, good enough for the typical thin relief).  Raised:
-   light top/left + dark bottom/right; sunken: the inverse.  */
+/* Draw a relief inside the rect with axis-aligned edges.  Raised: light
+   top/left + dark bottom/right; sunken: the inverse.  Ports the pixel
+   policy shared by ns_draw_relief and x_draw_relief_rect: the light
+   region is painted first so the corners shared with the dark region end
+   up dark, and when an edge is thicker than one pixel its outermost line
+   is drawn in the dark relief colour (the "draw the outermost line using
+   the black relief" hack in both native backends).  The diagonal corner
+   taper (bezel/trapezoid) and the corner erase those backends add are
+   not expressible with fill_rect and stay as a sub-pixel residual.  */
 static void
 gfx_draw_relief (struct glyph_string *s, int x, int y, int w, int h,
                  int hth, int vth, bool raised_p,
@@ -238,14 +254,22 @@ gfx_draw_relief (struct glyph_string *s, int x, int y, int w, int h,
   gfx_relief_colors (s, &light, &dark);
   unsigned long tl = raised_p ? light : dark;
   unsigned long br = raised_p ? dark  : light;
+  /* Light (top/left) region first, then the dark (bottom/right) region,
+     matching the native draw order so the overlapping corners go dark.  */
   if (top_p)
     gfx_drv->fill_rect (f, x, y, w, hth, tl);
-  if (bot_p)
-    gfx_drv->fill_rect (f, x, y + h - hth, w, hth, br);
   if (left_p)
     gfx_drv->fill_rect (f, x, y, vth, h, tl);
+  if (bot_p)
+    gfx_drv->fill_rect (f, x, y + h - hth, w, hth, br);
   if (right_p)
     gfx_drv->fill_rect (f, x + w - vth, y, vth, h, br);
+  /* Outermost top/left line in the dark relief colour when the edge is
+     thicker than one pixel (no-op for the common 1px relief).  */
+  if (top_p && hth > 1)
+    gfx_drv->fill_rect (f, x, y, w, 1, br);
+  if (left_p && vth > 1)
+    gfx_drv->fill_rect (f, x, y, 1, h, br);
 }
 
 /* Draw the face box / relief around glyph string S (mode line, buttons,
@@ -1097,6 +1121,40 @@ gfx_after_update_window_line (struct window *w, struct glyph_row *desired_row)
         gfx_fallback.rif->after_update_window_line_hook (w, desired_row);
       return;
     }
+
+  /* Arm fringe drawing for this row.  This flag is what makes
+     draw_window_fringes call draw_fringe_bitmap later; without it the
+     fringe bitmaps (buffer-boundary angles, empty-line marks, truncation
+     and continuation arrows) are never drawn.  Both x_after_update_window_line
+     and ns_after_update_window_line do exactly this.  */
+  if (!desired_row->mode_line_p && !w->pseudo_window_p)
+    desired_row->redraw_fringe_bitmaps_p = 1;
+
+  /* When a window has disappeared, repaint the internal-border strips at
+     this row so no rest of a full-width row stays visible there.  Mirrors
+     the same block in the X and NS backends, drawn through the driver.  */
+  int width, height;
+  if (windows_or_buffers_changed
+      && desired_row->full_width_p
+      && (width = FRAME_INTERNAL_BORDER_WIDTH (f), width != 0)
+      && (height = desired_row->visible_height, height > 0))
+    {
+      int y = WINDOW_TO_FRAME_PIXEL_Y (w, max (0, desired_row->y));
+      int face_id =
+        (FRAME_PARENT_FRAME (f)
+         ? (!NILP (Vface_remapping_alist)
+            ? lookup_basic_face (NULL, f, CHILD_FRAME_BORDER_FACE_ID)
+            : CHILD_FRAME_BORDER_FACE_ID)
+         : (!NILP (Vface_remapping_alist)
+            ? lookup_basic_face (NULL, f, INTERNAL_BORDER_FACE_ID)
+            : INTERNAL_BORDER_FACE_ID));
+      struct face *face = FACE_FROM_ID_OR_NULL (f, face_id);
+      unsigned long bg = face ? face->background
+                              : gfx_drv->frame_background (f);
+      gfx_drv->fill_rect (f, 0, y, width, height, bg);
+      gfx_drv->fill_rect (f, FRAME_PIXEL_WIDTH (f) - width, y,
+                          width, height, bg);
+    }
 }
 
 /* -----------------------------------------------------------------------
@@ -1309,13 +1367,25 @@ gfx_draw_fringe_bitmap (struct window *w, struct glyph_row *row,
   unsigned long bg = face ? face->background
                           : gfx_drv->frame_background (f);
 
+  /* Clip every fringe draw to the row's visible band, like the GC clip
+     x_draw_fringe_bitmap sets via x_clip_to_row (and the NS focus rect).
+     The empty-line indicator is defined 72px tall with a 3px period, so
+     a single call asks to draw the full 72px; without this clip the
+     bitmap spills past the row bottom -- harmless mid-buffer (the next
+     row repaints over it) but at the last row it bleeds over the mode
+     line and overwrites the bottom buffer-boundary marker.  */
+  int cy0 = p->by;
+  int cy1 = p->by + p->ny;
+
   /* Clear the fringe background (and the wider bx area) unless this is
      an overlay bitmap.  Mirrors ns_draw_fringe_bitmap.  */
   if (!p->overlay_p)
     {
       if (p->bx >= 0)
         gfx_drv->fill_rect (f, p->bx, p->by, p->nx, p->ny, bg);
-      gfx_drv->fill_rect (f, p->x, p->y, p->wd, p->h, bg);
+      int fy0 = max (p->y, cy0), fy1 = min (p->y + p->h, cy1);
+      if (fy1 > fy0)
+        gfx_drv->fill_rect (f, p->x, fy0, p->wd, fy1 - fy0, bg);
     }
 
   if (p->bits && p->wd > 0 && p->h > 0)
@@ -1334,8 +1404,16 @@ gfx_draw_fringe_bitmap (struct window *w, struct glyph_row *row,
          (the native backends draw the full bitmap and clip).  */
       int fbw = fringe_bitmap_width (p->which);
       int bw = fbw >= p->wd ? fbw : p->wd;
-      gfx_drv->draw_bitmap (f, p->bits, p->dh, bw, p->wd, p->h, p->x, p->y,
-                            color);
+
+      /* Clip the bitmap rows to the visible band, shifting the source
+         offset (dh) and height together so the periodic phase stays
+         aligned.  */
+      int top = max (p->y, cy0), bot = min (p->y + p->h, cy1);
+      int dh = p->dh + (top - p->y);
+      int h  = bot - top;
+      if (h > 0)
+        gfx_drv->draw_bitmap (f, p->bits, dh, bw, p->wd, h, p->x, top,
+                              color);
     }
 
   if (immediate)
@@ -1378,4 +1456,4 @@ gfx_warm_glyph_cache (struct frame *f)
   gfx_drv->warm_glyph_cache (f);
 }
 
-#endif /* HAVE_MTL */
+#endif /* HAVE_MTL || HAVE_GFX_GL */

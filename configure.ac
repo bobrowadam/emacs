@@ -574,10 +574,17 @@ AC_ARG_WITH([mtl],[AS_HELP_STRING([--with-mtl],
 [use Metal GPU backend for macOS (experimental; requires macOS 13+).])],
 [],[with_mtl=no])
 AC_ARG_WITH([gl],[AS_HELP_STRING([--with-gl],
-[use OpenGL GPU backend (RESERVED, not implemented yet: the gfx driver
-abstraction in src/gfxdrv.h + src/gfxterm.c is the integration point;
-implement a gl driver vtable like mtlterm.m's and wire it here).])],
+[use the OpenGL GPU drawing backend on GNU/Linux and other X11 systems
+(experimental; requires the X11 build plus EGL and OpenGL ES).  Implements
+the gfx driver vtable (src/gfxdrv.h) over src/gfxterm.c in src/glterm.c,
+the cross-platform counterpart of the Metal driver.])],
 [],[with_gl=no])
+AC_ARG_WITH([gpu],[AS_HELP_STRING([--with-gpu],
+[enable the GPU drawing backend for this platform automatically: Metal on
+macOS (as --with-mtl) and OpenGL on GNU/Linux and other X11 systems (as
+--with-gl).  Without this flag (and without --with-mtl/--with-gl) Emacs builds
+with the stock CPU renderer.])],
+[],[with_gpu=no])
 OPTION_DEFAULT_OFF([w32], [use native MS Windows GUI in a Cygwin build])
 OPTION_DEFAULT_OFF([pgtk], [use GTK to support window systems other than X])
 
@@ -2957,11 +2964,20 @@ HAVE_MTL=no
 MTL_OBJ=
 MTL_OBJC_OBJ=
 MTL_LIBS=
-if test "${with_gl}" = yes; then
-  AC_MSG_ERROR([--with-gl is reserved and not implemented yet.  The GPU
-drawing policy is already platform-neutral (src/gfxterm.c over the driver
-vtable in src/gfxdrv.h); an OpenGL driver needs to implement that vtable
-(see mtlterm.m's mtl_gfx_driver for the reference implementation).])
+dnl OpenGL driver vars; the real detection runs later, once X11 and the
+dnl font modules are resolved (see "OpenGL GPU backend" below).
+HAVE_GFX_GL=no
+GL_OBJ=
+GL_LIBS=
+dnl --with-gpu is a convenience meta-flag: resolve it to the platform's
+dnl concrete backend so the validated --with-mtl / --with-gl paths below do
+dnl the real work.  Metal on macOS, OpenGL on every other (X11) system.
+if test "${with_gpu}" = yes; then
+  if test "${opsys}" = darwin; then
+    with_mtl=yes
+  else
+    with_gl=yes
+  fi
 fi
 if test "${with_mtl}" = yes; then
   if test "${opsys}" != darwin; then
@@ -5656,6 +5672,51 @@ if test "${HAVE_MTL}" = "yes"; then
   AC_DEFINE([HAVE_MTL], [1],
     [Define to 1 if you are using the Metal GPU backend on macOS.])
 fi
+
+### OpenGL GPU backend (GNU/Linux and other X11 systems).
+dnl Counterpart of --with-mtl: the platform-neutral drawing policy
+dnl (gfxterm.o) plus the OpenGL driver (glterm.o) and its Lisp API
+dnl (glfns.o).  Rides on the X11 build the way Metal rides on NS, and uses
+dnl the font backend's FreeType faces for the glyph atlas, so it only adds
+dnl EGL + OpenGL ES on top of what an X build already links.
+if test "${with_gl}" = yes; then
+  if test "${opsys}" = darwin; then
+    AC_MSG_ERROR([--with-gl targets X11 systems; use --with-mtl on macOS.])
+  fi
+  if test "${HAVE_X_WINDOWS}" != yes; then
+    AC_MSG_ERROR([--with-gl requires the X11 build (do not pass --without-x).])
+  fi
+  if test "${HAVE_FREETYPE}" != yes; then
+    AC_MSG_ERROR([--with-gl requires the FreeType font backend.])
+  fi
+  EMACS_CHECK_MODULES([GFX_GL], [egl glesv2],
+    [HAVE_GFX_GL=yes],
+    [AC_MSG_ERROR([--with-gl requires EGL and OpenGL ES development files
+(on Debian/Ubuntu: libegl-dev libgles-dev).])])
+  if test "${HAVE_GFX_GL}" = yes; then
+    GL_OBJ="gfxterm.o glterm.o glfns.o"
+    GL_LIBS="$GFX_GL_LIBS"
+    CFLAGS="$CFLAGS $GFX_GL_CFLAGS"
+    AC_DEFINE([HAVE_GFX_GL], [1],
+      [Define to 1 if you are using the OpenGL GPU drawing backend.])
+    dnl Inline video (gpu-video-*) is optional: it needs GStreamer to
+    dnl decode into RGBA frames the OpenGL driver uploads as a texture.
+    dnl Without it the GL backend builds fine, just without video.
+    EMACS_CHECK_MODULES([GSTREAMER],
+      [gstreamer-1.0 gstreamer-app-1.0 gstreamer-video-1.0],
+      [HAVE_GSTREAMER=yes],
+      [HAVE_GSTREAMER=no])
+    if test "${HAVE_GSTREAMER}" = yes; then
+      GL_LIBS="$GL_LIBS $GSTREAMER_LIBS"
+      CFLAGS="$CFLAGS $GSTREAMER_CFLAGS"
+      AC_SUBST([GSTREAMER_CFLAGS])
+      AC_DEFINE([HAVE_GSTREAMER], [1],
+        [Define to 1 if the OpenGL backend has GStreamer inline video.])
+    fi
+  fi
+fi
+AC_SUBST([GL_OBJ])
+AC_SUBST([GL_LIBS])
 
 ### Use session management (-lSM -lICE) if available
 HAVE_X_SM=no

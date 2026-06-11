@@ -43,6 +43,10 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 extern void syms_of_mtlfns (void);
 #endif
 
+#ifdef HAVE_GFX_GL
+extern void syms_of_glfns (void);
+#endif
+
 #if defined HAVE_ANDROID && !defined ANDROID_STUBIFY
 #include "sfntfont.h"
 #endif
@@ -2433,6 +2437,9 @@ Using an Emacs configured with --with-x-toolkit=lucid does not have this problem
 #ifdef HAVE_MTL
       syms_of_mtlfns ();
 #endif /* HAVE_MTL */
+#ifdef HAVE_GFX_GL
+      syms_of_glfns ();
+#endif /* HAVE_GFX_GL */
 
 #ifdef HAVE_PGTK
       syms_of_pgtkterm ();

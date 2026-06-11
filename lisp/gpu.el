@@ -125,10 +125,12 @@ this Lisp timer the cursor effects only animate during user input."
 ;; ---------------------------------------------------------------------------
 ;; Customizable variables
 
-(defcustom gpu-cursor-animation 'block
-  "Cursor animation mode for the Metal GPU backend.
+(defcustom gpu-cursor-animation (if (fboundp 'gpu-opengl-p) 'sonicboom 'block)
+  "Cursor animation mode for the GPU backend.
+Defaults to `sonicboom' on the OpenGL (GNU/Linux) backend and `block'
+on Metal (macOS).
 Possible values:
-  `block'      Static filled rectangle, no effect (default)
+  `block'      Static filled rectangle, no effect
   `spring'     Critically-damped spring physics
   `torpedo'    Trail of last N cursor positions
   `sonicboom'  Expanding ring when cursor jumps far
@@ -254,25 +256,32 @@ After this call, all redisplay for FRAME goes through the Metal GPU.
 The NS backend still handles events, menus, and scrollbars."
   (interactive)
   (unless (fboundp 'gpu-backend-p)
-    (error "gpu-enable: Metal backend not compiled in (--with-mtl missing)"))
+    (error "gpu-enable: GPU backend not compiled in (build with --with-gpu)"))
   (unless (gpu-backend-p)
-    (error "gpu-enable: Metal is not available on this system"))
+    (error "gpu-enable: GPU backend is not available on this system"))
   (let ((f (or frame (selected-frame))))
     (unless (framep f)
-      (error "Mtl-enable: argument is not a frame"))
+      (error "gpu-enable: argument is not a frame"))
     (gpu-enable-for-frame f)
-    ;; Apply current configuration
-    (gpu-cursor-mode (gpu--cursor-mode-number gpu-cursor-animation))
-    (gpu-scroll-effect (gpu--scroll-easing-number gpu-scroll-easing))
-    (gpu-scroll-duration gpu-scroll-duration)
-    (gpu-trail-length gpu-trail-length)
-    (gpu-animations gpu-animations-enabled)
-    (when gpu-animations-enabled (gpu--anim-pump-start))
-    (add-hook 'pre-redisplay-functions #'gpu--transition-watch)
-    ;; Distinguish typing from cursor movement for the effects.
-    (add-hook 'pre-command-hook #'gpu--cursor-pre-command)
-    (message "Metal GPU enabled on frame: %s (device: %s, animations: %s)"
-             f (gpu-device-name) (if gpu-animations-enabled "on" "off"))))
+    ;; Buffer-switch cross-fade: both backends expose `gpu-transition-start',
+    ;; so wire the watcher whenever it is available.
+    (when (fboundp 'gpu-transition-start)
+      (add-hook 'pre-redisplay-functions #'gpu--transition-watch))
+    ;; Cursor effects, scroll easing and the animation layer; apply only
+    ;; when the backend exposes their primitives (Metal and OpenGL both do).
+    (if (fboundp 'gpu-cursor-mode)
+        (progn
+          (gpu-cursor-mode (gpu--cursor-mode-number gpu-cursor-animation))
+          (gpu-scroll-effect (gpu--scroll-easing-number gpu-scroll-easing))
+          (gpu-scroll-duration gpu-scroll-duration)
+          (gpu-trail-length gpu-trail-length)
+          (gpu-animations gpu-animations-enabled)
+          (when gpu-animations-enabled (gpu--anim-pump-start))
+          ;; Distinguish typing from cursor movement for the effects.
+          (add-hook 'pre-command-hook #'gpu--cursor-pre-command)
+          (message "GPU enabled on frame: %s (device: %s, animations: %s)"
+                   f (gpu-device-name) (if gpu-animations-enabled "on" "off")))
+      (message "GPU enabled on frame: %s (device: %s)" f (gpu-device-name)))))
 
 ;;;###autoload
 (defun gpu-toggle-animations ()
@@ -287,18 +296,22 @@ The NS backend still handles events, menus, and scrollbars."
   "Display current Metal GPU backend status in the minibuffer."
   (interactive)
   (if (not (fboundp 'gpu-backend-p))
-      (message "Metal backend not compiled (--with-mtl required)")
+      (message "GPU backend not compiled (build with --with-gpu)")
     (if (not (gpu-backend-p))
-        (message "Metal not available on this system")
-      (let ((status (gpu-animation-status)))
-        (message "Metal GPU: %s | Animations: %s | Cursor: %s | Scroll: %s (%.2fs)"
-                 (gpu-device-name)
-                 (if (cdr (assq 'animations status)) "on" "off")
-                 (nth (cdr (assq 'cursor-mode status))
-                      '(block spring torpedo sonicboom ripple pixiedust hollow beam))
-                 (nth (cdr (assq 'scroll-easing status))
-                      '(none linear ease-out-quad ease-out-cubic spring ease-in-out-cubic))
-                 (cdr (assq 'scroll-duration status)))))))
+        (message "GPU backend not available on this system")
+      ;; The OpenGL backend has no animation layer, so report just the
+      ;; device; the Metal backend reports the full animation state.
+      (if (not (fboundp 'gpu-animation-status))
+          (message "GPU backend: %s" (gpu-device-name))
+        (let ((status (gpu-animation-status)))
+          (message "Metal GPU: %s | Animations: %s | Cursor: %s | Scroll: %s (%.2fs)"
+                   (gpu-device-name)
+                   (if (cdr (assq 'animations status)) "on" "off")
+                   (nth (cdr (assq 'cursor-mode status))
+                        '(block spring torpedo sonicboom ripple pixiedust hollow beam))
+                   (nth (cdr (assq 'scroll-easing status))
+                        '(none linear ease-out-quad ease-out-cubic spring ease-in-out-cubic))
+                   (cdr (assq 'scroll-duration status))))))))
 
 ;;;###autoload
 (defun gpu-set-cursor (mode)
@@ -340,6 +353,28 @@ underneath.  Rendered entirely by the GPU compositor."
 (defvar gpu--transition-armed nil
   "Non-nil while a snapshot was already taken for the ongoing redisplay.")
 
+(defvar gpu--gl-trans-timer nil
+  "Timer presenting the OpenGL backend's cross-fade while it runs.")
+
+(defun gpu--gl-trans-pump (frame)
+  "Advance the OpenGL cross-fade on FRAME; cancel the timer when it ends.
+The Metal backend has its own display-link pump (`gpu--anim-pump'); the
+OpenGL backend has none, so a Lisp timer re-presents each fade frame."
+  (unless (and (frame-live-p frame)
+               (fboundp 'gpu-transition-tick)
+               (gpu-transition-tick frame))
+    (when (timerp gpu--gl-trans-timer) (cancel-timer gpu--gl-trans-timer))
+    (setq gpu--gl-trans-timer nil)))
+
+(defun gpu--transition-pump-start (frame)
+  "Start the right cross-fade pump for the active backend on FRAME."
+  (cond
+   ((fboundp 'gpu-anim-tick) (gpu--anim-pump-start))   ; Metal
+   ((fboundp 'gpu-transition-tick)                     ; OpenGL
+    (unless (timerp gpu--gl-trans-timer)
+      (setq gpu--gl-trans-timer
+            (run-at-time 0 0.016 #'gpu--gl-trans-pump frame))))))
+
 (defun gpu--transition-watch (window)
   "Start a cross-fade when WINDOW is about to display another buffer.
 Runs from `pre-redisplay-functions', before the new content is painted,
@@ -355,7 +390,7 @@ so the GPU snapshot still holds the old pixels."
         (ignore-errors
           (when (gpu-transition-start (float gpu-buffer-transition-duration)
                                       (window-frame window))
-            (gpu--anim-pump-start))))
+            (gpu--transition-pump-start (window-frame window)))))
       (set-window-parameter window 'gpu--last-buffer new))))
 
 ;; ---------------------------------------------------------------------------
@@ -434,8 +469,9 @@ at the end.  One video per frame; a previous one is replaced."
 
 (defcustom gpu-video-file-extensions '("mp4" "mov" "m4v" "3gp")
   "File extensions opened in `gpu-video-mode'.
-These are the container formats decoded by AVFoundation.  Changing this
-takes effect on the next call to `gpu-video-register-auto-mode'."
+These are the container formats decoded by the active backend (AVFoundation
+on macOS, GStreamer on GNU/Linux).  Changing this takes effect on the next
+call to `gpu-video-register-auto-mode'."
   :type '(repeat string)
   :group 'gpu)
 
@@ -701,12 +737,16 @@ selected window plays (one video player per frame)."
           (run-at-time 0 0.04 #'gpu-video--sync (current-buffer)))))
 
 (defun gpu-video--setup-unsupported ()
-  "Show a notice when the GPU backend is not available for playback."
+  "Show a notice when inline video playback is not available."
   (let ((inhibit-read-only t))
     (erase-buffer)
-    (insert "Video playback requires the GPU (Metal) backend.\n\n"
-            "Enable it with M-x gpu-enable, then revert this buffer\n"
-            "with M-x revert-buffer.")
+    (if (and (fboundp 'gpu-backend-p) (gpu-backend-p))
+        ;; Backend is on, but this platform's driver has no video player.
+        (insert "Inline video playback is only available on the macOS\n"
+                "(Metal) backend; the OpenGL backend has no video decoder.")
+      (insert "Video playback requires the GPU backend.\n\n"
+              "Enable it with M-x gpu-enable, then revert this buffer\n"
+              "with M-x revert-buffer."))
     (set-buffer-modified-p nil)))
 
 (defvar gpu-video-mode-map
@@ -732,7 +772,10 @@ The video autoplays and loops, with play/pause and a clickable timeline.
   (auto-save-mode -1)
   (add-hook 'kill-buffer-hook
             (lambda () (gpu-video--teardown (current-buffer))) nil t)
-  (if (and (fboundp 'gpu-backend-p) (gpu-backend-p) (display-graphic-p))
+  ;; Inline video needs the AVFoundation player primitives, which only the
+  ;; macOS (Metal) backend provides; the OpenGL backend has no decoder.
+  (if (and (fboundp 'gpu-video-open) (fboundp 'gpu-backend-p) (gpu-backend-p)
+           (display-graphic-p))
       (gpu-video--setup)
     (gpu-video--setup-unsupported)))
 

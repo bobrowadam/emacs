@@ -204,6 +204,7 @@ extern void gfx_clear_frame_area (struct frame *f, int x, int y,
                                   int width, int height);
 extern void gfx_clear_under_internal_border (struct frame *f);
 extern void gfx_flush_display (struct frame *f);
+extern bool gfx_frame_gpu_p (struct frame *f);
 extern void gfx_update_begin (struct frame *f);
 extern void gfx_update_end (struct frame *f);
 extern void gfx_frame_up_to_date (struct frame *f);

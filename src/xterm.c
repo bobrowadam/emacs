@@ -715,6 +715,9 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "keyboard.h"
 #include "atimer.h"
 #include "font.h"
+#ifdef HAVE_GFX_GL
+#include "gfxdrv.h"
+#endif
 #include "xsettings.h"
 #include "sysselect.h"
 #include "menu.h"
@@ -18036,6 +18039,21 @@ x_net_wm_state (struct frame *f, Window window)
 static void
 x_flush_dirty_back_buffer_on (struct frame *f)
 {
+#ifdef HAVE_GFX_GL
+  /* With the GPU backend enabled on F, mouse-face highlights and other
+     immediate draws are committed to the render target with a deferred
+     present (see gfx_draw_glyph_string).  This input-time flush is where
+     the X backend would swap its double buffer; route it through the GPU
+     present instead so the highlight reaches the screen.  Without this,
+     hover/selection feedback never appears (the X double-buffer swap below
+     does not touch our FBO).  */
+  if (gfx_frame_gpu_p (f))
+    {
+      if (!FRAME_GARBAGED_P (f))
+        gfx_flush_display (f);
+      return;
+    }
+#endif
 #ifdef HAVE_XDBE
   if (FRAME_GARBAGED_P (f)
       || buffer_flipping_blocked_p ()
