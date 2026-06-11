@@ -989,19 +989,6 @@ gl_present_to_window (struct gl_frame_data *fd)
     eglSwapInterval (g_dpy, vsync);
   }
 
-  /* Surface size, cached: only re-query while it disagrees with the FBO
-     (a resize in flight), so the steady state pays no per-present
-     round-trips.  */
-  if (fd->surf_w != fd->w || fd->surf_h != fd->h)
-    {
-      EGLint qw = fd->w, qh = fd->h;
-      eglQuerySurface (g_dpy, fd->surf, EGL_WIDTH, &qw);
-      eglQuerySurface (g_dpy, fd->surf, EGL_HEIGHT, &qh);
-      fd->surf_w = qw;
-      fd->surf_h = qh;
-    }
-  EGLint sw = fd->surf_w, sh = fd->surf_h;
-
   /* The video / cursor-effect / cross-fade overlays paint straight onto
      the back buffer after the blit, so their pixels are not in the FBO:
      any present involving an overlay blits and records full.  An idle
@@ -1012,19 +999,50 @@ gl_present_to_window (struct gl_frame_data *fd)
   overlay = overlay || fd->video != NULL;
 #endif
 
-  /* Buffer age: how many swaps ago this back buffer was last presented
-     (0 = unknown/undefined).  Queried after make-current, before any
-     rendering to the buffer, as the extension requires.  */
   static int no_damage = -1, log_present = -1;
   if (no_damage == -1)
     {
       no_damage = getenv ("GL_NO_DAMAGE") ? 1 : 0;
       log_present = getenv ("GL_LOG_PRESENT") ? 1 : 0;
     }
+
+  /* Buffer age: how many swaps ago this back buffer was last presented
+     (0 = new/reallocated/unknown).  Queried after make-current, before
+     any rendering to the buffer, as the extension requires.  Always
+     queried, not just on partial-eligible presents: an age of 0 is also
+     how we learn the buffer was REALLOCATED, which is what happens when
+     the window manager resizes the window before Emacs has processed the
+     ConfigureNotify (the FBO still has the old size).  */
   EGLint age = 0;
-  if (g_has_buffer_age && !overlay && !fd->dirty.all
-      && sw == fd->w && sh == fd->h && !no_damage)
+  if (g_has_buffer_age && !no_damage)
     eglQuerySurface (g_dpy, fd->surf, EGL_BUFFER_AGE_EXT, &age);
+
+  /* Surface size.  Re-queried when the cache disagrees with the FBO (a
+     resize Emacs has already processed), when the buffer age says this
+     buffer is fresh (a resize Emacs has NOT processed yet reallocates
+     the buffers; blitting the stale size would leave undefined -- often
+     black -- bands beside old content until the next redisplay), and on
+     every present bound for a full blit anyway (overlay frames, whole-
+     frame changes, no age extension): those are the rare paths, and a
+     full blit with a stale size would not cover a just-resized window.
+     Only the steady partial path trusts the cache, and there age >= 1
+     vouches that the buffer (hence its size) is unchanged.  */
+  if (fd->surf_w != fd->w || fd->surf_h != fd->h
+      || age == 0 || overlay || fd->dirty.all
+      || !g_has_buffer_age || no_damage)
+    {
+      EGLint qw = fd->w, qh = fd->h;
+      eglQuerySurface (g_dpy, fd->surf, EGL_WIDTH, &qw);
+      eglQuerySurface (g_dpy, fd->surf, EGL_HEIGHT, &qh);
+      fd->surf_w = qw;
+      fd->surf_h = qh;
+    }
+  EGLint sw = fd->surf_w, sh = fd->surf_h;
+
+  /* A partial repair is only meaningful against a buffer whose content
+     and size the age vouches for.  */
+  if (overlay || fd->dirty.all || sw != fd->w || sh != fd->h)
+    age = 0;
 
   /* Repair set: what this back buffer is missing = the changes since the
      last swap plus everything the (age - 1) swaps in between wrote.
@@ -1121,6 +1139,7 @@ gl_present_to_window (struct gl_frame_data *fd)
      the screen already).  The compositor then recomposites only those
      bands.  Zero rects means full damage, which is also the fallback
      without the extension.  */
+  EGLBoolean swapped;
   if (g_swap_damage && !overlay && !fd->dirty.all && fd->dirty.n > 0
       && sw == fd->w && sh == fd->h && !no_damage)
     {
@@ -1133,10 +1152,20 @@ gl_present_to_window (struct gl_frame_data *fd)
           rects[i * 4 + 2] = b[2] - b[0];
           rects[i * 4 + 3] = b[3] - b[1];
         }
-      g_swap_damage (g_dpy, fd->surf, rects, fd->dirty.n);
+      swapped = g_swap_damage (g_dpy, fd->surf, rects, fd->dirty.n);
     }
   else
-    eglSwapBuffers (g_dpy, fd->surf);
+    swapped = eglSwapBuffers (g_dpy, fd->surf);
+
+  /* A failed swap presented nothing: keep the dirty set accumulating and
+     leave the ring alone, or it would desynchronize from the driver's
+     buffer rotation and future repairs would index the wrong slots
+     (stale content on screen).  The next present retries.  */
+  if (!swapped)
+    {
+      glBindFramebuffer (GL_FRAMEBUFFER, fd->fbo);
+      return;
+    }
 
   /* Record what this swap changed, so future presents can repair an aged
      back buffer, and start a fresh dirty set: everything accumulated so
