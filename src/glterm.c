@@ -118,14 +118,16 @@ static const char *VS_GLYPH =
   "layout(location=1) in vec2 a_uv;\n"
   "layout(location=2) in vec4 a_color;\n"
   "uniform vec2 u_size;\n"
-  "out vec2 v_uv; out vec4 v_color;\n"
+  /* highp UVs: a 2048px atlas needs more than fp16's ~10-bit mantissa to
+     address its texels exactly on strict-mediump GPUs.  */
+  "out highp vec2 v_uv; out vec4 v_color;\n"
   "void main(){\n"
   "  vec2 n = vec2((a_pos.x/u_size.x)*2.0-1.0, 1.0-(a_pos.y/u_size.y)*2.0);\n"
   "  gl_Position = vec4(n,0.0,1.0); v_uv=a_uv; v_color=a_color; }\n";
 static const char *FS_GLYPH =
   "#version 300 es\n"
   "precision mediump float;\n"
-  "in vec2 v_uv; in vec4 v_color; out vec4 o;\n"
+  "in highp vec2 v_uv; in vec4 v_color; out vec4 o;\n"
   "uniform sampler2D u_atlas;\n"
   "void main(){\n"
   "  float cov = texture(u_atlas, v_uv).r;\n"
@@ -138,7 +140,7 @@ static const char *VS_IMAGE =
   "layout(location=0) in vec2 a_pos;\n"
   "layout(location=1) in vec2 a_uv;\n"
   "uniform vec2 u_size;\n"
-  "out vec2 v_uv;\n"
+  "out highp vec2 v_uv;\n"
   "void main(){\n"
   "  vec2 n = vec2((a_pos.x/u_size.x)*2.0-1.0, 1.0-(a_pos.y/u_size.y)*2.0);\n"
   "  gl_Position = vec4(n,0.0,1.0); v_uv=a_uv; }\n";
@@ -149,7 +151,7 @@ static const char *VS_IMAGE =
 static const char *FS_IMAGE =
   "#version 300 es\n"
   "precision mediump float;\n"
-  "in vec2 v_uv; out vec4 o;\n"
+  "in highp vec2 v_uv; out vec4 o;\n"
   "uniform sampler2D u_tex; uniform float u_alpha;\n"
   "void main(){ o = texture(u_tex,v_uv) * u_alpha; }\n";
 
@@ -510,12 +512,19 @@ struct gl_frame_data
 static struct gl_frame_data *g_frames[GL_MAX_FRAMES];
 static struct gl_frame_data *g_cur;     /* frame of the open cycle */
 
+/* The lookup runs once per drawing op (per glyph at the worst), so keep
+   the last hit: redisplay works one frame at a time and the slot scan
+   only happens on a frame switch.  */
+static struct gl_frame_data *g_fd_mru;
+
 static struct gl_frame_data *
 gl_get_frame_data (struct frame *f)
 {
+  if (g_fd_mru && g_fd_mru->f == f)
+    return g_fd_mru;
   for (int i = 0; i < GL_MAX_FRAMES; i++)
     if (g_frames[i] && g_frames[i]->f == f)
-      return g_frames[i];
+      return g_fd_mru = g_frames[i];
   return NULL;
 }
 
@@ -1134,17 +1143,22 @@ gl_drv_end_frame (struct frame *f, bool present_p)
 {
   struct gl_frame_data *fd = gl_get_frame_data (f);
   if (!fd) return;
-  gl_flush_glyph_batch ();   /* drain any glyphs left from the last string */
-  glFlush ();
+  gl_flush_glyph_batch ();   /* drain any quads left from the last string */
   fd->in_cycle = false;
   g_cur = NULL;
   if (present_p)
     {
+      /* The swap in the present flushes; no explicit glFlush needed.  */
       gl_present_to_window (fd);
       fd->needs_present = false;
     }
   else
-    fd->needs_present = true;           /* deferred: flush_display presents */
+    {
+      /* Deferred: start the GPU on the frame now so the work overlaps
+         the wait until flush_display presents it.  */
+      glFlush ();
+      fd->needs_present = true;
+    }
 }
 
 static void
@@ -1228,19 +1242,34 @@ gl_drv_copy_region (struct frame *f, int x, int y, int w, int h,
   int sx = (int) (x * s), sy = (int) (y * s);
   int dx = (int) (dst_x * s), dy = (int) (dst_y * s);
   int sw = (int) (w * s), sh = (int) (h * s);
-  /* Bounce through the scratch target so overlapping moves are safe.  */
   int sy0 = fd->h - (sy + sh), dy0 = fd->h - (dy + sh);
-  glBindFramebuffer (GL_READ_FRAMEBUFFER, fd->fbo);
-  glBindFramebuffer (GL_DRAW_FRAMEBUFFER, fd->scratch_fbo);
   glDisable (GL_SCISSOR_TEST);
-  glBlitFramebuffer (sx, sy0, sx + sw, sy0 + sh,
-                     sx, sy0, sx + sw, sy0 + sh,
-                     GL_COLOR_BUFFER_BIT, GL_NEAREST);
-  glBindFramebuffer (GL_READ_FRAMEBUFFER, fd->scratch_fbo);
-  glBindFramebuffer (GL_DRAW_FRAMEBUFFER, fd->fbo);
-  glBlitFramebuffer (sx, sy0, sx + sw, sy0 + sh,
-                     dx, dy0, dx + sw, dy0 + sh,
-                     GL_COLOR_BUFFER_BIT, GL_NEAREST);
+  if (dx >= sx + sw || sx >= dx + sw || dy0 >= sy0 + sh || sy0 >= dy0 + sh)
+    {
+      /* Source and destination are disjoint (page scrolls, large jumps):
+         one direct blit within the FBO is legal and halves the bandwidth.
+         Only OVERLAPPING blits are undefined in ES 3.  */
+      glBindFramebuffer (GL_READ_FRAMEBUFFER, fd->fbo);
+      glBindFramebuffer (GL_DRAW_FRAMEBUFFER, fd->fbo);
+      glBlitFramebuffer (sx, sy0, sx + sw, sy0 + sh,
+                         dx, dy0, dx + sw, dy0 + sh,
+                         GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    }
+  else
+    {
+      /* Overlapping move (single-line scrolls): bounce through the
+         scratch target so the copy is safe.  */
+      glBindFramebuffer (GL_READ_FRAMEBUFFER, fd->fbo);
+      glBindFramebuffer (GL_DRAW_FRAMEBUFFER, fd->scratch_fbo);
+      glBlitFramebuffer (sx, sy0, sx + sw, sy0 + sh,
+                         sx, sy0, sx + sw, sy0 + sh,
+                         GL_COLOR_BUFFER_BIT, GL_NEAREST);
+      glBindFramebuffer (GL_READ_FRAMEBUFFER, fd->scratch_fbo);
+      glBindFramebuffer (GL_DRAW_FRAMEBUFFER, fd->fbo);
+      glBlitFramebuffer (sx, sy0, sx + sw, sy0 + sh,
+                         dx, dy0, dx + sw, dy0 + sh,
+                         GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    }
   glBindFramebuffer (GL_FRAMEBUFFER, fd->fbo);
 }
 
@@ -1744,33 +1773,61 @@ gl_drv_draw_bitmap (struct frame *f, unsigned short *bits, int dh,
   if (wd > 16) wd = 16;   /* a fringe bitmap row is an unsigned short */
   gl_mark_dirty (fd, x, y, wd, h);
 
-  /* Expand the bitmap rows into an R8 coverage buffer, then draw it with
-     the glyph program (1-bit coverage, so the gamma is a no-op) using
-     NEAREST sampling for hard edges.  Bit order: the X/cairo backend
-     writes the row straight into a CAIRO_FORMAT_A1 surface, where on a
-     little-endian host pixel x is bit x (LSB-first) -- so we map pixel c
-     to bit c, the mirror of the macOS/NS driver's MSB-first order.  */
-  unsigned char *buf = calloc ((size_t) wd * h, 1);
-  if (!buf) return;
+  /* The bitmap as an R8 coverage texture, cached: a fringe indicator is
+     redrawn every time its row updates, with the same handful of
+     patterns over and over, so re-uploading per call is pure waste.
+     Keyed by an FNV-1a hash of the visible rows plus the box size (a
+     64-bit hash over a couple dozen distinct patterns; collisions are
+     not a practical concern).  The coverage is color-independent (the
+     color rides on the vertices), so one texture serves every face.
+
+     Bit order: the X/cairo backend writes the row straight into a
+     CAIRO_FORMAT_A1 surface, where on a little-endian host pixel x is
+     bit x (LSB-first) -- the mirror of the macOS/NS driver's MSB-first
+     order.  Drawn with the glyph program (1-bit coverage, so the gamma
+     is a no-op) and NEAREST sampling for hard edges.  */
+  unsigned long long hash = 1469598103934665603ULL;
   for (int r = 0; r < h; r++)
     {
-      unsigned short row = bits[dh + r];
-      for (int c = 0; c < wd; c++)
-        if ((row >> c) & 1)
-          buf[r * wd + c] = 0xFF;
+      hash ^= (unsigned long long) bits[dh + r];
+      hash *= 1099511628211ULL;
     }
+  hash ^= ((unsigned long long) wd << 32) ^ (unsigned long long) h;
 
-  GLuint tex;
-  glGenTextures (1, &tex);
-  glBindTexture (GL_TEXTURE_2D, tex);
-  glPixelStorei (GL_UNPACK_ALIGNMENT, 1);
-  glTexImage2D (GL_TEXTURE_2D, 0, GL_R8, wd, h, 0, GL_RED,
-                GL_UNSIGNED_BYTE, buf);
-  glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-  glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-  glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-  glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-  free (buf);
+#define GL_BITMAP_CAP 64
+  static struct { unsigned long long hash; GLuint tex; } cache[GL_BITMAP_CAP];
+  static int cache_next;
+  GLuint tex = 0;
+  for (int i = 0; i < GL_BITMAP_CAP; i++)
+    if (cache[i].tex && cache[i].hash == hash)
+      { tex = cache[i].tex; break; }
+  if (!tex)
+    {
+      unsigned char *buf = calloc ((size_t) wd * h, 1);
+      if (!buf) return;
+      for (int r = 0; r < h; r++)
+        {
+          unsigned short row = bits[dh + r];
+          for (int c = 0; c < wd; c++)
+            if ((row >> c) & 1)
+              buf[r * wd + c] = 0xFF;
+        }
+      glGenTextures (1, &tex);
+      glBindTexture (GL_TEXTURE_2D, tex);
+      glPixelStorei (GL_UNPACK_ALIGNMENT, 1);
+      glTexImage2D (GL_TEXTURE_2D, 0, GL_R8, wd, h, 0, GL_RED,
+                    GL_UNSIGNED_BYTE, buf);
+      glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+      glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+      glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+      glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+      free (buf);
+      if (cache[cache_next].tex)
+        glDeleteTextures (1, &cache[cache_next].tex);
+      cache[cache_next].hash = hash;
+      cache[cache_next].tex = tex;
+      cache_next = (cache_next + 1) % GL_BITMAP_CAP;
+    }
 
   float s = (float) fd->scale;
   float x0 = x * s, y0 = y * s, x1 = (x + wd) * s, y1 = (y + h) * s;
@@ -1795,8 +1852,6 @@ gl_drv_draw_bitmap (struct frame *f, unsigned short *bits, int dh,
   glEnableVertexAttribArray (2);
   glVertexAttribPointer (2, 4, GL_FLOAT, GL_FALSE, 32, (void *) 16);
   glDrawArrays (GL_TRIANGLES, 0, 6);
-
-  glDeleteTextures (1, &tex);
 }
 
 /* Relief shading.  Port of x_alloc_lighter_color (xterm.c): scale the
@@ -2436,6 +2491,10 @@ gl_free_frame_data (struct frame *f)
     if (g_frames[i] && g_frames[i]->f == f)
       {
         struct gl_frame_data *fd = g_frames[i];
+        if (g_fd_mru == fd)
+          g_fd_mru = NULL;
+        if (g_glyph_batch_fd == fd)
+          { g_glyph_batch_fd = NULL; g_glyph_batch_verts = 0; }
         if (fd->surf != EGL_NO_SURFACE)
           {
             if (g_bound_known && g_bound_surf == fd->surf)
