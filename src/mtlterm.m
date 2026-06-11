@@ -254,6 +254,28 @@ static CGFloat           g_atlas_scale   = 1.0;
 static void mtl_color_glyph_cache_clear (void);
 static struct gfx_driver mtl_gfx_driver;
 
+/* Unified glyph+rect batch (the glterm.c counterpart).  Glyph quads and
+   solid rects accumulate in one CPU vertex array, in submission order,
+   and flush as a single draw call; the rects sample a white block
+   reserved in the atlas (coverage 1.0 passes the gamma curve unchanged),
+   so no pipeline switch ever splits the batch.  Each quad is clipped on
+   the CPU at queue time against the recording frame's clip rect, so the
+   batch also survives clip changes and crosses glyph strings.  Flushed
+   by: a different target frame, any non-batched primitive (image,
+   fringe, color glyph), a blit (scroll/shift), the end of the cycle, a
+   capture, and an atlas repack.  */
+@class MtlFrameData;
+static MtlGlyphVertex   *g_batch        = NULL;
+static int               g_batch_verts  = 0;
+static int               g_batch_cap    = 0;
+static MtlFrameData     *g_batch_fd     = nil;  /* unretained owner */
+static void mtl_flush_batch (void);
+static void mtl_atlas_reset (void);
+
+/* Texture coordinates of the white block's center texel.  */
+#define MTL_WHITE_U (2.0f / MTL_ATLAS_WIDTH)
+#define MTL_WHITE_V (2.0f / MTL_ATLAS_HEIGHT)
+
 /* Phase 4: global animation configuration (Lisp-configurable) */
 /* Sonicboom is the user's pick as the default for tests and demos
    (animations themselves stay opt-in behind g_mtl_animations_enabled).  */
@@ -366,6 +388,7 @@ mtl_global_setup (void)
                                                    mipmapped:NO];
   td.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
   g_atlas = [g_device newTextureWithDescriptor:td];
+  mtl_atlas_reset ();           /* reserve the white block for rect quads */
 
   /* Linear sampler: for glyph atlas (sub-pixel accuracy) */
   MTLSamplerDescriptor *sd = [[MTLSamplerDescriptor alloc] init];
@@ -544,6 +567,30 @@ glyph_cache_init (void)
   g_atlas_row_h   = 0;
 }
 
+/* Reset the atlas packing and the glyph table, then re-reserve the 4x4
+   white block at (0,0) that batched solid rects sample (see g_batch).
+   Queued quads still reference the old layout, so they are flushed
+   first.  Used at atlas creation, on overflow repack, and on a backing
+   scale change.  */
+static void
+mtl_atlas_reset (void)
+{
+  mtl_flush_batch ();
+  glyph_cache_init ();
+  if (g_atlas)
+    {
+      static const uint8_t white[16] = {
+        255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255,
+      };
+      [g_atlas replaceRegion:MTLRegionMake2D (0, 0, 4, 4) mipmapLevel:0
+                   withBytes:white bytesPerRow:4];
+      g_atlas_next_x = 5;
+      g_atlas_next_y = 0;
+      g_atlas_row_h  = 4;
+    }
+}
+
 static unsigned int
 glyph_cache_slot (uint64_t key)
 {
@@ -648,9 +695,9 @@ mtl_rasterize_glyph_id (CTFontRef font, CGGlyph cgGlyph, uint64_t key)
     }
   if (g_atlas_next_y + bh > MTL_ATLAS_HEIGHT)
     {
-      /* Atlas full: reset and clear (simple strategy) */
-      g_atlas_next_x = g_atlas_next_y = g_atlas_row_h = 0;
-      glyph_cache_init ();
+      /* Atlas full: repack from the top (mtl_atlas_reset flushes the
+         queued quads that still reference the old layout).  */
+      mtl_atlas_reset ();
       entry = glyph_cache_insert (key);
     }
 
@@ -1251,24 +1298,49 @@ mtl_log_seq_p (void)
                    atX:(int)x y:(int)y color:(unsigned long)color;
 - (void)applyClipRect:(NSRect)r;
 - (void)clearClipRect;
+- (void)applyScissorNow;
 @end
 
 @implementation MtlFrameData
 
-/* Clip subsequent draws on the current encoder to R (logical pixels), like the
-   NS backend's ns_focus clipping with get_glyph_string_clip_rect.  This is what
-   keeps a filled-box cursor on a tall row (e.g. an image line) at the size of
+/* Clip subsequent draws to R (logical pixels), like the NS backend's
+   ns_focus clipping with get_glyph_string_clip_rect.  This is what keeps
+   a filled-box cursor on a tall row (e.g. an image line) at the size of
    the character cell instead of the whole row, and stops overhangs from
-   bleeding outside the window area. */
+   bleeding outside the window area.  Only records state: batched quads
+   are clamped against it on the CPU at queue time (mtl_batch_append),
+   and the non-batched primitives apply it as a real scissor right
+   before their draw (applyScissorNow).  */
 - (void)applyClipRect:(NSRect)r
 {
+  self.clipOn = YES;
+  self.clipRect = r;
+}
+
+- (void)clearClipRect
+{
+  self.clipOn = NO;
+}
+
+/* Apply the recorded clip as the encoder's scissor, in physical pixels.
+   Called by the non-batched primitives (images, fringe bitmaps, color
+   glyphs) right before they draw.  */
+- (void)applyScissorNow
+{
   if (!self.encoder || !self.staticTexture) return;
+  long tw = (long) self.staticTexture.width;
+  long th = (long) self.staticTexture.height;
+  if (!self.clipOn)
+    {
+      MTLScissorRect sc = { 0, 0, (NSUInteger) tw, (NSUInteger) th };
+      [self.encoder setScissorRect:sc];
+      return;
+    }
+  NSRect r = self.clipRect;
   CGSize dsz = self.metalLayer.drawableSize;
   NSSize lsz = self.metalLayer.frame.size;
   double scx = lsz.width  > 0 ? dsz.width  / lsz.width  : 1.0;
   double scy = lsz.height > 0 ? dsz.height / lsz.height : 1.0;
-  long tw = (long) self.staticTexture.width;
-  long th = (long) self.staticTexture.height;
   long x0 = lround (NSMinX (r) * scx), y0 = lround (NSMinY (r) * scy);
   long x1 = lround (NSMaxX (r) * scx), y1 = lround (NSMaxY (r) * scy);
   if (x0 < 0) x0 = 0;
@@ -1279,14 +1351,6 @@ mtl_log_seq_p (void)
     { x0 = tw - 1; y0 = th - 1; x1 = tw; y1 = th; }  /* effectively clip out */
   MTLScissorRect sc = { (NSUInteger) x0, (NSUInteger) y0,
                         (NSUInteger) (x1 - x0), (NSUInteger) (y1 - y0) };
-  [self.encoder setScissorRect:sc];
-}
-
-- (void)clearClipRect
-{
-  if (!self.encoder || !self.staticTexture) return;
-  MTLScissorRect sc = { 0, 0, self.staticTexture.width,
-                        self.staticTexture.height };
   [self.encoder setScissorRect:sc];
 }
 
@@ -1338,25 +1402,40 @@ mtl_log_seq_p (void)
   if (pto + ph > tht)   ph = tht - pto;
   if (pw <= 0 || ph <= 0) return;
 
-  /* The copy must run after the draws already recorded this frame.  End the
-     render encoder, do the two blits on the same command buffer (Metal's hazard
-     tracking orders them after the render writes), then reopen the encoder with
-     LOAD so subsequent draw_glyph_string calls land on top of the moved pixels. */
+  /* The copy must run after the draws already recorded this frame.  Flush
+     the queued quads, end the render encoder, do the blit on the same
+     command buffer (Metal's hazard tracking orders it after the render
+     writes), then reopen the encoder with LOAD so subsequent
+     draw_glyph_string calls land on top of the moved pixels. */
+  mtl_flush_batch ();
   BOOL hadEncoder = (self.encoder != nil);
   if (self.encoder) { [self.encoder endEncoding]; self.encoder = nil; }
   if (!self.cmdBuf) self.cmdBuf = [g_queue commandBuffer];
 
   id<MTLBlitCommandEncoder> blit = [self.cmdBuf blitCommandEncoder];
-  [blit copyFromTexture:self.staticTexture sourceSlice:0 sourceLevel:0
-           sourceOrigin:MTLOriginMake ((NSUInteger) px, (NSUInteger) pfrom, 0)
-             sourceSize:MTLSizeMake ((NSUInteger) pw, (NSUInteger) ph, 1)
-              toTexture:self.scratchTexture destinationSlice:0 destinationLevel:0
-      destinationOrigin:MTLOriginMake (0, 0, 0)];
-  [blit copyFromTexture:self.scratchTexture sourceSlice:0 sourceLevel:0
-           sourceOrigin:MTLOriginMake (0, 0, 0)
-             sourceSize:MTLSizeMake ((NSUInteger) pw, (NSUInteger) ph, 1)
-              toTexture:self.staticTexture destinationSlice:0 destinationLevel:0
-      destinationOrigin:MTLOriginMake ((NSUInteger) px, (NSUInteger) pto, 0)];
+  if (pto >= pfrom + ph || pfrom >= pto + ph)
+    /* Disjoint regions (page scrolls, large jumps): one direct copy is
+       legal -- only OVERLAPPING copies are undefined -- and halves the
+       bandwidth.  */
+    [blit copyFromTexture:self.staticTexture sourceSlice:0 sourceLevel:0
+             sourceOrigin:MTLOriginMake ((NSUInteger) px, (NSUInteger) pfrom, 0)
+               sourceSize:MTLSizeMake ((NSUInteger) pw, (NSUInteger) ph, 1)
+                toTexture:self.staticTexture destinationSlice:0 destinationLevel:0
+        destinationOrigin:MTLOriginMake ((NSUInteger) px, (NSUInteger) pto, 0)];
+  else
+    {
+      /* Overlapping move (single-line scrolls): bounce through scratch.  */
+      [blit copyFromTexture:self.staticTexture sourceSlice:0 sourceLevel:0
+               sourceOrigin:MTLOriginMake ((NSUInteger) px, (NSUInteger) pfrom, 0)
+                 sourceSize:MTLSizeMake ((NSUInteger) pw, (NSUInteger) ph, 1)
+                  toTexture:self.scratchTexture destinationSlice:0 destinationLevel:0
+          destinationOrigin:MTLOriginMake (0, 0, 0)];
+      [blit copyFromTexture:self.scratchTexture sourceSlice:0 sourceLevel:0
+               sourceOrigin:MTLOriginMake (0, 0, 0)
+                 sourceSize:MTLSizeMake ((NSUInteger) pw, (NSUInteger) ph, 1)
+                  toTexture:self.staticTexture destinationSlice:0 destinationLevel:0
+          destinationOrigin:MTLOriginMake ((NSUInteger) px, (NSUInteger) pto, 0)];
+    }
   [blit endEncoding];
 
   if (hadEncoder)
@@ -1393,6 +1472,7 @@ mtl_log_seq_p (void)
   if (py + ph > tht) ph = tht - py;
   if (pw <= 0 || ph <= 0) return;
 
+  mtl_flush_batch ();          /* queued quads draw before the move */
   BOOL hadEncoder = (self.encoder != nil);
   if (self.encoder) { [self.encoder endEncoding]; self.encoder = nil; }
   if (!self.cmdBuf) self.cmdBuf = [g_queue commandBuffer];
@@ -1420,6 +1500,12 @@ mtl_log_seq_p (void)
 {
   CGSize dsz = self.metalLayer.drawableSize;
 
+  /* Start the cycle with an empty batch (endFrame drains it; this is the
+     defensive reset, mirroring gl_drv_begin_frame).  */
+  g_batch_verts = 0;
+  g_batch_fd = nil;
+  self.clipOn = NO;
+
   /* Track the backing scale so the glyph atlas is baked at physical resolution.
      If it changes (window moved to a different-DPI monitor), drop the atlas so
      glyphs re-rasterize at the new scale. */
@@ -1428,8 +1514,7 @@ mtl_log_seq_p (void)
   if (scale > 0 && fabs (scale - g_atlas_scale) > 0.01)
     {
       g_atlas_scale  = scale;
-      g_atlas_next_x = g_atlas_next_y = g_atlas_row_h = 0;
-      glyph_cache_init ();
+      mtl_atlas_reset ();
       mtl_color_glyph_cache_clear ();   /* color glyphs are scale-baked too */
     }
 
@@ -1464,24 +1549,103 @@ mtl_log_seq_p (void)
   [self openRenderEncoderClear:needsClear];
 }
 
+/* Emit the queued quads (see g_batch) as a single draw call.  The quads
+   were clipped on the CPU when queued, so the draw runs under a
+   full-frame scissor; the non-batched primitives re-apply the recorded
+   clip themselves (applyScissorNow).  Small batches ride in the command
+   buffer via setVertexBytes; larger ones get a one-shot shared buffer
+   the encoder keeps alive until execution.  */
+static void
+mtl_flush_batch (void)
+{
+  MtlFrameData *fd = g_batch_fd;
+  if (g_batch_verts == 0 || !fd) return;
+  if (!fd.encoder || !g_glyph_pipeline) { g_batch_verts = 0; return; }
+  MTLScissorRect sc = { 0, 0, fd.staticTexture.width,
+                        fd.staticTexture.height };
+  [fd.encoder setScissorRect:sc];
+  [fd.encoder setRenderPipelineState:g_glyph_pipeline];
+  NSUInteger len = (NSUInteger) g_batch_verts * sizeof (MtlGlyphVertex);
+  if (len <= 4096)              /* Metal's setVertexBytes ceiling */
+    [fd.encoder setVertexBytes:g_batch length:len atIndex:0];
+  else
+    {
+      id<MTLBuffer> vb =
+        [g_device newBufferWithBytes:g_batch length:len
+                             options:MTLResourceStorageModeShared];
+      [fd.encoder setVertexBuffer:vb offset:0 atIndex:0];
+      [vb release];             /* the encoder retains it until execution */
+    }
+  [fd.encoder setVertexBuffer:fd.uniformBuffer offset:0 atIndex:1];
+  [fd.encoder setFragmentTexture:g_atlas atIndex:0];
+  [fd.encoder setFragmentSamplerState:g_sampler atIndex:0];
+  [fd.encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0
+                 vertexCount:(NSUInteger) g_batch_verts];
+  g_batch_verts = 0;
+}
+
+/* Queue one textured quad (logical pixel coords) into the shared batch,
+   clamping it on the CPU against FD's recorded clip rect (the same
+   logical bounds the scissor would have used) with the texture
+   coordinates adjusted proportionally.  Clipping at queue time is what
+   lets the batch survive clip changes and cross glyph strings.  */
+static void
+mtl_batch_append (MtlFrameData *fd, float x0, float y0, float x1, float y1,
+                  float u0, float v0, float u1, float v1,
+                  float r, float g, float b)
+{
+  if (g_batch_fd && g_batch_fd != fd)
+    mtl_flush_batch ();
+  g_batch_fd = fd;
+
+  if (fd.clipOn)
+    {
+      NSRect c = fd.clipRect;
+      float cx0 = (float) NSMinX (c), cy0 = (float) NSMinY (c);
+      float cx1 = (float) NSMaxX (c), cy1 = (float) NSMaxY (c);
+      if (cx1 <= cx0 || cy1 <= cy0)
+        return;                 /* clipped out entirely */
+      if (x0 >= cx1 || x1 <= cx0 || y0 >= cy1 || y1 <= cy0)
+        return;
+      float du = (u1 - u0) / (x1 - x0), dv = (v1 - v0) / (y1 - y0);
+      if (x0 < cx0) { u0 += du * (cx0 - x0); x0 = cx0; }
+      if (x1 > cx1) { u1 -= du * (x1 - cx1); x1 = cx1; }
+      if (y0 < cy0) { v0 += dv * (cy0 - y0); y0 = cy0; }
+      if (y1 > cy1) { v1 -= dv * (y1 - cy1); y1 = cy1; }
+    }
+
+  if (g_batch_verts + 6 > g_batch_cap)
+    {
+      int cap = g_batch_cap ? g_batch_cap * 2 : 4096;
+      MtlGlyphVertex *p =
+        realloc (g_batch, (size_t) cap * sizeof (MtlGlyphVertex));
+      if (!p) { mtl_flush_batch (); return; }
+      g_batch = p;
+      g_batch_cap = cap;
+    }
+
+  MtlGlyphVertex quad[6] = {
+    {x0,y0, u0,v0, r,g,b,1}, {x1,y0, u1,v0, r,g,b,1},
+    {x0,y1, u0,v1, r,g,b,1}, {x1,y0, u1,v0, r,g,b,1},
+    {x1,y1, u1,v1, r,g,b,1}, {x0,y1, u0,v1, r,g,b,1},
+  };
+  memcpy (g_batch + g_batch_verts, quad, sizeof quad);
+  g_batch_verts += 6;
+}
+
 - (void)fillRect:(NSRect)rect color:(unsigned long)color
 {
-  if (!self.encoder || !g_rect_pipeline) return;
-
+  if (!self.encoder || !g_glyph_pipeline) return;
+  /* A solid rect is a quad sampling the atlas' white block: coverage 1.0
+     passes the gamma curve unchanged, so it joins the glyph batch with
+     no pipeline switch and no flush.  */
   float r, g, b;
   unpack_color (color, &r, &g, &b);
-
-  float x0 = (float)NSMinX(rect), y0 = (float)NSMinY(rect);
-  float x1 = (float)NSMaxX(rect), y1 = (float)NSMaxY(rect);
-
-  MtlRectVertex v[6] = {
-    {x0,y0,r,g,b,1}, {x1,y0,r,g,b,1}, {x0,y1,r,g,b,1},
-    {x1,y0,r,g,b,1}, {x1,y1,r,g,b,1}, {x0,y1,r,g,b,1},
-  };
-  [self.encoder setRenderPipelineState:g_rect_pipeline];
-  [self.encoder setVertexBytes:v length:sizeof(v) atIndex:0];
-  [self.encoder setVertexBuffer:self.uniformBuffer offset:0 atIndex:1];
-  [self.encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+  mtl_batch_append (self,
+                    (float) NSMinX (rect), (float) NSMinY (rect),
+                    (float) NSMaxX (rect), (float) NSMaxY (rect),
+                    MTL_WHITE_U, MTL_WHITE_V, MTL_WHITE_U, MTL_WHITE_V,
+                    r, g, b);
 }
 
 - (void)drawGlyph:(MtlGlyphCacheEntry *)ge
@@ -1500,33 +1664,26 @@ mtl_log_seq_p (void)
   CGFloat s = g_atlas_scale;
   float x0 = (float)(origin.x - ge->bearing_x / s);
   float y0 = (float)(origin.y - ge->bearing_y / s);
-  float x1 = x0 + ge->width  / s;
-  float y1 = y0 + ge->height / s;
 
-  float u0 = (float)ge->atlas_x / MTL_ATLAS_WIDTH;
-  float v0 = (float)ge->atlas_y / MTL_ATLAS_HEIGHT;
-  float u1 = (float)(ge->atlas_x + ge->width)  / MTL_ATLAS_WIDTH;
-  float v1 = (float)(ge->atlas_y + ge->height) / MTL_ATLAS_HEIGHT;
-
-  MtlGlyphVertex v[6] = {
-    {x0,y0, u0,v0, fr,fg,fb,1}, {x1,y0, u1,v0, fr,fg,fb,1},
-    {x0,y1, u0,v1, fr,fg,fb,1}, {x1,y0, u1,v0, fr,fg,fb,1},
-    {x1,y1, u1,v1, fr,fg,fb,1}, {x0,y1, u0,v1, fr,fg,fb,1},
-  };
-  [self.encoder setRenderPipelineState:g_glyph_pipeline];
-  [self.encoder setVertexBytes:v length:sizeof(v) atIndex:0];
-  [self.encoder setVertexBuffer:self.uniformBuffer offset:0 atIndex:1];
-  [self.encoder setFragmentTexture:g_atlas atIndex:0];
-  [self.encoder setFragmentSamplerState:g_sampler atIndex:0];
-  [self.encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+  mtl_batch_append (self, x0, y0,
+                    (float) (x0 + ge->width / s),
+                    (float) (y0 + ge->height / s),
+                    (float) ge->atlas_x / MTL_ATLAS_WIDTH,
+                    (float) ge->atlas_y / MTL_ATLAS_HEIGHT,
+                    (float) (ge->atlas_x + ge->width) / MTL_ATLAS_WIDTH,
+                    (float) (ge->atlas_y + ge->height) / MTL_ATLAS_HEIGHT,
+                    fr, fg, fb);
 }
 
 /* Rasterize a fringe bitmap (rows of bits, MSB-first like the X backend's
-   XCreatePixmapFromBitmapData) into a one-shot R8 coverage texture and draw it
-   as a colored quad.  Reuses the glyph pipeline (coverage * color).  bits[dh+r]
-   is row r; the visible window is [dh, dh+h).  A fresh texture per call avoids
-   the deferred-sampling hazard of reusing one texture across queued draws; the
-   command buffer retains it until completion, and fringes are few per frame. */
+   XCreatePixmapFromBitmapData) into an R8 coverage texture and draw it as
+   a colored quad.  Reuses the glyph pipeline (coverage * color).
+   bits[dh+r] is row r; the visible window is [dh, dh+h).  The textures
+   are cached by an FNV-1a hash of the visible rows plus the box size: a
+   fringe indicator redraws with the same handful of patterns over and
+   over, the coverage is color-independent (the color rides on the
+   vertices), and a cached texture is immutable after creation so reusing
+   it across queued draws is safe (only mutation would be a hazard).  */
 - (void)drawFringeBits:(unsigned short *)bits dh:(int)dh bw:(int)bw
                     wd:(int)wd h:(int)h
                    atX:(int)x y:(int)y color:(unsigned long)color
@@ -1535,28 +1692,59 @@ mtl_log_seq_p (void)
   if (wd > 32) wd = 32;
   if (bw < wd) bw = wd;
 
-  MTLTextureDescriptor *td =
-    [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm
-                                                       width:(NSUInteger) wd
-                                                      height:(NSUInteger) h mipmapped:NO];
-  td.usage = MTLTextureUsageShaderRead;
-  td.storageMode = MTLStorageModeShared;
-  id<MTLTexture> tex = [g_device newTextureWithDescriptor:td];
+  mtl_flush_batch ();          /* binds its own texture; drain quads first */
+  [self applyScissorNow];      /* non-batched: needs the real scissor */
 
-  uint8_t *buf = (uint8_t *) calloc ((size_t) wd * (size_t) h, 1);
+  unsigned long long hash = 1469598103934665603ULL;
   for (int r = 0; r < h; r++)
     {
-      unsigned short row = bits[dh + r];
-      for (int c = 0; c < wd; c++)
-        /* MSB-first within the bitmap's TRUE width: when the fringe is
-           narrower than the bitmap, this shows its left-aligned part
-           (the native backends clip the full bitmap the same way). */
-        if ((row >> (bw - 1 - c)) & 1)
-          buf[r * wd + c] = 0xFF;
+      hash ^= (unsigned long long) bits[dh + r];
+      hash *= 1099511628211ULL;
     }
-  [tex replaceRegion:MTLRegionMake2D (0, 0, (NSUInteger) wd, (NSUInteger) h)
-         mipmapLevel:0 withBytes:buf bytesPerRow:(NSUInteger) wd];
-  free (buf);
+  hash ^= ((unsigned long long) bw << 40)
+    ^ ((unsigned long long) wd << 20) ^ (unsigned long long) h;
+
+#define MTL_BITMAP_CAP 64
+  static struct { unsigned long long hash; id<MTLTexture> tex; }
+    cache[MTL_BITMAP_CAP];
+  static int cache_next;
+  id<MTLTexture> tex = nil;
+  for (int i = 0; i < MTL_BITMAP_CAP; i++)
+    if (cache[i].tex && cache[i].hash == hash)
+      { tex = cache[i].tex; break; }
+  if (!tex)
+    {
+      MTLTextureDescriptor *td =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm
+                                                           width:(NSUInteger) wd
+                                                          height:(NSUInteger) h mipmapped:NO];
+      td.usage = MTLTextureUsageShaderRead;
+      td.storageMode = MTLStorageModeShared;
+      tex = [g_device newTextureWithDescriptor:td];
+
+      uint8_t *buf = (uint8_t *) calloc ((size_t) wd * (size_t) h, 1);
+      for (int r = 0; r < h; r++)
+        {
+          unsigned short row = bits[dh + r];
+          for (int c = 0; c < wd; c++)
+            /* MSB-first within the bitmap's TRUE width: when the fringe is
+               narrower than the bitmap, this shows its left-aligned part
+               (the native backends clip the full bitmap the same way). */
+            if ((row >> (bw - 1 - c)) & 1)
+              buf[r * wd + c] = 0xFF;
+        }
+      [tex replaceRegion:MTLRegionMake2D (0, 0, (NSUInteger) wd, (NSUInteger) h)
+             mipmapLevel:0 withBytes:buf bytesPerRow:(NSUInteger) wd];
+      free (buf);
+
+      /* MRC: the cache owns one reference (from newTexture...); evicting
+         releases it (any in-flight command buffer holds its own).  */
+      if (cache[cache_next].tex)
+        [cache[cache_next].tex release];
+      cache[cache_next].hash = hash;
+      cache[cache_next].tex = tex;
+      cache_next = (cache_next + 1) % MTL_BITMAP_CAP;
+    }
 
   float fr, fg, fb;
   unpack_color (color, &fr, &fg, &fb);
@@ -1621,6 +1809,8 @@ mtl_log_seq_p (void)
 - (void)endFramePresent:(BOOL)present
 {
   if (!self.encoder) return;
+  mtl_flush_batch ();          /* drain any quads left from the last string */
+  g_batch_fd = nil;            /* the batch no longer targets this frame */
   [self.encoder endEncoding];
   self.encoder = nil;
   self.drawable = nil;
@@ -2351,6 +2541,8 @@ mtl_draw_image_texture_uv (MtlFrameData *fd, id<MTLTexture> tex,
                            float u0, float v0, float u1, float v1, float alpha)
 {
   if (!fd.encoder || !g_image_pipeline || !tex) return;
+  mtl_flush_batch ();          /* keep submission order vs queued quads */
+  [fd applyScissorNow];        /* non-batched: needs the real scissor */
 
   typedef struct { float x, y, u, v, a; } ImgVert;
   float x1 = x+w, y1 = y+h;
