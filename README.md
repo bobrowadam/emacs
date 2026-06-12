@@ -238,11 +238,18 @@ rather than the 60 Hz cap (median of 3 runs, redisplays per second):
 | Image scroll | 1359 fps | 1239 fps | 0.91x |
 
 ```mermaid
-xychart-beta
-    title "1616x912 laptop frame: redisplays per second (cairo | GPU pairs, higher is better)"
-    x-axis ["Line cairo", "Line GPU", "Page cairo", "Page GPU", "Redraw cairo", "Redraw GPU", "Typing cairo", "Typing GPU", "Image cairo", "Image GPU"]
-    y-axis "fps" 0 --> 2000
-    bar [530, 487, 297, 296, 247, 294, 1857, 1311, 1359, 1239]
+---
+config:
+  themeVariables:
+    xyChart:
+      plotColorPalette: "#4f81e5, #43b97f"
+---
+xychart-beta horizontal
+    title "1616x912 frame, fps: cairo (blue) vs GPU (green)"
+    x-axis ["Line scroll", " ", "Page scroll", "  ", "Full redraw", "   ", "Typing", "    ", "Image scroll", "     "]
+    y-axis "redisplays per second" 0 --> 2000
+    bar [530, 0, 297, 0, 247, 0, 1857, 0, 1359, 0]
+    bar [0, 487, 0, 296, 0, 294, 0, 1311, 0, 1239]
 ```
 
 The big win is structural: glyphs **and** solid fills (backgrounds,
@@ -288,11 +295,18 @@ side excludes on-screen present) flip the result:
 | Image scroll | 115 fps | 1328 fps | **11.5x** |
 
 ```mermaid
-xychart-beta
-    title "4K frame: redisplays per second (cairo | GPU pairs, higher is better)"
-    x-axis ["Line cairo", "Line GPU", "Page cairo", "Page GPU", "Redraw cairo", "Redraw GPU", "Typing cairo", "Typing GPU", "Image cairo", "Image GPU"]
-    y-axis "fps" 0 --> 1800
-    bar [117, 240, 102, 124, 66, 121, 238, 1766, 115, 1328]
+---
+config:
+  themeVariables:
+    xyChart:
+      plotColorPalette: "#4f81e5, #43b97f"
+---
+xychart-beta horizontal
+    title "4K frame, fps: cairo (blue) vs GPU (green)"
+    x-axis ["Line scroll", " ", "Page scroll", "  ", "Full redraw", "   ", "Typing", "    ", "Image scroll", "     "]
+    y-axis "redisplays per second" 0 --> 1800
+    bar [117, 0, 102, 0, 66, 0, 238, 0, 115, 0]
+    bar [0, 240, 0, 124, 0, 121, 0, 1766, 0, 1328]
 ```
 
 cairo slows down roughly linearly with the pixel count; the GPU barely
@@ -331,11 +345,18 @@ font-locked `xdisp.c`, same binary with and without the GPU backend;
 | Peak RSS | ~140 MB | ~144 MB | same |
 
 ```mermaid
-xychart-beta
-    title "M1 Pro: sustained scroll, redisplays per second (higher is better)"
+---
+config:
+  themeVariables:
+    xyChart:
+      plotColorPalette: "#4f81e5, #43b97f"
+---
+xychart-beta horizontal
+    title "M1 Pro sustained scroll, fps: Cocoa (blue) vs GPU (green)"
     x-axis ["Stock (Cocoa)", "GPU, vsync on", "GPU, vsync off"]
-    y-axis "fps" 0 --> 500
-    bar [481, 324, 475]
+    y-axis "redisplays per second" 0 --> 500
+    bar [481, 0, 0]
+    bar [0, 324, 475]
 ```
 
 Honest reading:
