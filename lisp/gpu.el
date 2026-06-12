@@ -319,6 +319,13 @@ The NS backend still handles events, menus, and scrollbars."
     (unless (framep f)
       (error "gpu-enable: argument is not a frame"))
     (gpu-enable-for-frame f)
+    ;; On X, drop the XDBE back buffer: the GPU FBO replaces it, but the
+    ;; stale buffer keeps the LAST core-X render (the half-painted startup
+    ;; frame) forever, and any leftover XdbeSwapBuffers -- the Expose
+    ;; handler issues one unconditionally -- flashes that ancient frame on
+    ;; screen for one vblank until the next GPU present overwrites it.
+    (when (fboundp 'gpu-opengl-p)
+      (set-frame-parameter f 'inhibit-double-buffering t))
     ;; Buffer-switch cross-fade: both backends expose `gpu-transition-start',
     ;; so wire the watcher whenever it is available.
     (when (fboundp 'gpu-transition-start)
