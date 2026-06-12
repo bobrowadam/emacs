@@ -237,6 +237,15 @@ rather than the 60 Hz cap (median of 3 runs, redisplays per second):
 | Typing (1 char + redisplay) | 1857 fps | 1311 fps | 0.71x |
 | Image scroll | 1359 fps | 1239 fps | 0.91x |
 
+```mermaid
+xychart-beta
+    title "1616x912 laptop frame: GPU throughput relative to cairo (1.0 = parity)"
+    x-axis ["Line scroll", "Page scroll", "Full redraw", "Typing", "Image scroll"]
+    y-axis "GPU / cairo ratio" 0 --> 1.4
+    bar [0.92, 1.00, 1.19, 0.71, 0.91]
+    line [1.0, 1.0, 1.0, 1.0, 1.0]
+```
+
 The big win is structural: glyphs **and** solid fills (backgrounds,
 underlines, boxes) share one submission-ordered vertex batch, clipped
 on the CPU, so a whole redraw flushes as a handful of draw calls --
@@ -279,6 +288,15 @@ side excludes on-screen present) flip the result:
 | Typing | 238 fps | 1766 fps | **7.4x** |
 | Image scroll | 115 fps | 1328 fps | **11.5x** |
 
+```mermaid
+xychart-beta
+    title "4K frame: GPU speedup over cairo (1.0 = parity)"
+    x-axis ["Line scroll", "Page scroll", "Full redraw", "Typing", "Image scroll"]
+    y-axis "speedup (x)" 0 --> 12
+    bar [2.05, 1.22, 1.84, 7.4, 11.5]
+    line [1.0, 1.0, 1.0, 1.0, 1.0]
+```
+
 cairo slows down roughly linearly with the pixel count; the GPU barely
 moves. Image scrolling is the extreme case (cairo re-blits the image from
 CPU memory every frame, the GPU re-composites a cached texture). This,
@@ -307,12 +325,20 @@ font-locked `xdisp.c`, same binary with and without the GPU backend;
 `/usr/bin/time -l` over scripted workloads):
 
 | Workload | Stock (Cocoa) | GPU, vsync on (default) | GPU, vsync off |
-|---|---|---|---|
+|---|---:|---:|---:|
 | Sustained scroll, redisplays/s | 481 | 324 | 475 |
 | CPU for 15 s of that scroll | 16.0 s | **10.5 s** | 15.5 s |
 | Typing throughput (chars/s, machine-paced) | 108 | 52 | 106 |
 | Idle (8 s) CPU | 1.21 s | 1.19 s | same |
 | Peak RSS | ~140 MB | ~144 MB | same |
+
+```mermaid
+xychart-beta
+    title "M1 Pro: CPU seconds burned during 15s of sustained scroll (lower is better)"
+    x-axis ["Stock (Cocoa)", "GPU, vsync on", "GPU, vsync off"]
+    y-axis "CPU seconds" 0 --> 18
+    bar [16.0, 10.5, 15.5]
+```
 
 Honest reading:
 
