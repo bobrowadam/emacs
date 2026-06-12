@@ -239,11 +239,10 @@ rather than the 60 Hz cap (median of 3 runs, redisplays per second):
 
 ```mermaid
 xychart-beta
-    title "1616x912 laptop frame: GPU throughput relative to cairo (1.0 = parity)"
-    x-axis ["Line scroll", "Page scroll", "Full redraw", "Typing", "Image scroll"]
-    y-axis "GPU / cairo ratio" 0 --> 1.4
-    bar [0.92, 1.00, 1.19, 0.71, 0.91]
-    line [1.0, 1.0, 1.0, 1.0, 1.0]
+    title "1616x912 laptop frame: redisplays per second (cairo | GPU pairs, higher is better)"
+    x-axis ["Line cairo", "Line GPU", "Page cairo", "Page GPU", "Redraw cairo", "Redraw GPU", "Typing cairo", "Typing GPU", "Image cairo", "Image GPU"]
+    y-axis "fps" 0 --> 2000
+    bar [530, 487, 297, 296, 247, 294, 1857, 1311, 1359, 1239]
 ```
 
 The big win is structural: glyphs **and** solid fills (backgrounds,
@@ -290,11 +289,10 @@ side excludes on-screen present) flip the result:
 
 ```mermaid
 xychart-beta
-    title "4K frame: GPU speedup over cairo (1.0 = parity)"
-    x-axis ["Line scroll", "Page scroll", "Full redraw", "Typing", "Image scroll"]
-    y-axis "speedup (x)" 0 --> 12
-    bar [2.05, 1.22, 1.84, 7.4, 11.5]
-    line [1.0, 1.0, 1.0, 1.0, 1.0]
+    title "4K frame: redisplays per second (cairo | GPU pairs, higher is better)"
+    x-axis ["Line cairo", "Line GPU", "Page cairo", "Page GPU", "Redraw cairo", "Redraw GPU", "Typing cairo", "Typing GPU", "Image cairo", "Image GPU"]
+    y-axis "fps" 0 --> 1800
+    bar [117, 240, 102, 124, 66, 121, 238, 1766, 115, 1328]
 ```
 
 cairo slows down roughly linearly with the pixel count; the GPU barely
@@ -334,10 +332,10 @@ font-locked `xdisp.c`, same binary with and without the GPU backend;
 
 ```mermaid
 xychart-beta
-    title "M1 Pro: CPU seconds burned during 15s of sustained scroll (lower is better)"
+    title "M1 Pro: sustained scroll, redisplays per second (higher is better)"
     x-axis ["Stock (Cocoa)", "GPU, vsync on", "GPU, vsync off"]
-    y-axis "CPU seconds" 0 --> 18
-    bar [16.0, 10.5, 15.5]
+    y-axis "fps" 0 --> 500
+    bar [481, 324, 475]
 ```
 
 Honest reading:
