@@ -1012,10 +1012,21 @@ gl_present_to_window (struct gl_frame_data *fd)
   overlay = overlay || fd->video != NULL;
 #endif
 
-  static int no_damage = -1, log_present = -1;
-  if (no_damage == -1)
+  /* Partial presents (blit only what the aged back buffer is missing,
+     hand the compositor damage rectangles) are OPT-IN, experimental:
+     GL_PARTIAL_PRESENT=1.  They buy ~10% on workloads that already run
+     above a thousand frames per second, and they cost correctness fights
+     on three asynchronous fronts at once -- the driver's buffer rotation
+     (ages observed lying across reallocations), the window manager's
+     resizes, and the compositor's damage-driven texture updates.  The
+     default present is the robust one: blit the whole frame, swap with
+     full damage.  A full blit of a laptop-sized frame is a fraction of a
+     millisecond of pure GPU copy; stability is worth far more.  */
+  static int partial_enabled = -1, log_present = -1;
+  if (partial_enabled == -1)
     {
-      no_damage = getenv ("GL_NO_DAMAGE") ? 1 : 0;
+      partial_enabled = (getenv ("GL_PARTIAL_PRESENT")
+                         && !getenv ("GL_NO_DAMAGE")) ? 1 : 0;
       log_present = getenv ("GL_LOG_PRESENT") ? 1 : 0;
     }
 
@@ -1027,7 +1038,7 @@ gl_present_to_window (struct gl_frame_data *fd)
      the window manager resizes the window before Emacs has processed the
      ConfigureNotify (the FBO still has the old size).  */
   EGLint age = 0;
-  if (g_has_buffer_age && !no_damage)
+  if (g_has_buffer_age && partial_enabled)
     eglQuerySurface (g_dpy, fd->surf, EGL_BUFFER_AGE_EXT, &age);
 
   /* Surface size.  Re-queried when the cache disagrees with the FBO (a
@@ -1042,7 +1053,7 @@ gl_present_to_window (struct gl_frame_data *fd)
      vouches that the buffer (hence its size) is unchanged.  */
   if (fd->surf_w != fd->w || fd->surf_h != fd->h
       || age == 0 || overlay || fd->dirty.all
-      || !g_has_buffer_age || no_damage)
+      || !g_has_buffer_age || !partial_enabled)
     {
       EGLint qw = fd->w, qh = fd->h;
       eglQuerySurface (g_dpy, fd->surf, EGL_WIDTH, &qw);
@@ -1189,8 +1200,8 @@ gl_present_to_window (struct gl_frame_data *fd)
      bands.  Zero rects means full damage, which is also the fallback
      without the extension.  */
   EGLBoolean swapped;
-  if (g_swap_damage && !overlay && !fd->dirty.all && fd->dirty.n > 0
-      && sw == fd->w && sh == fd->h && !no_damage)
+  if (partial_enabled && g_swap_damage && !overlay && !fd->dirty.all
+      && fd->dirty.n > 0 && sw == fd->w && sh == fd->h)
     {
       EGLint rects[GL_DIRTY_MAX * 4];
       for (int i = 0; i < fd->dirty.n; i++)

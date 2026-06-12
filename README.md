@@ -219,18 +219,20 @@ rather than the 60 Hz cap (median of 3 runs, redisplays per second):
 | Typing (1 char + redisplay) | 1857 fps | 1311 fps | 0.71x |
 | Image scroll | 1359 fps | 1239 fps | 0.91x |
 
-Two structural optimizations carry these numbers. Glyphs **and** solid
-fills (backgrounds, underlines, boxes) share one submission-ordered
-vertex batch, clipped on the CPU, so a whole redraw flushes as a handful
-of draw calls -- full-frame redraw is now **faster than cairo** on this
-machine. And the present blits only what the back buffer actually
-misses, derived from `EGL_EXT_buffer_age` plus a per-swap record of
-dirty regions, handing the compositor the damaged boxes through
-`eglSwapBuffersWithDamage` (on by default; correct under any compositor
-because the buffer age is what the driver really guarantees, unlike
-`EGL_BUFFER_PRESERVED`, which some compositors advertise but do not
-honour). The output stays pixel-identical to stock Emacs across the
-whole parity suite.
+The big win is structural: glyphs **and** solid fills (backgrounds,
+underlines, boxes) share one submission-ordered vertex batch, clipped
+on the CPU, so a whole redraw flushes as a handful of draw calls --
+full-frame redraw is now **faster than cairo** on this machine. The
+present itself stays deliberately simple and robust: blit the whole
+frame, swap with full damage. A partial present (blit only what the
+aged back buffer misses, hand the compositor damage rectangles via
+`EGL_EXT_buffer_age` + `eglSwapBuffersWithDamage`) exists behind
+`GL_PARTIAL_PRESENT=1` but is experimental: it buys ~10% on workloads
+already above a thousand frames per second, and in testing it had to
+fight asynchronous races against the driver's buffer rotation, the
+window manager's resizes and the compositor's damage tracking --
+stability won. The output stays pixel-identical to stock Emacs across
+the whole parity suite.
 
 Honest reading: typing and line scrolling on a laptop-sized frame are
 still **slower than cairo**, which is extremely good at small dirty
