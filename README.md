@@ -121,6 +121,24 @@ matching Noto font installed), those glyphs are skipped rather than
 drawn; install a scalable font that covers the script (the stock cairo
 backend draws them through cairo-xlib instead).
 
+## Installing on Linux (prebuilt .deb)
+
+Prebuilt amd64 packages (gtk3 + GPU + tree-sitter + native-comp AOT)
+are attached to each [release](https://github.com/tanrax/emacs-gpu/releases).
+They install as `/usr/bin/emacs` and conflict with the distro `emacs`
+packages. Pick the one matching your distro (Debian and Ubuntu ship
+incompatible libjpeg sonames, hence two packages):
+
+```sh
+# Debian 12
+sudo apt install ./emacs-gpu_<version>_amd64.debian12.deb
+# Ubuntu 24.04+ / Mint 22+
+sudo apt install ./emacs-gpu_<version>_amd64.ubuntu24.04.deb
+```
+
+The GPU path enables itself on X11; start with `EMACS_GPU_DISABLE=1` to
+get the stock CPU renderer from the same binary.
+
 ## Building on Linux
 
 Build this repository (the GPU-enabled Emacs), not the stock Emacs.
