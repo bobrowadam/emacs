@@ -510,6 +510,14 @@ struct gl_frame_data
   GLuint trans_tex;
   int trans_w, trans_h;
   double trans_start, trans_dur;
+  /* When the last successful swap happened.  The animation pumps (cursor
+     effects, cross-fade) throttle on it: their ticks interleave with
+     redisplay's own presents, and burst-presenting the surface well above
+     the refresh rate makes Mesa juggle extra swapchain buffers -- under
+     which radeonsi has been seen presenting a stale one (an ancient frame
+     flashing for one vblank).  Time-based animations lose nothing by
+     skipping a tick that lands right after a present.  */
+  double last_swap;
   /* Inline video, or NULL.  Composited over the FBO blit on every present
      (see gl_present_to_window); the MtlVideoPlayer analogue.  */
   struct gl_video *video;
@@ -1029,6 +1037,8 @@ gl_present_to_window (struct gl_frame_data *fd)
                          && !getenv ("GL_NO_DAMAGE")) ? 1 : 0;
       log_present = getenv ("GL_LOG_PRESENT") ? 1 : 0;
     }
+  static unsigned long present_seq;
+  present_seq++;
 
   /* Buffer age: how many swaps ago this back buffer was last presented
      (0 = new/reallocated/unknown).  Queried after make-current, before
@@ -1085,9 +1095,12 @@ gl_present_to_window (struct gl_frame_data *fd)
     }
 
   if (log_present)
-    fprintf (stderr, "[glpresent] fbo=%dx%d window=%dx%d age=%d %s boxes=%d\n",
-             fd->w, fd->h, sw, sh, (int) age, full ? "full" : "partial",
-             full ? 1 : repair.n);
+    fprintf (stderr, "[glpresent] #%lu t=%.4f fbo=%dx%d window=%dx%d age=%d %s"
+             " boxes=%d trans=%.3f cycle=%d\n",
+             present_seq, gl_now (), fd->w, fd->h, sw, sh, (int) age,
+             full ? "full" : "partial", full ? 1 : repair.n,
+             fd->trans_dur > 0 ? gl_now () - fd->trans_start : -1.0,
+             (int) fd->in_cycle);
 
   /* Both the FBO and the window's default framebuffer use GL bottom-left
      origin, so a straight (unflipped) blit lands right-side-up on screen.
@@ -1198,7 +1211,13 @@ gl_present_to_window (struct gl_frame_data *fd)
      screen (the current frame's changes, not the age repairs: those match
      the screen already).  The compositor then recomposites only those
      bands.  Zero rects means full damage, which is also the fallback
-     without the extension.  */
+     without the extension.  GL_PRESENT_FINISH=1 drains the GPU first
+     (diagnostic knob for present-order races in the GL stack).  */
+  {
+    static int finish = -1;
+    if (finish == -1) finish = getenv ("GL_PRESENT_FINISH") ? 1 : 0;
+    if (finish) glFinish ();
+  }
   EGLBoolean swapped;
   if (partial_enabled && g_swap_damage && !overlay && !fd->dirty.all
       && fd->dirty.n > 0 && sw == fd->w && sh == fd->h)
@@ -1236,6 +1255,7 @@ gl_present_to_window (struct gl_frame_data *fd)
     fd->swap_dirty[fd->swap_head].all = true;
   fd->swap_head = (fd->swap_head + 1) % GL_SWAP_RING;
   gl_dirty_clear (&fd->dirty);
+  fd->last_swap = gl_now ();
 
   /* Post-swap size recheck (see the comment at retry_present): if the
      surface turns out to have resized under this present, what just went
@@ -1364,6 +1384,22 @@ gl_drv_copy_region (struct frame *f, int x, int y, int w, int h,
   int sx = (int) (x * s), sy = (int) (y * s);
   int dx = (int) (dst_x * s), dy = (int) (dst_y * s);
   int sw = (int) (w * s), sh = (int) (h * s);
+  /* Clamp the move to the FBO.  During a resize race Emacs can ask for a
+     scroll computed against the old frame size; a blit whose SOURCE rect
+     leaves the read buffer writes UNDEFINED pixels (on radeonsi: recycled
+     VRAM, i.e. fragments of old frames) into the destination.  Trim both
+     rects by the same amount so the copy stays a pure translation.  */
+  {
+    int lo = sx < dx ? sx : dx;          /* leftmost edge of either rect */
+    if (lo < 0) { sx -= lo; dx -= lo; sw += lo; }
+    lo = sy < dy ? sy : dy;
+    if (lo < 0) { sy -= lo; dy -= lo; sh += lo; }
+    int hi = sx > dx ? sx : dx;          /* rightmost start of either rect */
+    if (hi + sw > fd->w) sw = fd->w - hi;
+    hi = sy > dy ? sy : dy;
+    if (hi + sh > fd->h) sh = fd->h - hi;
+    if (sw <= 0 || sh <= 0) return;
+  }
   int sy0 = fd->h - (sy + sh), dy0 = fd->h - (dy + sh);
   glDisable (GL_SCISSOR_TEST);
   if (dx >= sx + sw || sx >= dx + sw || dy0 >= sy0 + sh || sy0 >= dy0 + sh)
@@ -2266,7 +2302,11 @@ gl_anim_tick (struct frame *f, double dt)
       a->n_particles = alive;
     }
 
-  if (moved && !fd->in_cycle)
+  /* Present only when something moved AND redisplay has not just swapped:
+     piling animation presents on top of redisplay's own floods the
+     swapchain (see last_swap in gl_frame_data).  The skipped motion still
+     reaches the screen with the next tick or present.  */
+  if (moved && !fd->in_cycle && gl_now () - fd->last_swap >= 0.012)
     { gl_present_to_window (fd); fd->needs_present = false; }
   return g_gl_animations_enabled;
 }
@@ -2605,6 +2645,9 @@ gl_transition_start (struct frame *f, double duration)
 
   fd->trans_start = gl_now ();
   fd->trans_dur = duration;
+  if (getenv ("GL_LOG_PRESENT"))
+    fprintf (stderr, "[gltrans] arm t=%.4f dur=%.0fms fbo=%dx%d\n",
+             fd->trans_start, duration * 1000, fd->w, fd->h);
   return true;
 }
 
@@ -2616,7 +2659,12 @@ gl_transition_tick (struct frame *f)
 {
   struct gl_frame_data *fd = gl_get_frame_data (f);
   if (!fd || fd->trans_dur <= 0) return false;
-  gl_present_to_window (fd);
+  /* The fade is drawn on EVERY present while it runs, so a tick that
+     lands right after a redisplay present has nothing to add; skipping
+     it keeps the present rate at the refresh rate instead of flooding
+     the swapchain (see last_swap in gl_frame_data).  */
+  if (gl_now () - fd->last_swap >= 0.012)
+    gl_present_to_window (fd);
   return fd->trans_dur > 0;
 }
 
