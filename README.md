@@ -246,7 +246,7 @@ config:
 ---
 xychart-beta horizontal
     title "1616x912 frame, fps: cairo (blue) vs GPU (green)"
-    x-axis ["Line scroll", " ", "Page scroll", "  ", "Full redraw", "   ", "Typing", "    ", "Image scroll", "     "]
+    x-axis ["Line scroll (cairo)", "Line scroll (GPU)", "Page scroll (cairo)", "Page scroll (GPU)", "Full redraw (cairo)", "Full redraw (GPU)", "Typing (cairo)", "Typing (GPU)", "Image scroll (cairo)", "Image scroll (GPU)"]
     y-axis "redisplays per second" 0 --> 2000
     bar [530, 0, 297, 0, 247, 0, 1857, 0, 1359, 0]
     bar [0, 487, 0, 296, 0, 294, 0, 1311, 0, 1239]
@@ -303,7 +303,7 @@ config:
 ---
 xychart-beta horizontal
     title "4K frame, fps: cairo (blue) vs GPU (green)"
-    x-axis ["Line scroll", " ", "Page scroll", "  ", "Full redraw", "   ", "Typing", "    ", "Image scroll", "     "]
+    x-axis ["Line scroll (cairo)", "Line scroll (GPU)", "Page scroll (cairo)", "Page scroll (GPU)", "Full redraw (cairo)", "Full redraw (GPU)", "Typing (cairo)", "Typing (GPU)", "Image scroll (cairo)", "Image scroll (GPU)"]
     y-axis "redisplays per second" 0 --> 1800
     bar [117, 0, 102, 0, 66, 0, 238, 0, 115, 0]
     bar [0, 240, 0, 124, 0, 121, 0, 1766, 0, 1328]
