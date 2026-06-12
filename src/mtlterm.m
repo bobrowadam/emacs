@@ -325,6 +325,10 @@ static id<MTLRenderPipelineState> g_image_pipeline    = nil;
    equality (struct image * itself as key) with no ObjC runtime involvement.
    Values use kCFTypeDictionaryValueCallBacks (strong — MTLTexture retained). */
 static CFMutableDictionaryRef g_image_texture_cache = NULL;
+/* Pointer -> image spec hash, validating the texture cache: Emacs frees
+   evicted images and the allocator can reuse the address for a different
+   image, so pointer identity alone could serve a stale picture.  */
+static CFMutableDictionaryRef g_image_hash_cache = NULL;
 
 /* -----------------------------------------------------------------------
    Color utilities
@@ -552,6 +556,8 @@ mtl_global_setup (void)
                                 NULL,                            /* keys: raw pointer */
                                 &kCFTypeDictionaryValueCallBacks /* values: CF retain */
                                 );
+  g_image_hash_cache =
+    CFDictionaryCreateMutable (kCFAllocatorDefault, 0, NULL, NULL);
 
   return YES;
 }
@@ -2471,7 +2477,11 @@ mtl_texture_for_image (struct image *img)
      fast.  Re-rasterize if the display size changed (reload / new transform). */
   id<MTLTexture> tex = (__bridge id<MTLTexture>)
     CFDictionaryGetValue (g_image_texture_cache, (const void *)img);
-  if (tex && tex.width == w && tex.height == h) return tex;
+  EMACS_UINT cached_hash = (EMACS_UINT) (uintptr_t)
+    CFDictionaryGetValue (g_image_hash_cache, (const void *)img);
+  if (tex && cached_hash == img->hash
+      && tex.width == w && tex.height == h)
+    return tex;
 
   /* Render NSImage to a BGRA8 bitmap via CGContext */
   CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB ();
@@ -2528,9 +2538,12 @@ mtl_texture_for_image (struct image *img)
            withBytes:px bytesPerRow:bpr];
   free (px);
 
-  /* Store in cache: key = raw struct image* pointer, value = MTLTexture (CF-retained) */
+  /* Store in cache: key = raw struct image* pointer, value = MTLTexture
+     (CF-retained), plus the spec hash that validates the entry.  */
   CFDictionarySetValue (g_image_texture_cache, (const void *)img,
                         (__bridge CFTypeRef)tex);
+  CFDictionarySetValue (g_image_hash_cache, (const void *)img,
+                        (const void *) (uintptr_t) img->hash);
   return tex;
 }
 

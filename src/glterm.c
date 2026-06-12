@@ -1752,11 +1752,20 @@ gl_drv_warm_glyph_cache (struct frame *f)
     }
 }
 
-/* Image texture cache: key is the `struct image *' pointer (pointer
-   identity, like the Metal driver's CFDictionary).  Re-rasterize when the
-   display size changes (reload / new :scale / :rotation).  */
+/* Image texture cache: keyed by the `struct image *' pointer, VALIDATED
+   by the image's spec hash and display size.  Pointer identity alone is
+   not enough: Emacs's image cache frees evicted images and the allocator
+   can hand the same address to a different image later -- a stale hit
+   would draw the old picture (a long-gone dashboard banner, say) in the
+   new image's place.  The spec hash pins the entry to its image.  */
 #define GL_IMG_CAP 256
-struct gl_img_entry { struct image *img; GLuint tex; int w, h; };
+struct gl_img_entry
+{
+  struct image *img;
+  EMACS_UINT hash;
+  GLuint tex;
+  int w, h;
+};
 static struct gl_img_entry g_imgs[GL_IMG_CAP];
 
 static struct gl_img_entry *
@@ -1792,7 +1801,8 @@ gl_drv_image_texture (struct frame *f, struct image *img, int *w, int *h)
   int H = img->height > 0 ? img->height : 1;
 
   struct gl_img_entry *e = gl_img_slot (img);
-  if (e && e->img == img && e->tex && e->w == W && e->h == H)
+  if (e && e->img == img && e->hash == img->hash
+      && e->tex && e->w == W && e->h == H)
     {
       if (w) *w = W;
       if (h) *h = H;
@@ -1842,7 +1852,7 @@ gl_drv_image_texture (struct frame *f, struct image *img, int *w, int *h)
   cairo_surface_destroy (surf);
 
   if (e)
-    { e->img = img; e->tex = tex; e->w = W; e->h = H; }
+    { e->img = img; e->hash = img->hash; e->tex = tex; e->w = W; e->h = H; }
 
   (void) f;
   if (w) *w = W;
