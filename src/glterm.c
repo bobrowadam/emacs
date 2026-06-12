@@ -980,6 +980,19 @@ gl_present_to_window (struct gl_frame_data *fd)
   if (!gl_bind_surface (fd->surf))
     return;
 
+  /* A window-manager resize reaches the server and reallocates the EGL
+     buffers asynchronously; Mesa can hand us a pre-resize size AND a
+     pre-resize buffer age for a present that actually lands on a fresh
+     (zero-filled) buffer -- a partial blit then leaves visible garbage
+     for a frame (caught live by GL_VERIFY_PRESENT: 41% of the buffer
+     wrong on a maximize, with age=2).  The client cannot win that race
+     beforehand, but right after the swap Mesa HAS validated the new
+     geometry, so: present, re-query the size, and if it changed under
+     us, immediately present again in full at the true size.  Bounded to
+     one retry; the steady state pays one cached-state query per swap.  */
+  int size_retry = 0;
+ retry_present:;
+
   /* Vsync on by default (tear-free); GL_NO_VSYNC=1 frees the swap from the
      vblank so throughput benchmarks measure raw frame cost, not the 60 Hz
      cap.  Set once per surface after it is current.  */
@@ -1083,6 +1096,42 @@ gl_present_to_window (struct gl_frame_data *fd)
       }
   /* repair.n == 0: nothing changed since this buffer was shown; just swap.  */
 
+  /* GL_VERIFY_PRESENT=1: read the repaired back buffer and the FBO back
+     and compare, BEFORE the overlays (which legitimately diverge).  Any
+     mismatch is a partial-repair hole -- the exact source of "stale or
+     black rectangle" artifacts -- caught at the present that produced it,
+     with its age and box count.  Debug-only: two full-frame readbacks per
+     present.  */
+  {
+    static int verify = -1;
+    if (verify == -1) verify = getenv ("GL_VERIFY_PRESENT") ? 1 : 0;
+    if (verify && sw == fd->w && sh == fd->h)
+      {
+        size_t n = (size_t) fd->w * fd->h * 4;
+        unsigned char *back = malloc (n), *fbop = malloc (n);
+        if (back && fbop)
+          {
+            glBindFramebuffer (GL_READ_FRAMEBUFFER, 0);
+            glReadPixels (0, 0, fd->w, fd->h, GL_RGBA, GL_UNSIGNED_BYTE, back);
+            glBindFramebuffer (GL_READ_FRAMEBUFFER, fd->fbo);
+            glReadPixels (0, 0, fd->w, fd->h, GL_RGBA, GL_UNSIGNED_BYTE, fbop);
+            size_t bad = 0;
+            for (size_t i = 0; i < n; i += 4)
+              if (back[i] != fbop[i] || back[i+1] != fbop[i+1]
+                  || back[i+2] != fbop[i+2])
+                bad++;
+            if (bad)
+              fprintf (stderr,
+                       "[glverify] MISMATCH %zu px (age=%d %s boxes=%d)\n",
+                       bad, (int) age, full ? "full" : "partial",
+                       full ? 1 : repair.n);
+          }
+        free (back);
+        free (fbop);
+        glBindFramebuffer (GL_READ_FRAMEBUFFER, fd->fbo);
+      }
+  }
+
 #ifdef HAVE_GSTREAMER
   /* Inline video overlay: draw the latest decoded frame over the static
      content at its rect, clipped to the window interior, so redisplay can
@@ -1176,6 +1225,24 @@ gl_present_to_window (struct gl_frame_data *fd)
     fd->swap_dirty[fd->swap_head].all = true;
   fd->swap_head = (fd->swap_head + 1) % GL_SWAP_RING;
   gl_dirty_clear (&fd->dirty);
+
+  /* Post-swap size recheck (see the comment at retry_present): if the
+     surface turns out to have resized under this present, what just went
+     on screen is partially undefined -- republish everything at the true
+     size right now instead of leaving the artifact up until the next
+     redisplay.  */
+  {
+    EGLint qw = sw, qh = sh;
+    eglQuerySurface (g_dpy, fd->surf, EGL_WIDTH, &qw);
+    eglQuerySurface (g_dpy, fd->surf, EGL_HEIGHT, &qh);
+    if ((qw != sw || qh != sh) && size_retry++ == 0)
+      {
+        fd->surf_w = qw;
+        fd->surf_h = qh;
+        fd->dirty.all = true;
+        goto retry_present;
+      }
+  }
 
   /* Keep the window surface current (FBO rendering does not care which
      surface is bound), so the next frame needs no make-current at all.  */
