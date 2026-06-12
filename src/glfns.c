@@ -471,6 +471,28 @@ while animations are enabled, nil otherwise.  */)
   return on ? Qt : Qnil;
 }
 
+DEFUN ("gpu-pump-tick", Fgl_pump_tick, Sgl_pump_tick, 0, 1, 0,
+       doc: /* Advance every continuous GPU animation on FRAME one step.
+Single pump behind gpu.el's animation timer: the cursor effects, the
+buffer-switch cross-fade and the inline video all advance together and
+the driver presents at most one frame per tick, which keeps the present
+rate bounded no matter how many animation sources run at once.  FRAME
+defaults to the selected frame.  Returns a mask of the subsystems that
+still need pumping (1 = cursor animations enabled, 2 = cross-fade
+running, 4 = video open); 0 lets the timer cancel itself.  */)
+  (Lisp_Object frame)
+{
+  if (NILP (frame)) frame = selected_frame;
+  if (!FRAME_LIVE_P (XFRAME (frame))) return make_fixnum (0);
+  struct frame *f = XFRAME (frame);
+  if (!FRAME_X_P (f)) return make_fixnum (0);
+  int mask;
+  block_input ();
+  mask = gl_pump_tick (f);
+  unblock_input ();
+  return make_fixnum (mask);
+}
+
 DEFUN ("gpu-animation-status", Fgl_animation_status, Sgl_animation_status,
        0, 0, 0,
        doc: /* Return a description of the cursor animation state.  */)
@@ -501,6 +523,7 @@ syms_of_glfns (void)
   defsubr (&Sgl_cursor_suppress);
   defsubr (&Sgl_animations);
   defsubr (&Sgl_anim_tick);
+  defsubr (&Sgl_pump_tick);
   defsubr (&Sgl_animation_status);
 #ifdef HAVE_GSTREAMER
   defsubr (&Sgl_video_open);

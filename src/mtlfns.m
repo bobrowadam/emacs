@@ -698,6 +698,44 @@ frame.  Returns t while animations are enabled, nil otherwise.  */)
   return Qt;
 }
 
+DEFUN ("gpu-pump-tick", Fmtl_pump_tick, Smtl_pump_tick, 0, 1, 0,
+       doc: /* Advance every continuous GPU animation on FRAME one step.
+Single pump behind gpu.el's animation timer: the cursor effects, the
+buffer-switch cross-fade and the inline video all advance together in
+one deterministic tick (the animator presents are already coalesced by
+the layer).  FRAME defaults to the selected frame.  Returns a mask of
+the subsystems that still need pumping (1 = cursor animations enabled,
+2 = cross-fade running, 4 = video open); 0 lets the timer cancel
+itself.  */)
+  (Lisp_Object frame)
+{
+  if (NILP (frame)) frame = Fselected_frame ();
+  if (!FRAME_LIVE_P (XFRAME (frame))) return make_fixnum (0);
+  struct frame *f = XFRAME (frame);
+  MtlFrameData *fd = mtl_get_frame_data (f);
+  if (!fd || !fd.animator) return make_fixnum (0);
+
+  int mask = (g_mtl_animations_enabled ? 1 : 0)
+    | (fd.transitionTexture ? 2 : 0)
+    | (fd.videoPlayer ? 4 : 0);
+  if (mask == 0) return make_fixnum (0);
+
+  /* Real elapsed step: the pump re-paces between 30 and 60 Hz, so a
+     fixed dt would speed the physics up and down with it.  */
+  static double last;
+  double now = CACurrentMediaTime ();
+  float dt = (last > 0 && now - last < 0.1) ? (float) (now - last) : 0.033f;
+  last = now;
+
+  block_input ();
+  if (fd.videoPlayer)
+    mtl_video_tick (f);                 /* pull the next decoded frame */
+  if (!fd.encoder)
+    [fd.animator tickWithDt:dt];
+  unblock_input ();
+  return make_fixnum (mask);
+}
+
 DEFUN ("gpu-vsync", Fmtl_vsync, Smtl_vsync, 1, 2, 0,
        doc: /* Enable (non-nil) or disable display sync for FRAME's GPU layer.
 With vsync on (default) presents wait for the display refresh: redisplay
@@ -770,6 +808,7 @@ syms_of_mtlfns (void)
   defsubr (&Smtl_video_playing_p);
   defsubr (&Smtl_video_size);
   defsubr (&Smtl_anim_tick);
+  defsubr (&Smtl_pump_tick);
   defsubr (&Smtl_vsync);
   defsubr (&Smtl_transition_start);
 }

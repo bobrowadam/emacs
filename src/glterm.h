@@ -45,6 +45,17 @@ extern void gl_free_frame_data (struct frame *f);
 extern bool gl_transition_start (struct frame *f, double duration);
 extern bool gl_transition_tick (struct frame *f);
 
+/* Single animation pump (gpu-pump-tick): advance cursor effects, the
+   cross-fade and the inline video together and present at most once.
+   Returns a mask of the subsystems that still need pumping.  */
+enum
+{
+  GL_PUMP_ANIM  = 1,            /* cursor animation layer enabled */
+  GL_PUMP_FADE  = 2,            /* buffer cross-fade running */
+  GL_PUMP_VIDEO = 4,            /* inline video open */
+};
+extern int gl_pump_tick (struct frame *f);
+
 /* Cursor animation overlay (gpu-cursor-mode / gpu-animations / gpu-anim-tick).
    Spring glide, comet trail and particle bursts composited in the present.  */
 extern bool gl_anim_tick (struct frame *f, double dt);

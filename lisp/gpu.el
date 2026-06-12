@@ -99,21 +99,77 @@
     ('ease-in-out-cubic 5)
     (_ 2)))
 
-(defvar gpu--anim-timer nil
-  "30fps timer driving cursor animations while they are enabled.")
+;; ---------------------------------------------------------------------------
+;; Animation pump
+;;
+;; ONE timer drives every continuous animation: cursor effects, buffer
+;; cross-fades and inline video.  Each tick calls `gpu-pump-tick', which
+;; advances all of them together and presents at most one frame, so the
+;; present rate stays bounded no matter how many sources are active.
+;; (Per-subsystem timers used to stack presents well above the refresh
+;; rate, under which some GL drivers were caught presenting a stale
+;; swapchain buffer.)  Emacs's event loop starves display links while
+;; idle, so a Lisp timer is the only reliable clock for this.
 
-(defun gpu--anim-pump ()
-  "Advance GPU cursor animations; cancel the timer when they turn off."
-  (unless (and (fboundp 'gpu-anim-tick) (gpu-anim-tick))
-    (when (timerp gpu--anim-timer) (cancel-timer gpu--anim-timer))
-    (setq gpu--anim-timer nil)))
+(declare-function gpu-pump-tick "mtlfns.m" (&optional frame))
 
-(defun gpu--anim-pump-start ()
-  "Start the animation pump timer (idempotent).
-Emacs's event loop starves the CADisplayLink while idle, so without
-this Lisp timer the cursor effects only animate during user input."
-  (unless (timerp gpu--anim-timer)
-    (setq gpu--anim-timer (run-at-time 0 0.033 #'gpu--anim-pump))))
+(defvar gpu--pump-timer nil
+  "Single timer driving every continuous GPU animation.")
+
+(defvar gpu--pump-interval nil
+  "Current repeat interval of `gpu--pump-timer'.")
+
+(defvar gpu--pump-fade-frame nil
+  "Frame with a running buffer cross-fade, if any.")
+
+(defvar gpu--video-state)               ; defined with the inline video code
+
+(defun gpu--pump-start (&optional fast)
+  "Ensure the animation pump is running (idempotent).
+With FAST non-nil tick at 60Hz (cross-fades); the pump drops itself
+back to 30Hz when the fade ends (see `gpu--pump')."
+  (when (fboundp 'gpu-pump-tick)
+    (let ((want (if fast 0.016 0.033)))
+      (when (and (timerp gpu--pump-timer)
+                 fast (not (eql gpu--pump-interval want)))
+        (cancel-timer gpu--pump-timer)
+        (setq gpu--pump-timer nil))
+      (unless (timerp gpu--pump-timer)
+        (setq gpu--pump-interval want
+              gpu--pump-timer (run-at-time 0 want #'gpu--pump))))))
+
+(defun gpu--pump-stop ()
+  "Cancel the animation pump timer."
+  (when (timerp gpu--pump-timer) (cancel-timer gpu--pump-timer))
+  (setq gpu--pump-timer nil
+        gpu--pump-interval nil))
+
+(defun gpu--pump-frames ()
+  "Frames the pump must tick: selected, video and fade frames, deduped."
+  (let ((fs (list (selected-frame))))
+    (when gpu--video-state
+      (let ((vf (nth 3 gpu--video-state)))
+        (when (frame-live-p vf) (push vf fs))))
+    (when (frame-live-p gpu--pump-fade-frame)
+      (push gpu--pump-fade-frame fs))
+    (delete-dups fs)))
+
+(defun gpu--pump ()
+  "Advance every continuous GPU animation one step.
+Re-paces the timer to 60Hz while a cross-fade runs and back to 30Hz
+otherwise; cancels it once nothing needs pumping."
+  (gpu--video-follow)
+  (let ((mask 0))
+    (dolist (f (gpu--pump-frames))
+      (setq mask (logior mask (or (gpu-pump-tick f) 0))))
+    (when (zerop (logand mask 2))
+      (setq gpu--pump-fade-frame nil))
+    (if (zerop mask)
+        (gpu--pump-stop)
+      (let ((want (if (zerop (logand mask 2)) 0.033 0.016)))
+        (unless (eql want gpu--pump-interval)
+          (gpu--pump-stop)
+          (gpu--pump-start (eql want 0.016)))))))
 
 ;; Old names (pre-0.2) for the customs defined below.
 (define-obsolete-variable-alias 'mtl-animations-enabled 'gpu-animations-enabled "0.2")
@@ -215,7 +271,7 @@ cursor effects, particles and the 60fps compositor."
          (set-default sym val)
          (when (fboundp 'gpu-animations)
            (gpu-animations val)
-           (when val (gpu--anim-pump-start))))
+           (when val (gpu--pump-start))))
   :group 'gpu)
 
 (defcustom gpu-enable-on-startup nil
@@ -276,7 +332,7 @@ The NS backend still handles events, menus, and scrollbars."
           (gpu-scroll-duration gpu-scroll-duration)
           (gpu-trail-length gpu-trail-length)
           (gpu-animations gpu-animations-enabled)
-          (when gpu-animations-enabled (gpu--anim-pump-start))
+          (when gpu-animations-enabled (gpu--pump-start))
           ;; Distinguish typing from cursor movement for the effects.
           (add-hook 'pre-command-hook #'gpu--cursor-pre-command)
           (message "GPU enabled on frame: %s (device: %s, animations: %s)"
@@ -288,7 +344,7 @@ The NS backend still handles events, menus, and scrollbars."
   "Toggle the Metal GPU animation layer on or off."
   (interactive)
   (setopt gpu-animations-enabled (not gpu-animations-enabled))
-  (when gpu-animations-enabled (gpu--anim-pump-start))
+  (when gpu-animations-enabled (gpu--pump-start))
   (message "Metal animations %s" (if gpu-animations-enabled "enabled" "disabled")))
 
 ;;;###autoload
@@ -353,27 +409,12 @@ underneath.  Rendered entirely by the GPU compositor."
 (defvar gpu--transition-armed nil
   "Non-nil while a snapshot was already taken for the ongoing redisplay.")
 
-(defvar gpu--gl-trans-timer nil
-  "Timer presenting the OpenGL backend's cross-fade while it runs.")
-
-(defun gpu--gl-trans-pump (frame)
-  "Advance the OpenGL cross-fade on FRAME; cancel the timer when it ends.
-The Metal backend has its own display-link pump (`gpu--anim-pump'); the
-OpenGL backend has none, so a Lisp timer re-presents each fade frame."
-  (unless (and (frame-live-p frame)
-               (fboundp 'gpu-transition-tick)
-               (gpu-transition-tick frame))
-    (when (timerp gpu--gl-trans-timer) (cancel-timer gpu--gl-trans-timer))
-    (setq gpu--gl-trans-timer nil)))
-
 (defun gpu--transition-pump-start (frame)
-  "Start the right cross-fade pump for the active backend on FRAME."
-  (cond
-   ((fboundp 'gpu-anim-tick) (gpu--anim-pump-start))   ; Metal
-   ((fboundp 'gpu-transition-tick)                     ; OpenGL
-    (unless (timerp gpu--gl-trans-timer)
-      (setq gpu--gl-trans-timer
-            (run-at-time 0 0.016 #'gpu--gl-trans-pump frame))))))
+  "Pump the cross-fade on FRAME at 60Hz until it completes.
+The animation pump drops back to 30Hz (or stops) by itself once the
+driver reports the fade is over."
+  (setq gpu--pump-fade-frame frame)
+  (gpu--pump-start 'fast))
 
 (defun gpu--transition-watch (window)
   "Start a cross-fade when WINDOW is about to display another buffer.
@@ -397,26 +438,25 @@ so the GPU snapshot still holds the old pixels."
 ;; Inline video
 
 (defvar gpu--video-state nil
-  "Active inline video: (MARKER WIDTH HEIGHT TIMER FRAME), or nil.")
+  "Active inline video: (MARKER WIDTH HEIGHT FRAME), or nil.")
 
-(defun gpu--video-sync ()
-  "Track the video placeholder: move/clip the GPU rect and present a frame.
-Runs on a 30fps timer started by `gpu-video-insert'.  Follows scrolling
-and window changes; hides the video while its position is off-screen."
+(defun gpu--video-follow ()
+  "Track the inline video placeholder: move/clip the GPU rect.
+Runs from the animation pump; the pump tick that follows uploads and
+presents the next decoded frame.  Follows scrolling and window changes;
+parks the rect off-screen (still decoding) while it is not visible."
   (when gpu--video-state
-    (pcase-let ((`(,marker ,w ,h ,_timer ,frame) gpu--video-state))
+    (pcase-let ((`(,marker ,w ,h ,frame) gpu--video-state))
       (if (not (and (frame-live-p frame) (marker-buffer marker)))
           (gpu-video-stop)
         (let* ((win (get-buffer-window (marker-buffer marker) frame))
                (vis (and win (pos-visible-in-window-p marker win t))))
           (if (not (and vis (listp vis)))
-              ;; Not visible: park the rect off-screen but keep decoding.
               (gpu-video-move 0 -32768 w h nil frame)
             (let* ((edges (window-inside-pixel-edges win))
                    (x (+ (nth 0 edges) (nth 0 vis)))
                    (y (+ (nth 1 edges) (nth 1 vis))))
-              (gpu-video-move x y w h edges frame)))
-          (gpu-video-tick frame))))))
+              (gpu-video-move x y w h edges frame))))))))
 
 ;;;###autoload
 (defun gpu-video-insert (file width height &optional loop)
@@ -431,21 +471,19 @@ at the end.  One video per frame; a previous one is replaced."
                       'display `(space :width (,width) :height (,height))
                       'gpu-video file))
   (let ((marker (copy-marker (1- (point)))))
-    ;; Park off-screen; the first sync tick positions it for real.
+    ;; Park off-screen; the first pump tick positions it for real.
     (unless (gpu-video-open file 0 -32768 width height loop)
       (error "Cannot open video file %s" file))
-    (setq gpu--video-state
-          (list marker width height
-                (run-at-time 0 0.033 #'gpu--video-sync)
-                (selected-frame)))))
+    (setq gpu--video-state (list marker width height (selected-frame)))
+    (gpu--pump-start)))
 
 ;;;###autoload
 (defun gpu-video-stop ()
-  "Stop and remove the inline video, canceling its sync timer."
+  "Stop and remove the inline video.
+The animation pump notices the closed player and re-paces itself."
   (interactive)
   (when gpu--video-state
-    (pcase-let ((`(,_marker ,_w ,_h ,timer ,frame) gpu--video-state))
-      (when (timerp timer) (cancel-timer timer))
+    (let ((frame (nth 3 gpu--video-state)))
       (when (frame-live-p frame) (gpu-video-close frame)))
     (setq gpu--video-state nil)))
 

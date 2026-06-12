@@ -231,9 +231,11 @@ static void gl_flush_glyph_batch (void);
 static void gl_batch_append (struct gl_frame_data *fd, float x0, float y0,
                              float x1, float y1, float u0, float v0,
                              float u1, float v1, const float rgba[4]);
+struct gl_video;
 #ifdef HAVE_GSTREAMER
 static void gl_video_overlay (struct gl_frame_data *fd, int sw, int sh);
 static void gl_video_free (struct gl_frame_data *fd);
+static bool gl_video_pump (struct gl_video *v);
 #endif
 
 /* Cursor animation overlay + note_cursor.  Config globals are defined with
@@ -518,6 +520,8 @@ struct gl_frame_data
      flashing for one vblank).  Time-based animations lose nothing by
      skipping a tick that lands right after a present.  */
   double last_swap;
+  /* When gl_pump_tick last ran, for real-elapsed animation steps.  */
+  double last_pump;
   /* Inline video, or NULL.  Composited over the FBO blit on every present
      (see gl_present_to_window); the MtlVideoPlayer analogue.  */
   struct gl_video *video;
@@ -1001,12 +1005,21 @@ gl_present_to_window (struct gl_frame_data *fd)
   int size_retry = 0;
  retry_present:;
 
-  /* Vsync on by default (tear-free); GL_NO_VSYNC=1 frees the swap from the
-     vblank so throughput benchmarks measure raw frame cost, not the 60 Hz
-     cap.  Set once per surface after it is current.  */
+  /* Swap interval.  Vsync on by default: the blocking swap is the tear
+     protection on a bare X server, and on radeonsi it also keeps the
+     swapchain rotation tight -- running interval 0 under a compositor
+     was tried (the compositor already guarantees tear-free output) and
+     the loose buffer rotation brought back the stale-frame flashes the
+     12ms present throttle had fixed (an ancient pre-resize buffer shown
+     for one vblank during fades).  Swap blocking no longer starves the
+     Lisp timers either, now that the unified animation pump issues at
+     most one present per tick instead of one per subsystem.
+     GL_NO_VSYNC=1 frees the swap from the vblank (throughput
+     benchmarks); GL_FORCE_VSYNC=1 reserved for symmetry.  */
   {
     static int vsync = -1;
-    if (vsync == -1) vsync = getenv ("GL_NO_VSYNC") ? 0 : 1;
+    if (vsync == -1)
+      vsync = getenv ("GL_NO_VSYNC") ? 0 : 1;
     eglSwapInterval (g_dpy, vsync);
   }
 
@@ -2249,14 +2262,12 @@ gl_drv_note_cursor (struct frame *f, int x, int y, int w, int h,
           || g_gl_cursor_mode == GL_CURSOR_BEAM);
 }
 
-/* Advance every animation by DT and present if anything moved.  Driven by
-   gpu.el's 30fps timer (gpu-anim-tick).  Returns true while animations are
-   enabled so the timer keeps itself alive.  */
-bool
-gl_anim_tick (struct frame *f, double dt)
+/* Advance every cursor animation by DT; true when something moved and
+   the overlay needs a new present.  Pure physics: presenting is the
+   caller's job (gl_pump_tick / gl_anim_tick).  */
+static bool
+gl_anim_step (struct frame *f, struct gl_frame_data *fd, double dt)
 {
-  struct gl_frame_data *fd = gl_get_frame_data (f);
-  if (!fd) return g_gl_animations_enabled;
   struct gl_anim *a = &fd->anim;
   bool moved = false;
 
@@ -2302,13 +2313,67 @@ gl_anim_tick (struct frame *f, double dt)
       a->n_particles = alive;
     }
 
+  return moved;
+}
+
+/* Compatibility entry of the old per-subsystem pump (gpu-anim-tick).
+   New code goes through gl_pump_tick, which steps everything and
+   presents once.  */
+bool
+gl_anim_tick (struct frame *f, double dt)
+{
+  struct gl_frame_data *fd = gl_get_frame_data (f);
+  if (!fd) return g_gl_animations_enabled;
   /* Present only when something moved AND redisplay has not just swapped:
      piling animation presents on top of redisplay's own floods the
      swapchain (see last_swap in gl_frame_data).  The skipped motion still
      reaches the screen with the next tick or present.  */
-  if (moved && !fd->in_cycle && gl_now () - fd->last_swap >= 0.012)
+  if (gl_anim_step (f, fd, dt)
+      && !fd->in_cycle && gl_now () - fd->last_swap >= 0.012)
     { gl_present_to_window (fd); fd->needs_present = false; }
   return g_gl_animations_enabled;
+}
+
+/* Single animation pump (gpu-pump-tick).  Advance the cursor effects,
+   the buffer cross-fade and the inline video together, then present AT
+   MOST ONCE.  gpu.el drives every continuous animation through this one
+   entry point: when each subsystem presented from its own timer the
+   surface saw bursts well above the refresh rate, which is exactly the
+   pressure under which radeonsi was caught presenting a stale buffer
+   (see last_swap).  A skipped subsystem loses nothing -- the fade and
+   the video are composited by EVERY present, whoever issues it.
+   Returns the GL_PUMP_* mask of subsystems that still need pumping so
+   the Lisp timer can re-pace itself or stop.  */
+int
+gl_pump_tick (struct frame *f)
+{
+  struct gl_frame_data *fd = gl_get_frame_data (f);
+  if (!fd)
+    return g_gl_animations_enabled ? GL_PUMP_ANIM : 0;
+
+  double now = gl_now ();
+  double dt = fd->last_pump > 0 ? now - fd->last_pump : 1.0 / 30;
+  if (dt > 0.1) dt = 0.1;     /* a stalled timer must not teleport physics */
+  fd->last_pump = now;
+
+  bool need = g_gl_animations_enabled && gl_anim_step (f, fd, dt);
+  bool fade = fd->trans_dur > 0;
+  need |= fade;
+#ifdef HAVE_GSTREAMER
+  if (fd->video)
+    need |= gl_video_pump (fd->video);
+#endif
+
+  if (getenv ("GL_LOG_PRESENT"))
+    fprintf (stderr, "[glpump] t=%.4f need=%d fade=%d in_cycle=%d gap=%.3f\n",
+             now, need, fade, fd->in_cycle, now - fd->last_swap);
+
+  if (need && !fd->in_cycle && now - fd->last_swap >= 0.012)
+    { gl_present_to_window (fd); fd->needs_present = false; }
+
+  return (g_gl_animations_enabled ? GL_PUMP_ANIM : 0)
+    | (fade ? GL_PUMP_FADE : 0)
+    | (fd->video ? GL_PUMP_VIDEO : 0);
 }
 
 /* Append a solid colored quad (pixel coords, top-left origin) to a CPU
@@ -2721,6 +2786,8 @@ struct gl_video
   int cx, cy, cw, ch;          /* clip rect, logical px; cw<=0 means none */
   bool loop;
   bool have_frame;
+  unsigned tex_serial;         /* bumped on every uploaded frame */
+  bool moved;                  /* rect/clip changed since the last pump */
 };
 
 static bool g_gst_inited = false;
@@ -2773,6 +2840,7 @@ gl_video_upload_latest (struct gl_video *v)
                              GL_RGBA, GL_UNSIGNED_BYTE, data);
           glPixelStorei (GL_UNPACK_ROW_LENGTH, 0);
           v->have_frame = true;
+          v->tex_serial++;
           gst_video_frame_unmap (&vf);
         }
     }
@@ -2941,8 +3009,11 @@ gl_video_set_rect (struct frame *f, int x, int y, int w, int h)
 {
   struct gl_frame_data *fd = gl_get_frame_data (f);
   if (!fd || !fd->video) return false;
-  fd->video->rx = x; fd->video->ry = y;
-  fd->video->rw = w; fd->video->rh = h;
+  struct gl_video *v = fd->video;
+  if (v->rx != x || v->ry != y || v->rw != w || v->rh != h)
+    v->moved = true;
+  v->rx = x; v->ry = y;
+  v->rw = w; v->rh = h;
   return true;
 }
 
@@ -2951,9 +3022,30 @@ gl_video_set_clip (struct frame *f, int x, int y, int w, int h)
 {
   struct gl_frame_data *fd = gl_get_frame_data (f);
   if (!fd || !fd->video) return false;
-  fd->video->cx = x; fd->video->cy = y;
-  fd->video->cw = w; fd->video->ch = h;
+  struct gl_video *v = fd->video;
+  if (v->cx != x || v->cy != y || v->cw != w || v->ch != h)
+    v->moved = true;
+  v->cx = x; v->cy = y;
+  v->cw = w; v->ch = h;
   return true;
+}
+
+/* Pull pending bus messages and upload the newest decoded frame.  True
+   when the on-screen video needs a present: a fresh frame arrived or
+   the rect/clip moved since the last pump.  */
+static bool
+gl_video_pump (struct gl_video *v)
+{
+  gl_video_pump_bus (v);
+  unsigned before = v->tex_serial;
+  gl_video_upload_latest (v);
+  bool fresh = v->tex_serial != before;
+  if (getenv ("GL_LOG_PRESENT"))
+    fprintf (stderr, "[glvideo] tick t=%.4f %s\n", gl_now (),
+             fresh ? "new-frame" : "no-sample");
+  bool need = fresh || v->moved;
+  v->moved = false;
+  return need;
 }
 
 bool
@@ -2961,10 +3053,13 @@ gl_video_tick (struct frame *f)
 {
   struct gl_frame_data *fd = gl_get_frame_data (f);
   if (!fd || !fd->video) return false;
-  gl_video_pump_bus (fd->video);
-  gl_video_upload_latest (fd->video);
-  if (!fd->in_cycle)
-    gl_present_to_window (fd);          /* show the fresh frame now */
+  /* Present only what changed, under the same global throttle as the
+     other animation sources (see last_swap): a paused video issues no
+     presents, and a tick landing right after another present defers to
+     it -- every present composites the video texture anyway.  */
+  if (gl_video_pump (fd->video)
+      && !fd->in_cycle && gl_now () - fd->last_swap >= 0.012)
+    { gl_present_to_window (fd); fd->needs_present = false; }
   return true;
 }
 
