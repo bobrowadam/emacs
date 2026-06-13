@@ -6,10 +6,10 @@ The drawing logic is platform-neutral (`src/gfxterm.c`) behind a small
 driver interface (`src/gfxdrv.h`), with one driver per platform:
 
 - **GNU/Linux and other X11 systems**, **OpenGL ES / EGL**
-  (`src/glterm.c`): experimental. Renders text, faces, decorations,
-  images, fringes, scrolling and the cursor pixel-accurately against the
-  stock GTK/cairo backend, with inline video, a GPU buffer-switch
-  cross-fade and animated cursor effects.
+  (`src/glterm.c`): Beta. Renders text, faces, decorations, images,
+  fringes, scrolling and the cursor pixel-accurately against the stock
+  GTK/cairo backend, with inline video, a GPU buffer-switch cross-fade
+  and animated cursor effects.
 - **macOS**, native **Apple Metal** (`src/mtlterm.m`): feature-complete.
   Text goes through a GPU glyph atlas, images and inline video are
   textures, and the whole frame is composited by the GPU instead of
@@ -41,7 +41,12 @@ Beyond raw rendering, it enables things the stock backend cannot do:
 Text is rasterized once into a GPU glyph atlas and drawn as textured
 quads; scrolling moves already-rendered pixels with a texture blit.
 
-> Status: experimental, under active development.
+> Status: **Beta**. The backend is fully functional on macOS (Metal) and
+> GNU/Linux (OpenGL/X11), with comprehensive parity testing and production
+> builds available as precompiled packages. Known limitations: Intel builds
+> and universal binaries on macOS (currently arm64 only), and Wayland on
+> Linux (X11 only). All Emacs display features are reproduced; the GPU path
+> is opt-in via `--with-gpu` or runtime `EMACS_GPU_DISABLE=1`.
 >
 > **Note:** I am not answering issues for now. Feel free to open them as
 > a public record (they will be read eventually), but do not expect a
@@ -81,8 +86,8 @@ Xvfb (for the pixel-parity test harness).
 
 ## Status
 
-Experimental, correctness-first. Verified pixel-accurate against stock
-GTK/cairo Emacs (same binary, GPU on vs off):
+Beta, fully functional. Verified pixel-accurate against stock GTK/cairo
+Emacs (same binary, GPU on vs off) across comprehensive test coverage:
 
 - Text: ASCII/Latin/CJK/symbols, bold/italic/`:height`, font-lock, face
   inheritance, compositions, **color glyphs / emoji**, BiDi.
