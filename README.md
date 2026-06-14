@@ -247,13 +247,14 @@ rather than the 60 Hz cap (median of 3 runs, redisplays per second):
 config:
   themeVariables:
     xyChart:
-      plotColorPalette: "#43b97f"
+      plotColorPalette: "#43b97f, #4f81e5"
 ---
 xychart-beta horizontal
-    title "1616x912: GPU speedup vs cairo (1.0x = parity, higher is better)"
-    x-axis ["Line scroll", "Page scroll", "Full redraw", "Typing", "Image scroll"]
-    y-axis "GPU fps / cairo fps" 0 --> 1.3
-    bar [0.92, 1.00, 1.19, 0.71, 0.91]
+    title "1616x912 frame, redisplays/s: GPU (green) vs cairo (blue)"
+    x-axis ["Line scroll (GPU)", "Line scroll (cairo)", "Page scroll (GPU)", "Page scroll (cairo)", "Full redraw (GPU)", "Full redraw (cairo)", "Typing (GPU)", "Typing (cairo)", "Image scroll (GPU)", "Image scroll (cairo)"]
+    y-axis "redisplays per second" 0 --> 2000
+    bar [487, 0, 296, 0, 294, 0, 1311, 0, 1239, 0]
+    bar [0, 530, 0, 297, 0, 247, 0, 1857, 0, 1359]
 ```
 
 The big win is structural: glyphs **and** solid fills (backgrounds,
@@ -303,13 +304,14 @@ side excludes on-screen present) flip the result:
 config:
   themeVariables:
     xyChart:
-      plotColorPalette: "#43b97f"
+      plotColorPalette: "#43b97f, #4f81e5"
 ---
 xychart-beta horizontal
-    title "4K: GPU speedup vs cairo (1.0x = parity, higher is better)"
-    x-axis ["Line scroll", "Page scroll", "Full redraw", "Typing", "Image scroll"]
-    y-axis "GPU fps / cairo fps" 0 --> 12
-    bar [2.05, 1.22, 1.84, 7.4, 11.5]
+    title "4K frame, redisplays/s: GPU (green) vs cairo (blue)"
+    x-axis ["Line scroll (GPU)", "Line scroll (cairo)", "Page scroll (GPU)", "Page scroll (cairo)", "Full redraw (GPU)", "Full redraw (cairo)", "Typing (GPU)", "Typing (cairo)", "Image scroll (GPU)", "Image scroll (cairo)"]
+    y-axis "redisplays per second" 0 --> 1800
+    bar [240, 0, 124, 0, 121, 0, 1766, 0, 1328, 0]
+    bar [0, 117, 0, 102, 0, 66, 0, 238, 0, 115]
 ```
 
 cairo slows down roughly linearly with the pixel count; the GPU barely
