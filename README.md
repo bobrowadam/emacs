@@ -321,8 +321,8 @@ plus the GPU-only features (video, cross-fades, cursor effects), is the
 real value; raw text throughput on a small frame is not.
 
 Reproduce it with the harness in this repository (on the test machine):
-`run-bench.sh` for the on-screen 1616x912 numbers and
-`run-bench-hires.sh` for the headless 4K render-throughput table.
+`bench/run-bench.sh` for the on-screen 1616x912 numbers and
+`bench/run-bench-hires.sh` for the headless 4K render-throughput table.
 
 
 ---
