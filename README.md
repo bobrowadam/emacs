@@ -247,14 +247,13 @@ rather than the 60 Hz cap (median of 3 runs, redisplays per second):
 config:
   themeVariables:
     xyChart:
-      plotColorPalette: "#4f81e5, #43b97f"
+      plotColorPalette: "#43b97f"
 ---
 xychart-beta horizontal
-    title "1616x912 frame, fps: cairo (blue) vs GPU (green)"
-    x-axis ["Line scroll (cairo)", "Line scroll (GPU)", "Page scroll (cairo)", "Page scroll (GPU)", "Full redraw (cairo)", "Full redraw (GPU)", "Typing (cairo)", "Typing (GPU)", "Image scroll (cairo)", "Image scroll (GPU)"]
-    y-axis "redisplays per second" 0 --> 2000
-    bar [530, 0, 297, 0, 247, 0, 1857, 0, 1359, 0]
-    bar [0, 487, 0, 296, 0, 294, 0, 1311, 0, 1239]
+    title "1616x912: GPU speedup vs cairo (1.0x = parity, higher is better)"
+    x-axis ["Line scroll", "Page scroll", "Full redraw", "Typing", "Image scroll"]
+    y-axis "GPU fps / cairo fps" 0 --> 1.3
+    bar [0.92, 1.00, 1.19, 0.71, 0.91]
 ```
 
 The big win is structural: glyphs **and** solid fills (backgrounds,
@@ -304,14 +303,13 @@ side excludes on-screen present) flip the result:
 config:
   themeVariables:
     xyChart:
-      plotColorPalette: "#4f81e5, #43b97f"
+      plotColorPalette: "#43b97f"
 ---
 xychart-beta horizontal
-    title "4K frame, fps: cairo (blue) vs GPU (green)"
-    x-axis ["Line scroll (cairo)", "Line scroll (GPU)", "Page scroll (cairo)", "Page scroll (GPU)", "Full redraw (cairo)", "Full redraw (GPU)", "Typing (cairo)", "Typing (GPU)", "Image scroll (cairo)", "Image scroll (GPU)"]
-    y-axis "redisplays per second" 0 --> 1800
-    bar [117, 0, 102, 0, 66, 0, 238, 0, 115, 0]
-    bar [0, 240, 0, 124, 0, 121, 0, 1766, 0, 1328]
+    title "4K: GPU speedup vs cairo (1.0x = parity, higher is better)"
+    x-axis ["Line scroll", "Page scroll", "Full redraw", "Typing", "Image scroll"]
+    y-axis "GPU fps / cairo fps" 0 --> 12
+    bar [2.05, 1.22, 1.84, 7.4, 11.5]
 ```
 
 cairo slows down roughly linearly with the pixel count; the GPU barely
@@ -354,14 +352,13 @@ font-locked `xdisp.c`, same binary with and without the GPU backend;
 config:
   themeVariables:
     xyChart:
-      plotColorPalette: "#4f81e5, #43b97f"
+      plotColorPalette: "#4f81e5"
 ---
 xychart-beta horizontal
-    title "M1 Pro sustained scroll, fps: Cocoa (blue) vs GPU (green)"
-    x-axis ["Stock (Cocoa)", "GPU, vsync on", "GPU, vsync off"]
-    y-axis "redisplays per second" 0 --> 500
-    bar [481, 0, 0]
-    bar [0, 324, 475]
+    title "M1 Pro: CPU for 15 s of flat-out scroll (lower is better)"
+    x-axis ["Stock (Cocoa)", "GPU vsync on", "GPU vsync off"]
+    y-axis "CPU seconds" 0 --> 18
+    bar [16.0, 10.5, 15.5]
 ```
 
 Honest reading:
