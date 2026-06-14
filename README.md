@@ -242,20 +242,7 @@ rather than the 60 Hz cap (median of 3 runs, redisplays per second):
 | Typing (1 char + redisplay) | 1857 fps | 1311 fps | 0.71x |
 | Image scroll | 1359 fps | 1239 fps | 0.91x |
 
-```mermaid
----
-config:
-  themeVariables:
-    xyChart:
-      plotColorPalette: "#43b97f, #4f81e5"
----
-xychart-beta horizontal
-    title "1616x912 frame, redisplays/s: GPU (green) vs cairo (blue)"
-    x-axis ["Line scroll (GPU)", "Line scroll (cairo)", "Page scroll (GPU)", "Page scroll (cairo)", "Full redraw (GPU)", "Full redraw (cairo)", "Typing (GPU)", "Typing (cairo)", "Image scroll (GPU)", "Image scroll (cairo)"]
-    y-axis "redisplays per second" 0 --> 2000
-    bar [487, 0, 296, 0, 294, 0, 1311, 0, 1239, 0]
-    bar [0, 530, 0, 297, 0, 247, 0, 1857, 0, 1359]
-```
+![1616x912 frame, redisplays per second: GPU (OpenGL) vs stock cairo, per workload](.github/assets/bench-linux-1616.png)
 
 The big win is structural: glyphs **and** solid fills (backgrounds,
 underlines, boxes) share one submission-ordered vertex batch, clipped
@@ -299,20 +286,7 @@ side excludes on-screen present) flip the result:
 | Typing | 238 fps | 1766 fps | **7.4x** |
 | Image scroll | 115 fps | 1328 fps | **11.5x** |
 
-```mermaid
----
-config:
-  themeVariables:
-    xyChart:
-      plotColorPalette: "#43b97f, #4f81e5"
----
-xychart-beta horizontal
-    title "4K frame, redisplays/s: GPU (green) vs cairo (blue)"
-    x-axis ["Line scroll (GPU)", "Line scroll (cairo)", "Page scroll (GPU)", "Page scroll (cairo)", "Full redraw (GPU)", "Full redraw (cairo)", "Typing (GPU)", "Typing (cairo)", "Image scroll (GPU)", "Image scroll (cairo)"]
-    y-axis "redisplays per second" 0 --> 1800
-    bar [240, 0, 124, 0, 121, 0, 1766, 0, 1328, 0]
-    bar [0, 117, 0, 102, 0, 66, 0, 238, 0, 115]
-```
+![4K frame, redisplays per second: GPU (OpenGL) vs stock cairo, per workload](.github/assets/bench-linux-4k.png)
 
 cairo slows down roughly linearly with the pixel count; the GPU barely
 moves. Image scrolling is the extreme case (cairo re-blits the image from
@@ -349,19 +323,7 @@ font-locked `xdisp.c`, same binary with and without the GPU backend;
 | Idle (8 s) CPU | 1.21 s | 1.19 s | same |
 | Peak RSS | ~140 MB | ~144 MB | same |
 
-```mermaid
----
-config:
-  themeVariables:
-    xyChart:
-      plotColorPalette: "#4f81e5"
----
-xychart-beta horizontal
-    title "M1 Pro: CPU for 15 s of flat-out scroll (lower is better)"
-    x-axis ["Stock (Cocoa)", "GPU vsync on", "GPU vsync off"]
-    y-axis "CPU seconds" 0 --> 18
-    bar [16.0, 10.5, 15.5]
-```
+![M1 Pro: CPU seconds to render 15 s of flat-out scroll, stock Cocoa vs GPU with vsync on/off (lower is better)](.github/assets/bench-macos-cpu.png)
 
 Honest reading:
 

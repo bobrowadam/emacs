@@ -41,3 +41,4 @@ Absolute numbers depend on GPU, driver and display server. The meaningful quanti
 - `gl-bench.el` — the workloads. Reads `GL_MODE` (`gpu`/`vanilla`), `GL_BENCH_COLS`/`GL_BENCH_ROWS`, `GL_BENCH_OUT`. The scripts set these.
 - `run-bench.sh` — on-screen comparison.
 - `run-bench-hires.sh` — headless 4K render-throughput comparison.
+- `make-charts.py` — regenerates the README chart images from the numbers (matplotlib).
