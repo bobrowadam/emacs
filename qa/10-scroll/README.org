@@ -1,0 +1,49 @@
+#+TITLE: QA 10 — Scroll & copy_region
+#+TODO: TODO | PASS FAIL SKIP
+
+* How to run
+  : emacs --no-init-file -l qa/10-scroll/test.el
+  : EMACS_GPU_DISABLE=1 emacs --no-init-file -l qa/10-scroll/test.el
+
+  Press =s= to start the auto-scroll demo, =S= to stop.
+
+* Checklist
+
+** TODO 10.1 Scroll down — no artifacts on new content
+   Press =C-v= or =C-n= repeatedly. The text that slides up must not leave
+   ghost pixels. New content at the bottom must appear cleanly.
+   Failure: horizontal bands of garbage at the scroll boundary.
+
+** TODO 10.2 Scroll up — same as above but reversed
+   Press =M-v= or =C-p=. New content at the top must appear without artifacts.
+   Failure: garbage lines appear at the top when new content is drawn.
+
+** TODO 10.3 Auto-scroll — smooth and continuous
+   Press =s= to start the timer-based auto-scroll (1 line per 60ms).
+   The text must slide smoothly without jumps or blank frames.
+   Failure: text jumps 2–3 lines at a time, or a blank frame flashes.
+
+** TODO 10.4 Horizontal scroll — hscroll, C-e to a long line
+   Press =C-e= on the long-line section to hscroll to the end.
+   The content must slide horizontally without artifacts.
+   Failure: garbled characters or wrong content visible after hscroll.
+
+** TODO 10.5 [Metal] Scroll easing — EASE_OUT_QUAD
+   Run with: =(setq gpu-scroll-easing 'ease-out-quad)= then scroll.
+   The scroll must decelerate smoothly near the target.
+   Failure: scroll is instant (easing not applied) or overshoots.
+
+** TODO 10.6 [Metal] Scroll easing — SPRING
+   Run with: =(setq gpu-scroll-easing 'spring)= then scroll.
+   The scroll must overshoot slightly and bounce back.
+   Failure: no overshoot visible, or motion never settles.
+
+** TODO 10.7 Overlapping copy_region — 1-line scroll
+   Scrolling by exactly one line means src and dst regions overlap.
+   Content must move correctly (scratch-texture bounce path used internally).
+   Failure: the overlapping region shows corrupted or wrong content.
+
+** TODO 10.8 Shift on insert — glyph shift correct
+   Go to the middle of a content line and insert a character.
+   Text to the right must shift exactly one character width.
+   Failure: text after the insertion point overlaps, or a gap appears.

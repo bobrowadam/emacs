@@ -1,0 +1,54 @@
+#+TITLE: QA 05 — Face Decorations
+#+TODO: TODO | PASS FAIL SKIP
+
+* How to run
+  : emacs --no-init-file -l qa/05-decorations/test.el
+  : EMACS_GPU_DISABLE=1 emacs --no-init-file -l qa/05-decorations/test.el
+
+* Checklist
+
+** TODO 5.1 Single underline — below baseline, correct color
+   A single horizontal line must appear below the text, touching but not
+   overlapping the descenders.
+   Failure: line is missing, is above the text, or uses the wrong color.
+
+** TODO 5.2 Double underline — two parallel lines
+   Two horizontal lines must appear, equally spaced, below the text.
+   Failure: only one line visible, or lines overlap.
+
+** TODO 5.3 Wave underline — continuous zigzag, 3px tall
+   The zigzag pattern must be continuous across the entire string.
+   The wave must NOT restart at glyph-string boundaries mid-word.
+   Failure: the wave resets (abrupt phase jump) at word or face boundaries.
+
+** TODO 5.4 Dot underline — dotted segments, continuous phase
+   Dots must be evenly spaced and the pattern must continue unbroken
+   across face-change boundaries.
+   Failure: dots cluster or reset at boundaries.
+
+** TODO 5.5 Dash underline — dash segments, continuous phase
+   Dashes of 3× the stroke thickness, evenly spaced.
+   Failure: dashes reset at boundaries or have inconsistent spacing.
+
+** TODO 5.6 Underline color independent of text color
+   When the face specifies both a text color and an underline color, each
+   must be applied to the correct element.
+   Failure: underline inherits text color when it should not.
+
+** TODO 5.7 Overline — 1px at the top of the text
+   A single pixel line at the top of the glyph bounding box.
+   Failure: line appears at the bottom, or is missing entirely.
+
+** TODO 5.8 Strike-through — centered vertically
+   A horizontal line at approximately the mid-height of the glyph body.
+   Failure: line is at the top, bottom, or is missing.
+
+** TODO 5.9 Decorations combined — no interference
+   When underline + overline + strike-through are all applied, all three
+   must be visible simultaneously without any canceling each other out.
+   Failure: one or more decorations disappear when combined.
+
+** TODO 5.10 Wave continuity across face boundaries
+   The "continuous" wave line must have no phase jump where the bold
+   fragment meets the regular-weight fragments.
+   Failure: a visible step or gap in the wave at the bold boundary.

@@ -1,0 +1,50 @@
+#+TITLE: QA 09 — Images
+#+TODO: TODO | PASS FAIL SKIP
+
+* How to run
+  : emacs --no-init-file -l qa/09-images/test.el
+  : EMACS_GPU_DISABLE=1 emacs --no-init-file -l qa/09-images/test.el
+
+  The test uses Emacs built-in images from =data-directory=.
+  For JPEG and external SVG tests, provide paths to your own files when prompted.
+
+* Checklist
+
+** TODO 9.1 PNG opaque — correct colors, sharp edges
+   The built-in PNG icons must appear with correct colors and sharp edges.
+   Failure: washed out colors, blurry edges, or image not displayed.
+
+** TODO 9.2 PNG with alpha channel — background shows through
+   The icons with transparency must composite correctly against the
+   Emacs background; the fringe/frame background must be visible through
+   transparent areas.
+   Failure: transparent areas appear as white or black rectangles.
+
+** TODO 9.3 SVG — sharp at any scale
+   The built-in SVG must appear crisp with no pixelation.
+   Failure: blocky rendering, or SVG shown as a broken-image placeholder.
+
+** TODO 9.4 Image with :scale 2.0 — visibly larger
+   The scaled version must be exactly twice the size of the original.
+   Failure: both images appear the same size.
+
+** TODO 9.5 Image with :rotation 90 — correctly rotated
+   The rotated image must appear turned 90° clockwise.
+   Failure: image appears unrotated, or is blank.
+
+** TODO 9.6 Image slice — only specified portion visible
+   Only the top-left 32×32 pixels of the source image must be shown.
+   Failure: the full image is shown, or the wrong quadrant.
+
+** TODO 9.7 Image with :relief — raised border around it
+   A raised-relief border must be visible around the image.
+   Failure: no border, or border has wrong colors (sunken instead of raised).
+
+** TODO 9.8 Image cache — two insertions identical
+   The same image inserted twice must look identical in both places.
+   Failure: second insertion looks different (wrong colors, size, or missing).
+
+** TODO 9.9 Image adjacent to text — correct vertical alignment
+   Images must align with the text baseline; they must not shift the
+   surrounding line height excessively.
+   Failure: large gap above or below the image, or text and image overlap.

@@ -1,0 +1,43 @@
+#+TITLE: QA 17 — Edge Cases & Performance
+#+TODO: TODO | PASS FAIL SKIP
+
+* How to run
+  : emacs --no-init-file -l qa/17-edge-cases/test.el
+  : EMACS_GPU_DISABLE=1 emacs --no-init-file -l qa/17-edge-cases/test.el
+
+* Checklist
+
+** TODO 17.1 Large buffer — no lag on scroll
+   Press =l= to load the 5000-line buffer. Scrolling with =C-v= / =M-v=
+   must feel instant (no multi-second freezes).
+   Failure: visible lag > 0.5s per scroll step.
+
+** TODO 17.2 Large buffer — correct rendering throughout
+   Scroll through the entire large buffer. Every line must render correctly;
+   no lines may appear garbled or blank mid-buffer.
+   Failure: garbled lines appear after extended scrolling.
+
+** TODO 17.3 Glyph atlas stress — many fonts and sizes
+   Press =f= to open the font stress test (many different faces/sizes).
+   All glyphs must render correctly even after the atlas may have reset.
+   Failure: some glyphs appear as blank squares after the atlas overflows.
+
+** TODO 17.4 Theme switch — no residual artifacts
+   Press =m= for modus-vivendi (dark) then =o= for modus-operandi (light).
+   All colors must update immediately with no artifacts from the previous theme.
+   Failure: old-theme colors remain in parts of the buffer.
+
+** TODO 17.5 Iconify and restore — full redraw
+   Minimize the Emacs window and restore it. The full buffer must be
+   redrawn correctly after restore.
+   Failure: parts of the buffer remain blank or show garbled content.
+
+** TODO 17.6 Rapid buffer switching — no flash
+   Press =r= to start rapid buffer cycling (10 switches per second).
+   No flash or blank frame should be visible between switches.
+   Failure: visible white or black frame appears during cycling.
+
+** TODO 17.7 Simultaneous overlays + hl-line — no interference
+   Press =x= to add 50 random overlays across the buffer.
+   hl-line highlighting must still correctly highlight the cursor line.
+   Failure: hl-line disappears, or overlays cause garbled rendering.

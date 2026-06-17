@@ -1,0 +1,51 @@
+#+TITLE: QA 15 — Buffer Transitions & HiDPI
+#+TODO: TODO | PASS FAIL SKIP
+
+* How to run
+  : emacs --no-init-file -l qa/15-transitions/test.el
+  : EMACS_GPU_DISABLE=1 emacs --no-init-file -l qa/15-transitions/test.el
+
+  HiDPI tests are macOS-only (Retina display required).
+
+* Checklist — Buffer transitions
+
+** TODO 15.1 Crossfade — previous buffer fades out
+   Press =t= to cycle between buffers with crossfade enabled.
+   The previous buffer content must fade out smoothly as the new one appears.
+   Failure: hard cut (no fade), or the fade shows garbled intermediate frames.
+
+** TODO 15.2 Crossfade duration — matches configured value
+   =(setq gpu-buffer-transition-duration 0.5)= should produce a 0.5s fade.
+   Failure: fade is instantaneous or takes much longer than configured.
+
+** TODO 15.3 No residue after fade completes
+   After the crossfade finishes, the new buffer must appear perfectly clean.
+   Failure: faint traces of the previous buffer remain after the fade ends.
+
+** TODO 15.4 Pump cadence during fade — 60Hz, smooth
+   The fade must be smooth (not choppy). At 0.5s duration it should
+   produce ~30 intermediate frames.
+   Failure: visible frame-rate drops during the fade; choppy animation.
+
+** TODO 15.5 No crossfade when disabled
+   =(setq gpu-buffer-transitions nil)=
+   Pressing =t= must produce an instant hard cut with no fade.
+   Failure: fade still occurs after disabling.
+
+* Checklist — HiDPI (macOS Retina only)
+
+** TODO 15.6 [macOS] Capture size is 2× the logical frame size
+   =(gpu-capture-frame "/tmp/qa-capture.png")=
+   Open the PNG and verify its pixel dimensions are exactly 2×
+   the Emacs frame's logical pixel width and height.
+   Failure: capture is 1× size (not Retina-aware).
+
+** TODO 15.7 [macOS] Glyph sharpness — per-physical-pixel AA
+   Zoom into the capture at 6× (pixel viewer or Preview zoom).
+   Each glyph must show antialiasing on individual physical pixels.
+   Failure: glyphs appear as upscaled 1× bitmaps (blocky edges).
+
+** TODO 15.8 [macOS] NS vs Metal parity at 2×
+   Compare a Metal capture with a NS capture (EMACS_GPU_DISABLE=1).
+   Acceptable: fuzz5% ~0.5%, fuzz20% ~0.05% (AA on glyph edges only).
+   Failure: large structural differences (wrong colors, misaligned text).

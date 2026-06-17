@@ -1,0 +1,38 @@
+#+TITLE: QA 01 — Render Cycle & Present
+#+TODO: TODO | PASS FAIL SKIP
+
+* How to run
+  : emacs --no-init-file -l qa/01-render-cycle/test.el
+  : EMACS_GPU_DISABLE=1 emacs --no-init-file -l qa/01-render-cycle/test.el
+
+  Follow the interactive steps printed in the =*QA: Render Cycle*= buffer.
+
+* Checklist
+
+** TODO 1.1 No black flash on startup
+   The window must be fully painted before it becomes visible.
+   Failure: a black or white frame appears for 1–2 vblanks then snaps to content.
+
+** TODO 1.2 No content flash when switching buffers
+   Press =C-x b= to go to =*scratch*=, then back.
+   Failure: the previous buffer's content flickers in for one frame.
+
+** TODO 1.3 No black band on WM resize
+   Drag the window border with the mouse.
+   Failure: a black or garbled band appears at the trailing edge during resize.
+
+** TODO 1.4 No flash when toggling tab-bar
+   Press =C-x t t= to toggle the tab-bar.
+   Failure: a fully white frame flashes before the tab-bar appears.
+
+** TODO 1.5 No flash when opening / closing the minibuffer
+   Press =M-x= then =C-g=.
+   Failure: the area below the last window flickers white or shows garbage.
+
+** TODO 1.6 Mouse-face does not flicker
+   Move the mouse slowly over the mode-line buttons or links in the buffer.
+   Failure: highlight appears and immediately disappears for one frame before settling.
+
+** TODO 1.7 Iconify and restore
+   Minimize the window (=C-z= or WM title bar) and restore it.
+   Failure: content is not redrawn correctly after restore.

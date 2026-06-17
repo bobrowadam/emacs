@@ -1,0 +1,43 @@
+#+TITLE: QA 14 — Major Modes (Real-World Integration)
+#+TODO: TODO | PASS FAIL SKIP
+
+* How to run
+  : emacs --no-init-file -l qa/14-major-modes/test.el
+  : EMACS_GPU_DISABLE=1 emacs --no-init-file -l qa/14-major-modes/test.el
+
+  This test requires packages (org, dired) which are built into Emacs.
+  magit and corfu, if installed, are tested separately — see notes.
+
+* Checklist
+
+** TODO 14.1 org-mode — headings, code blocks, tables
+   The org buffer must show:
+   - Headings at different levels with distinct colors
+   - A code block with a shaded background
+   - A table with correct alignment
+   Failure: headings are plain text, code block background missing, or
+   table columns are misaligned.
+
+** TODO 14.2 org-mode — emphasis markup
+   Bold, italic, code, and verbatim spans must each render with their
+   respective face (not as literal asterisks).
+   Failure: markup characters visible, or all emphasis looks the same.
+
+** TODO 14.3 emacs-lisp-mode — syntax highlight in code buffer
+   The Emacs Lisp buffer must show keyword/builtin/string/comment colors.
+   Failure: all text appears in the default face.
+
+** TODO 14.4 dired — file listing with correct alignment
+   Open dired on the home directory. Permissions, size, date, and filename
+   columns must be aligned correctly.
+   Failure: columns are misaligned, or colored file types are wrong.
+
+** TODO 14.5 dired — face colors for file types
+   Directories must appear in the directory face (typically blue/bold).
+   Executable files must appear in a different face.
+   Failure: all files appear in the same face.
+
+** TODO 14.6 Large org file — no lag on first display
+   Opening the synthetic 5k-line org file must display the first page
+   within 1 second without visible jank.
+   Failure: several-second freeze before the buffer appears.

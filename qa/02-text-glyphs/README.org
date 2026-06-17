@@ -1,0 +1,45 @@
+#+TITLE: QA 02 — Text & Glyphs
+#+TODO: TODO | PASS FAIL SKIP
+
+* How to run
+  : emacs --no-init-file -l qa/02-text-glyphs/test.el
+  : EMACS_GPU_DISABLE=1 emacs --no-init-file -l qa/02-text-glyphs/test.el
+
+* Checklist
+
+** TODO 2.1 ASCII — sharp and baseline-aligned
+   All ASCII characters must be crisp and sit on the same baseline.
+   Failure: blurry glyphs, or characters shifted up/down relative to neighbors.
+
+** TODO 2.2 Bold and italic are visually distinct
+   The bold line must have heavier strokes than regular; italic must slant.
+   Failure: bold looks identical to regular, or italic does not slant.
+
+** TODO 2.3 Extended Latin — no vertical shift
+   Accented characters (ñ, ü, é, ç...) must align to the same baseline as ASCII.
+   Failure: accented characters sit 1–2px higher or lower than unaccented ones.
+
+** TODO 2.4 CJK — double-width, centered
+   CJK characters must occupy exactly twice the width of an ASCII cell and
+   be horizontally centered within that space.
+   Failure: CJK characters overlap ASCII, or are misaligned.
+
+** TODO 2.5 Box-drawing — connected lines
+   Borders must form clean connected rectangles without gaps or overlaps at corners.
+   Failure: a 1px gap appears at T-junctions or corners.
+
+** TODO 2.6 Font-lock colors — correct per face
+   Each face color (keyword, string, comment...) must match the baseline.
+   Failure: a face renders in the wrong color or falls back to the default.
+
+** TODO 2.7 :height scaling — no line overlap
+   The 1.5× line must be taller, but lines must not overlap each other.
+   Failure: the tall line bleeds into the adjacent line above or below.
+
+** TODO 2.8 Advance precision — no drift
+   On the long 200-character line, the cursor at the end must be at the
+   correct column. Failure: cursor is offset by 1–2px from expected position.
+
+* Accepted differences
+  - Metal text may appear marginally thinner than NS (gamma ^0.82 correction).
+    This is by design and not a failure.

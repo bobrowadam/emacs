@@ -1,0 +1,54 @@
+#+TITLE: QA 13 — Display Properties & Overlays
+#+TODO: TODO | PASS FAIL SKIP
+
+* How to run
+  : emacs --no-init-file -l qa/13-display-props/test.el
+  : EMACS_GPU_DISABLE=1 emacs --no-init-file -l qa/13-display-props/test.el
+
+* Checklist
+
+** TODO 13.1 Invisible text — not visible, cursor skips over it
+   The hidden word in the first section must not appear on screen.
+   Moving point through it must skip to the next visible character.
+   Failure: invisible characters are shown, or cursor stops on them.
+
+** TODO 13.2 Display replacement string — replaces original text
+   The word "HIDDEN" must appear where the original text was, not the
+   original word.
+   Failure: both texts shown, original text shown, or the area is blank.
+
+** TODO 13.3 Overlay face — yellow background on marked region
+   The overlay region must have a yellow background.
+   Failure: background not applied, or applied to wrong region.
+
+** TODO 13.4 Overlay after-string / before-string — correct position
+   The "«before»" and "«after»" strings must appear immediately adjacent
+   to their anchor point.
+   Failure: extra spacing, wrong position, or strings not shown.
+
+** TODO 13.5 Line numbers — right-aligned in margin
+   Line numbers must be right-aligned in a fixed-width left margin.
+   The numbers must update correctly after scrolling.
+   Failure: numbers are left-aligned, wrong, or overlap the text area.
+
+** TODO 13.6 hl-line — highlight follows cursor line
+   The current line must have a distinct background highlight.
+   The highlight must move when the cursor moves to another line.
+   Failure: highlight is on the wrong line, or does not update.
+
+** TODO 13.7 Left margin — blank column left of text
+   A 4-column blank margin must appear to the left of the text.
+   Failure: margin is missing, wrong width, or shows garbage.
+
+** TODO 13.8 Display space — explicit column alignment
+   The aligned column in the "Columns" section must line up correctly
+   regardless of the font's variable pitch.
+   Failure: the content after the space is misaligned.
+
+** TODO 13.9 Wrap / visual-line-mode — wrap at word boundary
+   Long lines must wrap at word boundaries.
+   Failure: wrap occurs mid-word, or lines do not wrap at all.
+
+** TODO 13.10 Truncate-lines — fringe arrow visible
+   Long lines must be cut with a right-fringe truncation arrow.
+   Failure: lines wrap anyway, or no fringe arrow is shown.
