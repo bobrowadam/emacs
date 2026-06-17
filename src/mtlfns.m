@@ -506,10 +506,14 @@ new one replaces the previous.  Returns t on success.  */)
   CHECK_FIXNUM (x); CHECK_FIXNUM (y);
   CHECK_FIXNUM (width); CHECK_FIXNUM (height);
 
-  Lisp_Object expanded = Fexpand_file_name (file, Qnil);
+  const char *raw = SSDATA (file);
+  bool is_url = (strncmp (raw, "https://", 8) == 0
+                 || strncmp (raw, "http://", 7) == 0);
+  const char *path = is_url ? raw
+                             : SSDATA (ENCODE_FILE (Fexpand_file_name (file, Qnil)));
   bool ok;
   block_input ();
-  ok = mtl_video_open (f, SSDATA (ENCODE_FILE (expanded)),
+  ok = mtl_video_open (f, path,
                        XFIXNUM (x), XFIXNUM (y),
                        XFIXNUM (width), XFIXNUM (height),
                        !NILP (loop));

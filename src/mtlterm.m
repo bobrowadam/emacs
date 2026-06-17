@@ -3035,11 +3035,19 @@ mtl_video_open (struct frame *f, const char *path, int x, int y,
     }
 
   NSString *ns_path = [NSString stringWithUTF8String:path];
-  if (!ns_path || ![[NSFileManager defaultManager] fileExistsAtPath:ns_path])
-    return false;
+  if (!ns_path) return false;
+  NSURL *video_url;
+  if ([ns_path hasPrefix:@"https://"] || [ns_path hasPrefix:@"http://"])
+    video_url = [NSURL URLWithString:ns_path];
+  else
+    {
+      if (![[NSFileManager defaultManager] fileExistsAtPath:ns_path])
+        return false;
+      video_url = [NSURL fileURLWithPath:ns_path];
+    }
 
   MtlVideoPlayer *vp =
-    [[MtlVideoPlayer alloc] initWithURL:[NSURL fileURLWithPath:ns_path]
+    [[MtlVideoPlayer alloc] initWithURL:video_url
                                    rect:NSMakeRect (x, y, w, h)
                                    loop:loop];
   if (!vp) return false;
