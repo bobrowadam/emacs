@@ -486,6 +486,19 @@ Buffer switches cross-fade by default; tune or disable with:
 
 ---
 
+# Visual QA
+
+A companion repository contains the manual visual test harness: one
+subdirectory per rendering category (text, decorations, cursor, scroll,
+images, fringe, bars, windows, overlays, transitions, video, edge cases),
+each with a `README.org` checklist and a `test.el` that loads an identical
+scenario in both the GPU backend and the vanilla baseline for side-by-side
+comparison.
+
+**[emacs-gpu-qa](https://git.andros.dev/andros/emacs-gpu-qa)**
+
+---
+
 # How it works
 
 ```
