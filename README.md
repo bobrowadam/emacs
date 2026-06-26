@@ -517,6 +517,13 @@ AVFoundation video through                  present via window surface
 CVMetalTextureCache                         blit + eglSwapBuffers
 ```
 
+# Donate
+
+If this project is useful to you, you can support its development:
+
+- [GitHub Sponsors](https://github.com/sponsors/tanrax)
+- [Ko-fi](https://ko-fi.com/androsfenollosa)
+
 # License
 
 GNU General Public License v3 or later, same as GNU Emacs.
