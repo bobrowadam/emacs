@@ -519,7 +519,13 @@ CVMetalTextureCache                         blit + eglSwapBuffers
 
 # Donate
 
-If this project is useful to you, you can support its development:
+If this project is useful to you, you can support its development. The
+main channel is a recurring donation through
+**[Liberapay](https://liberapay.com/emacs-gpu/)**:
+
+[![Donate using Liberapay](https://liberapay.com/assets/widgets/donate.svg)](https://liberapay.com/emacs-gpu/donate)
+
+Alternative or one-time options:
 
 - [GitHub Sponsors](https://github.com/sponsors/tanrax)
 - [Ko-fi](https://ko-fi.com/androsfenollosa)
