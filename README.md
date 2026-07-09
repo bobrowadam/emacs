@@ -6,6 +6,8 @@
 
 GNU Emacs with a GPU-accelerated display backend.
 
+> Please note, this is a fork and is NOT intended for inclusion in the official project. If you want faster performance at high resolutions, improved video quality, or enhanced effects, you've come to the right place.
+
 The drawing logic is platform-neutral (`src/gfxterm.c`) behind a small
 driver interface (`src/gfxdrv.h`), with one driver per platform:
 
