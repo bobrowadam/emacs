@@ -1,3 +1,7 @@
+<p align="center">
+  <img src=".github/assets/logo/emacs-gpu.svg" alt="Emacs GPU logo" width="180">
+</p>
+
 # emacs-gpu
 
 GNU Emacs with a GPU-accelerated display backend.
