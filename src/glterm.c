@@ -52,6 +52,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.
 
 #ifdef HAVE_GFX_GL
 
+#include <dlfcn.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -83,7 +84,26 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.
 #include "font.h"
 #include "ftfont.h"
 #include "composite.h"
-#include "xterm.h"
+/* Platform terminal headers: PGTK (GTK/GDK) or X11.  They define mutually
+   exclusive frame macros (FRAME_X_WINDOW, FRAME_GDK_WINDOW, ...) and must
+   not be included together.  */
+#ifdef HAVE_PGTK
+# include "pgtkterm.h"
+# include <gtk/gtk.h>
+# ifdef GDK_WINDOWING_WAYLAND
+#  include <gdk/gdkwayland.h>
+#  ifdef HAVE_WAYLAND_EGL
+#   include <wayland-egl.h>
+#  endif
+# endif
+/* gdkx.h is intentionally NOT included: it brings in X11/Xlib.h which
+   conflicts with pgtkgui.h's own X11-compatible typedefs (Window, Display,
+   XRectangle).  Instead we use dlsym at runtime to obtain the GDK X11
+   helpers (gdk_x11_display_get_xdisplay, gdk_x11_window_get_xid), avoiding
+   the header conflict while still enabling on-screen present for PGTK+X11.  */
+#else
+# include "xterm.h"
+#endif
 #include "gfxdrv.h"
 #include "glterm.h"
 
@@ -174,9 +194,11 @@ static bool      g_gl_ready = false;
 static EGLDisplay g_dpy = EGL_NO_DISPLAY;
 static EGLContext g_ctx = EGL_NO_CONTEXT;
 static EGLConfig  g_cfg;
-/* True when g_dpy is an X11-platform display (window surfaces are usable
-   for on-screen present); false for the surfaceless fallback.  */
-static bool      g_dpy_is_x11 = false;
+static EGLint     g_cfg_alpha;  /* EGL_ALPHA_SIZE of g_cfg (0 = opaque) */
+/* How g_dpy was created: determines whether window surfaces are available
+   and which native window type to use for on-screen present.  */
+enum gl_dpy_type { GL_DPY_SURFACELESS, GL_DPY_X11, GL_DPY_WAYLAND };
+static enum gl_dpy_type g_dpy_type = GL_DPY_SURFACELESS;
 /* Partial present support.  EGL_EXT_buffer_age reports how many swaps ago
    the current back buffer was last presented, which tells exactly which
    frames' changes it is missing; the present then blits only the union of
@@ -269,7 +291,11 @@ static double g_atlas_scale = 1.0;
 
 static void gl_flush_glyph_caches (void);
 
-/* Resolve the render scale for frame F: the GL_SCALE override, else 1.  */
+/* Resolve the render scale for frame F: the GL_SCALE env override first,
+   then the GDK compositor scale on Wayland (HiDPI), else 1.  On Wayland the
+   compositor reports the output's physical-to-logical ratio via GDK; feeding
+   it here makes the FBO and the wl_egl_window match the physical resolution
+   so the blit is 1:1 and glyphs are rasterized at device pixels.  */
 static double
 gl_frame_scale (struct frame *f)
 {
@@ -279,6 +305,17 @@ gl_frame_scale (struct frame *f)
       double s = atof (env);
       if (s >= 1.0) return s;
     }
+#if defined HAVE_PGTK && defined GDK_WINDOWING_WAYLAND && defined HAVE_WAYLAND_EGL
+  if (g_dpy_type == GL_DPY_WAYLAND && f && FRAME_PGTK_P (f))
+    {
+      GdkWindow *gdk_win = FRAME_GDK_WINDOW (f);
+      if (gdk_win)
+        {
+          int s = gdk_window_get_scale_factor (gdk_win);
+          if (s >= 1) return (double) s;
+        }
+    }
+#endif
   (void) f;
   return 1.0;
 }
@@ -493,6 +530,23 @@ struct gl_frame_data
   bool needs_present;
   EGLSurface surf;             /* on-screen window surface, or EGL_NO_SURFACE */
   unsigned long surf_win;      /* X window `surf' was created for (0 = none) */
+#if defined HAVE_PGTK && defined HAVE_WAYLAND_EGL
+  struct wl_egl_window *wl_win;        /* Wayland EGL window, or NULL */
+  struct wl_surface    *wl_surf;       /* child wl_surface for EGL (frame callbacks) */
+  struct wl_surface    *wl_parent_surf;/* GDK's wl_surface (parent of our subsurface) */
+  struct wl_subsurface *wl_sub;        /* wl_subsurface linking child to parent */
+  struct wl_callback   *frame_cb;      /* pending wl_surface.frame callback, or NULL */
+  bool frame_ready;                    /* compositor signalled ready for next frame */
+  int wl_sub_x, wl_sub_y;              /* last position set on wl_sub */
+#endif
+#ifdef HAVE_PGTK
+  gulong after_paint_id;       /* GdkFrameClock "after-paint" handler, or 0.
+                                  X11 sessions only: GTK's client-side
+                                  windows composite widget paints through
+                                  the same X window we present to, so we
+                                  re-present after every GTK paint.  */
+  void *frame_clock;           /* the GdkFrameClock the handler is on */
+#endif
   int surf_w, surf_h;          /* cached surface size (re-queried on resize) */
   bool clip_on;
   int clip_x, clip_y, clip_w, clip_h;   /* top-left logical */
@@ -587,6 +641,47 @@ gl_program (const char *vs, const char *fs)
   return p;
 }
 
+#if defined HAVE_PGTK && defined HAVE_WAYLAND_EGL
+/* Global wl_subcompositor used to create GPU subsurfaces.  Queried once
+   from the Wayland registry so we do not need to repeat the roundtrip on
+   every frame enable.  */
+static struct wl_subcompositor *g_wl_subcompositor;
+
+static void
+gl_wl_reg_global (void *data, struct wl_registry *reg,
+                  uint32_t name, const char *iface, uint32_t version)
+{
+  (void) data; (void) version;
+  if (strcmp (iface, "wl_subcompositor") == 0)
+    g_wl_subcompositor
+      = wl_registry_bind (reg, name, &wl_subcompositor_interface, 1);
+}
+
+static void
+gl_wl_reg_remove (void *data, struct wl_registry *reg, uint32_t name)
+{ (void) data; (void) reg; (void) name; }
+
+static const struct wl_registry_listener gl_wl_reg_listener = {
+  gl_wl_reg_global, gl_wl_reg_remove,
+};
+
+/* Bind Wayland globals (wl_subcompositor) via a one-shot registry roundtrip.
+   Safe to call multiple times; does nothing after the first successful run.  */
+static void
+gl_wl_init_registry (void)
+{
+  if (g_wl_subcompositor) return;
+  GdkDisplay *gdpy = gdk_display_get_default ();
+  if (!gdpy || !GDK_IS_WAYLAND_DISPLAY (gdpy)) return;
+  struct wl_display *wl_dpy = gdk_wayland_display_get_wl_display (gdpy);
+  if (!wl_dpy) return;
+  struct wl_registry *reg = wl_display_get_registry (wl_dpy);
+  if (!reg) return;
+  wl_registry_add_listener (reg, &gl_wl_reg_listener, NULL);
+  wl_display_roundtrip (wl_dpy);
+}
+#endif /* HAVE_PGTK && HAVE_WAYLAND_EGL */
+
 /* Bring up the process-wide EGL surfaceless context and the shared GL
    objects.  Returns false on failure (the caller keeps the platform
    backend).  */
@@ -599,31 +694,87 @@ gl_global_init (void)
     (PFNEGLGETPLATFORMDISPLAYEXTPROC)
     eglGetProcAddress ("eglGetPlatformDisplayEXT");
 
+  bool force_surfaceless = !!getenv ("GL_FORCE_SURFACELESS");
+
+#ifdef HAVE_PGTK
+  /* PGTK build: get the EGL display from GDK.  Try Wayland first (native
+     EGL surface support), fall back to X11 GDK backend if available.
+     GL_FORCE_SURFACELESS skips both, keeping the headless GPU path.  */
+  if (!force_surfaceless)
+    {
+      GdkDisplay *gdpy = gdk_display_get_default ();
+      if (gdpy)
+        {
+# ifdef GDK_WINDOWING_WAYLAND
+          if (GDK_IS_WAYLAND_DISPLAY (gdpy))
+            {
+              struct wl_display *wl_dpy =
+                gdk_wayland_display_get_wl_display (gdpy);
+              if (wl_dpy)
+                {
+                  if (get_dpy)
+                    g_dpy = get_dpy (EGL_PLATFORM_WAYLAND_KHR, wl_dpy, NULL);
+                  if (g_dpy == EGL_NO_DISPLAY)
+                    g_dpy = eglGetDisplay ((EGLNativeDisplayType) wl_dpy);
+                  if (g_dpy != EGL_NO_DISPLAY)
+                    {
+                      g_dpy_type = GL_DPY_WAYLAND;
+                      gl_wl_init_registry ();
+                    }
+                }
+            }
+# endif /* GDK_WINDOWING_WAYLAND */
+          /* PGTK/X11 session (GDK_BACKEND=x11 or Wayland unavailable):
+             obtain the underlying X Display* via dlsym so we never include
+             gdkx.h (which conflicts with pgtkgui.h typedefs).  */
+          if (g_dpy == EGL_NO_DISPLAY)
+            {
+              typedef void *(*get_xdisplay_fn) (GdkDisplay *);
+              get_xdisplay_fn gx =
+                (get_xdisplay_fn) dlsym (RTLD_DEFAULT,
+                                         "gdk_x11_display_get_xdisplay");
+              if (gx)
+                {
+                  void *xdpy = gx (gdpy);
+                  if (xdpy)
+                    {
+                      if (get_dpy)
+                        g_dpy = get_dpy (EGL_PLATFORM_X11_KHR, xdpy, NULL);
+                      if (g_dpy == EGL_NO_DISPLAY)
+                        g_dpy = eglGetDisplay ((EGLNativeDisplayType) xdpy);
+                      if (g_dpy != EGL_NO_DISPLAY)
+                        g_dpy_type = GL_DPY_X11;
+                    }
+                }
+            }
+        }
+    }
+#else  /* !HAVE_PGTK: X11 build */
   /* Prefer an X11-platform display: it renders to FBOs exactly like the
      surfaceless one (so the headless capture path is unchanged), but it
      can also create window surfaces, which is what on-screen present
-     needs.  Fall back to surfaceless only when there is no X
-     connection (a pure batch run with no frame).  */
-  Display *xdpy = x_display_list ? x_display_list->display : NULL;
-  /* GL_FORCE_SURFACELESS keeps the surfaceless path even with an X
-     connection: on a DRI3-less X server (e.g. Xvfb) the X11 platform falls
-     back to llvmpipe, whereas surfaceless still reaches the real GPU.  Use
-     it for the headless GPU benchmark; on-screen present is then a no-op
-     (the FBO capture is unaffected).  */
-  if (getenv ("GL_FORCE_SURFACELESS"))
-    xdpy = NULL;
+     needs.  Fall back to surfaceless only when there is no X connection
+     (a pure batch run with no frame).
+     GL_FORCE_SURFACELESS keeps the surfaceless path even with an X
+     connection: on a DRI3-less X server (e.g. Xvfb) the X11 platform
+     falls back to llvmpipe, whereas surfaceless still reaches the real GPU.
+     Use it for the headless GPU benchmark.  */
+  Display *xdpy = (!force_surfaceless && x_display_list)
+                    ? x_display_list->display : NULL;
   if (xdpy && get_dpy)
     {
       g_dpy = get_dpy (EGL_PLATFORM_X11_KHR, xdpy, NULL);
       if (g_dpy != EGL_NO_DISPLAY)
-        g_dpy_is_x11 = true;
+        g_dpy_type = GL_DPY_X11;
     }
   if (g_dpy == EGL_NO_DISPLAY && xdpy)
     {
       g_dpy = eglGetDisplay ((EGLNativeDisplayType) xdpy);
       if (g_dpy != EGL_NO_DISPLAY)
-        g_dpy_is_x11 = true;
+        g_dpy_type = GL_DPY_X11;
     }
+#endif /* !HAVE_PGTK */
+
   if (g_dpy == EGL_NO_DISPLAY && get_dpy)
     g_dpy = get_dpy (EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, NULL);
   if (g_dpy == EGL_NO_DISPLAY)
@@ -631,23 +782,88 @@ gl_global_init (void)
   if (g_dpy == EGL_NO_DISPLAY) return false;
 
   EGLint maj, min;
-  if (!eglInitialize (g_dpy, &maj, &min)) return false;
+  if (!eglInitialize (g_dpy, &maj, &min))
+    {
+      /* The native display (Wayland or X11) could not initialize EGL.
+         This happens on some X11 servers without EGL support.  Fall back
+         to the surfaceless/pbuffer path so FBO capture still works.  */
+      g_dpy = EGL_NO_DISPLAY;
+      g_dpy_type = GL_DPY_SURFACELESS;
+      if (get_dpy)
+        g_dpy = get_dpy (EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, NULL);
+      if (g_dpy == EGL_NO_DISPLAY)
+        g_dpy = eglGetDisplay (EGL_DEFAULT_DISPLAY);
+      if (g_dpy == EGL_NO_DISPLAY) return false;
+      if (!eglInitialize (g_dpy, &maj, &min)) return false;
+    }
   if (!eglBindAPI (EGL_OPENGL_ES_API)) return false;
 
+  /* Wayland DRM configs typically expose only 10:10:10:2 formats; requesting
+     EGL_ALPHA_SIZE=8 would exclude them.  Ask for at least 1 alpha bit so
+     both XRGB2101010 (alpha 2) and ARGB8888 configs match: the subsurface
+     relies on translucency to let GTK's scroll bars on the parent surface
+     show through the gutters (see gl_ensure_target).  Requesting 0 would
+     let EGL's sorting pick an alpha-less XRGB config first; keep 0 only as
+     a retry when no alpha-bearing config exists at all.  X11/surfaceless
+     have standard RGBA8888 configs, so keep 8 there.  Wayland configs also
+     lack EGL_PBUFFER_BIT; request only EGL_WINDOW_BIT.  */
   EGLint cfg_attr[] = {
-    EGL_SURFACE_TYPE, g_dpy_is_x11 ? (EGL_WINDOW_BIT | EGL_PBUFFER_BIT)
-                                   : EGL_PBUFFER_BIT,
+    EGL_SURFACE_TYPE, (g_dpy_type == GL_DPY_SURFACELESS)
+                        ? EGL_PBUFFER_BIT
+                        : (g_dpy_type == GL_DPY_WAYLAND)
+                          ? EGL_WINDOW_BIT
+                          : (EGL_WINDOW_BIT | EGL_PBUFFER_BIT),
     EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
-    EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
+    EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8,
+    EGL_ALPHA_SIZE, (g_dpy_type == GL_DPY_WAYLAND) ? 1 : 8,
     EGL_NONE
   };
   EGLint n = 0;
-  if (!eglChooseConfig (g_dpy, cfg_attr, &g_cfg, 1, &n) || n < 1)
-    return false;
+  if ((!eglChooseConfig (g_dpy, cfg_attr, &g_cfg, 1, &n) || n < 1)
+      && g_dpy_type == GL_DPY_WAYLAND)
+    {
+      /* No alpha-bearing Wayland config: retry opaque (scroll-bar gutters
+         then keep the frame background, as before).  */
+      cfg_attr[11] = 0;
+      n = 0;
+      eglChooseConfig (g_dpy, cfg_attr, &g_cfg, 1, &n);
+    }
+  if (n < 1)
+    {
+      /* The native EGL display (Wayland or X11) has no matching GLES3 configs.
+         This happens on weston headless (pure pixman/software, no GPU EGL).
+         Terminate the native display and retry with the surfaceless path so
+         that FBO capture and headless testing still work.  */
+      if (g_dpy_type != GL_DPY_SURFACELESS)
+        {
+          eglTerminate (g_dpy);
+          g_dpy = EGL_NO_DISPLAY;
+          g_dpy_type = GL_DPY_SURFACELESS;
+          if (get_dpy)
+            g_dpy = get_dpy (EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, NULL);
+          if (g_dpy == EGL_NO_DISPLAY)
+            g_dpy = eglGetDisplay (EGL_DEFAULT_DISPLAY);
+          if (g_dpy == EGL_NO_DISPLAY) return false;
+          if (!eglInitialize (g_dpy, &maj, &min)) return false;
+          /* Rebuild config attrs: surfaceless uses PBUFFER_BIT only with
+             standard RGBA8888 configs (restore alpha=8).  */
+          cfg_attr[1] = EGL_PBUFFER_BIT;
+          cfg_attr[11] = 8;
+          n = 0;
+          if (!eglChooseConfig (g_dpy, cfg_attr, &g_cfg, 1, &n) || n < 1)
+            return false;
+        }
+      else
+        return false;
+    }
 
   EGLint ctx_attr[] = { EGL_CONTEXT_MAJOR_VERSION, 3, EGL_NONE };
   g_ctx = eglCreateContext (g_dpy, g_cfg, EGL_NO_CONTEXT, ctx_attr);
   if (g_ctx == EGL_NO_CONTEXT) return false;
+  eglGetConfigAttrib (g_dpy, g_cfg, EGL_ALPHA_SIZE, &g_cfg_alpha);
+  if (getenv ("GL_LOG_PRESENT"))
+    fprintf (stderr, "[glinit] dpy_type=%d cfg_alpha=%d\n",
+             (int) g_dpy_type, (int) g_cfg_alpha);
   if (!gl_bind_surface (EGL_NO_SURFACE))
     return false;
 
@@ -738,7 +954,19 @@ gl_ensure_target (struct gl_frame_data *fd, int w, int h)
   float bg[4];
   gl_unpack_color (FRAME_BACKGROUND_PIXEL (fd->f), bg);
   glDisable (GL_SCISSOR_TEST);
-  glClearColor (bg[0], bg[1], bg[2], 1.0f);
+#if defined HAVE_PGTK && defined HAVE_WAYLAND_EGL
+  /* On a Wayland subsurface, clear to premultiplied transparent instead
+     of the frame background: pixels redisplay never draws are exactly
+     the toolkit scroll-bar gutters, and with alpha 0 the compositor
+     blends them away so GTK's scroll bars on the parent surface show
+     through our overlay (on X11 the server clips the presents under the
+     native scroll-bar windows instead).  Needs an alpha-bearing config;
+     opaque configs keep the old background clear.  */
+  if (g_dpy_type == GL_DPY_WAYLAND && g_cfg_alpha > 0)
+    glClearColor (0.0f, 0.0f, 0.0f, 0.0f);
+  else
+#endif
+    glClearColor (bg[0], bg[1], bg[2], 1.0f);
   glClear (GL_COLOR_BUFFER_BIT);
 }
 
@@ -814,6 +1042,39 @@ gl_lock_face (struct font *font, cairo_scaled_font_t **out_sf)
   return face;
 }
 
+/* FreeType load flags matching how cairo itself would rasterize SF.
+   The scaled font carries the platform's font options (Xft resources on
+   plain X11, the GTK settings on PGTK); rendering the atlas with plain
+   FT_LOAD_RENDER uses normal hinting regardless, which matches Xft's
+   default but NOT the slight hinting GTK configures, shifting stems of
+   dense glyphs by a pixel against the cairo reference.  Deriving the
+   flags from the options keeps every platform at parity.  */
+static FT_Int32
+gl_ft_load_flags (cairo_scaled_font_t *sf)
+{
+  FT_Int32 flags = FT_LOAD_RENDER;
+  cairo_font_options_t *o = cairo_font_options_create ();
+  cairo_scaled_font_get_font_options (sf, o);
+  switch (cairo_font_options_get_hint_style (o))
+    {
+    case CAIRO_HINT_STYLE_NONE:
+      flags |= FT_LOAD_NO_HINTING;
+      break;
+    case CAIRO_HINT_STYLE_SLIGHT:
+      flags |= FT_LOAD_TARGET_LIGHT;
+      break;
+    default:
+      /* DEFAULT/MEDIUM/FULL: normal hinting, the previous behavior.  */
+      flags |= FT_LOAD_TARGET_NORMAL;
+      break;
+    }
+  /* CAIRO_ANTIALIAS_NONE is not mirrored: it would need a 1-bit atlas
+     path (FT_PIXEL_MODE_MONO), and the grayscale atlas cannot represent
+     it anyway.  Those setups keep antialiased glyphs, as before.  */
+  cairo_font_options_destroy (o);
+  return flags;
+}
+
 static struct gfx_glyph *
 gl_rasterize_glyph (struct font *font, unsigned int glyph_id,
                     unsigned long long key)
@@ -836,7 +1097,7 @@ gl_rasterize_glyph (struct font *font, unsigned int glyph_id,
         FT_Set_Pixel_Sizes (face, xp, yp);
     }
 
-  if (FT_Load_Glyph (face, glyph_id, FT_LOAD_RENDER))
+  if (FT_Load_Glyph (face, glyph_id, gl_ft_load_flags (sf)))
     {
       cairo_ft_scaled_font_unlock_face (sf);
       return NULL;
@@ -950,44 +1211,386 @@ gl_now (void)
   return (double) ts.tv_sec + (double) ts.tv_nsec / 1e9;
 }
 
-/* Blit the finished static texture to the frame's on-screen X window and
-   swap.  A no-op on the surfaceless fallback display (no window surfaces);
-   the FBO still holds the frame for gl_capture_frame either way.  */
+/* True when the animation pump may issue a present.  On Wayland we gate on
+   the compositor's wl_surface.frame callback (event-driven vsync) so the
+   pump submits at most one frame per vblank; on X11 and surfaceless we keep
+   the 12 ms time guard.  */
+static bool
+gl_swap_ok (struct gl_frame_data *fd)
+{
+#if defined HAVE_PGTK && defined HAVE_WAYLAND_EGL
+  if (g_dpy_type == GL_DPY_WAYLAND)
+    return fd->frame_ready;
+#endif
+  return gl_now () - fd->last_swap >= 0.012;
+}
+
+#ifdef HAVE_PGTK
+static void gl_pgtk_after_paint (void *clock, void *data);
+#endif
+
+/* Ensure fd->surf is valid for the current frame window; return true when
+   a swap-ready surface has been obtained.  Creates or recreates the EGL
+   window surface when the native window handle changes.  Handles three
+   cases: X11 (non-PGTK), PGTK/Wayland, and PGTK/X11 (GDK over X11).
+   The shared blit-and-swap logic that follows is identical for all.  */
+static bool
+gl_ensure_egl_surface (struct gl_frame_data *fd)
+{
+  struct frame *f = fd->f;
+  if (!f) return false;
+  if (g_dpy_type == GL_DPY_SURFACELESS) return false;
+
+#ifdef HAVE_PGTK
+  if (!FRAME_PGTK_P (f)) return false;
+
+# if defined GDK_WINDOWING_WAYLAND && defined HAVE_WAYLAND_EGL
+  if (g_dpy_type == GL_DPY_WAYLAND)
+    {
+      GdkWindow *gdk_win = FRAME_GDK_WINDOW (f);
+      if (!gdk_win) return false;
+      struct wl_surface *parent_surf =
+        gdk_wayland_window_get_wl_surface (gdk_win);
+      if (!parent_surf) return false;
+
+      if (fd->surf == EGL_NO_SURFACE || fd->wl_parent_surf != parent_surf)
+        {
+          /* Tear down stale EGL surface, wl_egl_window, and subsurface.  */
+          if (fd->surf != EGL_NO_SURFACE)
+            {
+              if (g_bound_known && g_bound_surf == fd->surf)
+                {
+                  eglMakeCurrent (g_dpy, EGL_NO_SURFACE,
+                                  EGL_NO_SURFACE, g_ctx);
+                  g_bound_surf = EGL_NO_SURFACE;
+                }
+              eglDestroySurface (g_dpy, fd->surf);
+              fd->surf = EGL_NO_SURFACE;
+            }
+          if (fd->wl_win)
+            { wl_egl_window_destroy (fd->wl_win); fd->wl_win = NULL; }
+          if (fd->wl_sub)
+            { wl_subsurface_destroy (fd->wl_sub); fd->wl_sub = NULL; }
+          if (fd->wl_surf && fd->wl_surf != fd->wl_parent_surf)
+            { wl_surface_destroy (fd->wl_surf); fd->wl_surf = NULL; }
+
+          int w = fd->w > 0 ? fd->w : 1;
+          int h = fd->h > 0 ? fd->h : 1;
+          fd->wl_parent_surf = parent_surf;
+
+          /* Render into a wl_subsurface so that GDK's own shm frame
+             commits to the parent surface never conflict with our EGL
+             frames.  The subsurface is desync: it presents independently
+             of any GDK parent commit.  Fall back to using the parent
+             surface directly when wl_subcompositor is unavailable.  */
+          GdkDisplay *gdpy = gdk_display_get_default ();
+          struct wl_compositor *wl_comp =
+            gdk_wayland_display_get_wl_compositor (gdpy);
+          if (wl_comp && g_wl_subcompositor)
+            {
+              fd->wl_surf = wl_compositor_create_surface (wl_comp);
+              fd->wl_sub  = wl_subcompositor_get_subsurface (
+                              g_wl_subcompositor, fd->wl_surf, parent_surf);
+              /* Real position set below (and refreshed on every ensure):
+                 the parent wl_surface covers the whole toplevel, and the
+                 edit area sits below the GTK menu bar.  */
+              wl_subsurface_set_position (fd->wl_sub, 0, 0);
+              wl_subsurface_set_desync (fd->wl_sub);
+              /* Clear input region: our subsurface is purely for rendering;
+                 all pointer/keyboard input must reach GDK's parent surface.
+                 The Wayland default (infinite region) would steal events.  */
+              struct wl_region *empty = wl_compositor_create_region (wl_comp);
+              wl_surface_set_input_region (fd->wl_surf, empty);
+              wl_region_destroy (empty);
+              wl_surface_commit (fd->wl_surf);
+            }
+          else
+            fd->wl_surf = parent_surf; /* legacy fallback, may flicker */
+
+          fd->wl_win = wl_egl_window_create (fd->wl_surf, w, h);
+          if (!fd->wl_win) return false;
+          fd->surf = eglCreateWindowSurface (g_dpy, g_cfg,
+                                             (EGLNativeWindowType) fd->wl_win,
+                                             NULL);
+          if (fd->surf == EGL_NO_SURFACE)
+            {
+              wl_egl_window_destroy (fd->wl_win);
+              fd->wl_win = NULL;
+              return false;
+            }
+          fd->surf_win = 0;
+          for (int i = 0; i < GL_SWAP_RING; i++)
+            { gl_dirty_clear (&fd->swap_dirty[i]);
+              fd->swap_dirty[i].all = true; }
+          fd->surf_w = fd->surf_h = -1;
+        }
+      else
+        {
+          /* Wayland requires an explicit resize when the frame size changes;
+             the EGL surface dimensions update on the next eglSwapBuffers.  */
+          int w = fd->w > 0 ? fd->w : 1;
+          int h = fd->h > 0 ? fd->h : 1;
+          wl_egl_window_resize (fd->wl_win, w, h, 0, 0);
+        }
+
+      /* Keep the subsurface anchored to the edit area's offset inside
+         the toplevel: the parent wl_surface covers the whole toplevel
+         window, and rendering at (0,0) would cover the GTK menu bar and
+         shift the frame content up by its height (caught by the Wayland
+         parity suite: every category off by the menu-bar height).  The
+         offset is parent-surface state, applied on GDK's next commit.  */
+      if (fd->wl_sub)
+        {
+          GtkWidget *edit = FRAME_GTK_WIDGET (f);
+          GtkWidget *top = edit ? gtk_widget_get_toplevel (edit) : NULL;
+          int ox = 0, oy = 0;
+          if (edit && top
+              && gtk_widget_translate_coordinates (edit, top, 0, 0,
+                                                   &ox, &oy)
+              && (ox != fd->wl_sub_x || oy != fd->wl_sub_y))
+            {
+              wl_subsurface_set_position (fd->wl_sub, ox, oy);
+              fd->wl_sub_x = ox;
+              fd->wl_sub_y = oy;
+              /* The new position only latches on a parent commit; GDK
+                 commits the parent on its own cadence, which is fine for
+                 a one-time layout change like the menu bar appearing.  */
+            }
+        }
+      return true;
+    }
+# endif /* GDK_WINDOWING_WAYLAND && HAVE_WAYLAND_EGL */
+
+  /* PGTK/X11: the EGL display was obtained from the X11 Display* via dlsym
+     in gl_global_init.  Get the XID of GDK's backing X window the same way
+     to avoid including gdkx.h (conflicts with pgtkgui.h typedefs).  */
+  if (g_dpy_type == GL_DPY_X11)
+    {
+      GdkWindow *gdk_win = FRAME_GDK_WINDOW (f);
+      if (!gdk_win) return false;
+      typedef uintptr_t (*get_xid_fn) (GdkWindow *);
+      get_xid_fn gx =
+        (get_xid_fn) dlsym (RTLD_DEFAULT, "gdk_x11_window_get_xid");
+      if (!gx) return false;
+      uintptr_t xid = gx (gdk_win);
+      if (!xid) return false;
+
+      if (fd->surf == EGL_NO_SURFACE || fd->surf_win != xid)
+        {
+          if (fd->surf != EGL_NO_SURFACE)
+            {
+              if (g_bound_known && g_bound_surf == fd->surf)
+                {
+                  eglMakeCurrent (g_dpy, EGL_NO_SURFACE,
+                                  EGL_NO_SURFACE, g_ctx);
+                  g_bound_surf = EGL_NO_SURFACE;
+                }
+              eglDestroySurface (g_dpy, fd->surf);
+            }
+          fd->surf = eglCreateWindowSurface (g_dpy, g_cfg,
+                                             (EGLNativeWindowType) xid,
+                                             NULL);
+          fd->surf_win = xid;
+          if (fd->surf == EGL_NO_SURFACE) return false;
+          for (int i = 0; i < GL_SWAP_RING; i++)
+            { gl_dirty_clear (&fd->swap_dirty[i]);
+              fd->swap_dirty[i].all = true; }
+          fd->surf_w = fd->surf_h = -1;
+
+          /* Stop the X server from filling exposed areas of this window
+             with its background: GTK's scroll bars are native child X
+             windows, and when one moves on a frame resize the server
+             fills the strip it vacated with the (white) background
+             AFTER our present -- no GTK paint follows, so nothing ever
+             repairs the band (QA 15-transitions, deterministic).  With
+             background_pixmap = None the server leaves the previous
+             pixels (ours) in place instead.  Xlib is reached via dlsym
+             like the GDK X11 helpers (gdkx.h stays excluded).  */
+          {
+            typedef void *(*get_xdpy_fn) (void *);
+            typedef int (*set_bg_fn) (void *, unsigned long, unsigned long);
+            get_xdpy_fn gxd =
+              (get_xdpy_fn) dlsym (RTLD_DEFAULT,
+                                   "gdk_x11_display_get_xdisplay");
+            set_bg_fn xsb =
+              (set_bg_fn) dlsym (RTLD_DEFAULT,
+                                 "XSetWindowBackgroundPixmap");
+            if (gxd && xsb)
+              {
+                void *xdpy = gxd (gdk_window_get_display (gdk_win));
+                if (xdpy)
+                  xsb (xdpy, xid, 0UL /* None */);
+              }
+          }
+
+          /* Present again after every GTK paint: with client-side windows
+             GTK composites widget paints through this same X window and
+             would otherwise overwrite our content (see
+             gl_pgtk_after_paint).  */
+          GdkFrameClock *fc = gdk_window_get_frame_clock (gdk_win);
+          if (fc && (!fd->after_paint_id || fd->frame_clock != (void *) fc))
+            {
+              if (fd->after_paint_id && fd->frame_clock)
+                g_signal_handler_disconnect (fd->frame_clock,
+                                             fd->after_paint_id);
+              fd->after_paint_id =
+                g_signal_connect_after (fc, "after-paint",
+                                        G_CALLBACK (gl_pgtk_after_paint), fd);
+              fd->frame_clock = fc;
+            }
+        }
+      return true;
+    }
+
+  return false;  /* Wayland not available and not on an X11 PGTK session */
+
+#else  /* !HAVE_PGTK: X11 build */
+
+  if (!FRAME_X_P (f)) return false;
+  Window win = FRAME_X_WINDOW (f);
+  if (!win) return false;
+  if (fd->surf == EGL_NO_SURFACE || fd->surf_win != (unsigned long) win)
+    {
+      if (fd->surf != EGL_NO_SURFACE)
+        {
+          if (g_bound_known && g_bound_surf == fd->surf)
+            {
+              eglMakeCurrent (g_dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, g_ctx);
+              g_bound_surf = EGL_NO_SURFACE;
+            }
+          eglDestroySurface (g_dpy, fd->surf);
+        }
+      fd->surf = eglCreateWindowSurface (g_dpy, g_cfg,
+                                         (EGLNativeWindowType) win, NULL);
+      fd->surf_win = (unsigned long) win;
+      if (fd->surf == EGL_NO_SURFACE) return false;
+      for (int i = 0; i < GL_SWAP_RING; i++)
+        { gl_dirty_clear (&fd->swap_dirty[i]); fd->swap_dirty[i].all = true; }
+      fd->surf_w = fd->surf_h = -1;
+    }
+  return true;
+
+#endif /* !HAVE_PGTK */
+}
+
+/* Forward declaration needed by gl_wl_frame_cb_done below.  */
+static void gl_present_to_window (struct gl_frame_data *fd);
+
+/* wl_surface.frame callback: the compositor fires this once per displayed
+   frame to tell us when it is ready for the next submission.  We use it
+   as an event-driven vsync gate in the animation pump (gl_swap_ok), so the
+   pump never submits faster than the compositor can display.  */
+#if defined HAVE_PGTK && defined GDK_WINDOWING_WAYLAND && defined HAVE_WAYLAND_EGL
+static void
+gl_wl_frame_cb_done (void *data, struct wl_callback *cb, uint32_t serial)
+{
+  (void) serial;
+  struct gl_frame_data *fd = data;
+  wl_callback_destroy (cb);
+  fd->frame_cb = NULL;
+  fd->frame_ready = true;
+  /* If a redisplay present was deferred while waiting for this callback
+     (needs_present set in gl_drv_end_frame), issue it now.  The EGL
+     context is still current from the last gl_present_to_window call.  */
+  if (fd->needs_present)
+    {
+      gl_present_to_window (fd);
+      fd->needs_present = false;
+    }
+}
+static const struct wl_callback_listener gl_wl_frame_cb_listener = {
+  gl_wl_frame_cb_done
+};
+#endif /* HAVE_PGTK && GDK_WINDOWING_WAYLAND && HAVE_WAYLAND_EGL */
+
+#ifdef HAVE_PGTK
+/* GdkFrameClock "after-paint" handler, PGTK/X11 sessions only.  GTK3's
+   client-side windows composite every widget paint through the SAME X
+   window our EGL surface presents to, so whatever GTK flushes after our
+   swap overwrites those pixels.  Seen live: relocating the GtkScrollbar
+   on a frame resize makes GTK wipe the vacated strip to the widget
+   background AFTER the present that followed the resize, leaving a
+   permanent stale band (QA 15-transitions, deterministic).  Re-presenting
+   after every GTK paint keeps the frame content on top; EGL swaps do not
+   feed back into GTK's paint cycle, so this cannot loop.  */
+static void
+gl_pgtk_after_paint (void *clock, void *data)
+{
+  (void) clock;
+  struct gl_frame_data *fd = data;
+  if (!fd || fd->in_cycle || fd->surf == EGL_NO_SURFACE)
+    return;
+  gl_present_to_window (fd);
+}
+#endif /* HAVE_PGTK */
+
+/* Blit the finished static texture to the frame's on-screen window and swap.
+   A no-op when the display is surfaceless (headless benchmark / capture).
+   The FBO still holds the frame for gl_capture_frame either way.  */
 static void
 gl_present_to_window (struct gl_frame_data *fd)
 {
-  if (!g_dpy_is_x11) return;
   struct frame *f = fd->f;
-  if (!f || !FRAME_X_P (f)) return;
-  Window win = FRAME_X_WINDOW (f);
-  if (!win) return;
+  if (!f) return;
 
   /* Quads queued for this frame target its FBO; emit them before the
      draw framebuffer switches to the window.  */
   if (g_glyph_batch_fd == fd)
     gl_flush_glyph_batch ();
 
-  /* Create (or recreate, if the window id changed) the window surface.  */
-  if (fd->surf == EGL_NO_SURFACE || fd->surf_win != (unsigned long) win)
+#if defined HAVE_PGTK && defined HAVE_WAYLAND_EGL
+  /* Toolkit scroll bars live on GDK's parent surface, UNDERNEATH this
+     subsurface, and the drawing policy paints the frame background over
+     their gutters (alpha 1) like on X11 -- where the X server clips the
+     presents under the native scroll-bar windows.  Wayland has no such
+     clipping, so punch transparent holes at the bar rects on every
+     present: with an alpha-bearing config the compositor shows GTK's
+     scroll bars through them.  Any redraw repaints the area, so the
+     holes are re-punched here each time; when a bar moves, the vacated
+     area is repainted by redisplay and presents opaque again.  */
+  if (g_dpy_type == GL_DPY_WAYLAND && g_cfg_alpha > 0 && fd->wl_sub)
     {
-      if (fd->surf != EGL_NO_SURFACE)
+      bool punched = false;
+      for (Lisp_Object b = FRAME_SCROLL_BARS (f); !NILP (b);
+           b = XSCROLL_BAR (b)->next)
         {
-          if (g_bound_known && g_bound_surf == fd->surf)
-            { eglMakeCurrent (g_dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, g_ctx);
-              g_bound_surf = EGL_NO_SURFACE; }
-          eglDestroySurface (g_dpy, fd->surf);
+          struct scroll_bar *sb = XSCROLL_BAR (b);
+          if (sb->width <= 0 || sb->height <= 0)
+            continue;
+          if (!punched)
+            {
+              glBindFramebuffer (GL_FRAMEBUFFER, fd->fbo);
+              glEnable (GL_SCISSOR_TEST);
+              glClearColor (0.0f, 0.0f, 0.0f, 0.0f);
+              punched = true;
+            }
+          int y = fd->h - (sb->top + sb->height);
+          glScissor (sb->left, y < 0 ? 0 : y, sb->width, sb->height);
+          glClear (GL_COLOR_BUFFER_BIT);
+          gl_mark_dirty (fd, sb->left, sb->top, sb->width, sb->height);
+          if (getenv ("GL_LOG_PRESENT"))
+            fprintf (stderr, "[glpunch] %d,%d %dx%d (fd %dx%d)\n",
+                     sb->left, sb->top, sb->width, sb->height,
+                     fd->w, fd->h);
         }
-      fd->surf = eglCreateWindowSurface (g_dpy, g_cfg,
-                                         (EGLNativeWindowType) win, NULL);
-      fd->surf_win = (unsigned long) win;
-      if (fd->surf == EGL_NO_SURFACE)
-        return;            /* present unavailable; FBO still has the frame */
-      /* A fresh surface has no usable swap history: poison the ring so the
-         age-based repair falls back to full blits until it refills.  */
-      for (int i = 0; i < GL_SWAP_RING; i++)
-        { gl_dirty_clear (&fd->swap_dirty[i]); fd->swap_dirty[i].all = true; }
-      fd->surf_w = fd->surf_h = -1;     /* size unknown: query below */
+      if (punched)
+        glDisable (GL_SCISSOR_TEST);
+      /* Diagnostic: GL_DEBUG_HOLE=1 punches a fixed hole mid-frame to
+         verify the compositor actually blends this subsurface.  */
+      if (getenv ("GL_DEBUG_HOLE"))
+        {
+          glBindFramebuffer (GL_FRAMEBUFFER, fd->fbo);
+          glEnable (GL_SCISSOR_TEST);
+          glClearColor (0.0f, 0.0f, 0.0f, 0.0f);
+          glScissor (100, fd->h - 300, 200, 200);
+          glClear (GL_COLOR_BUFFER_BIT);
+          glDisable (GL_SCISSOR_TEST);
+          gl_mark_dirty (fd, 100, 100, 200, 200);
+        }
     }
+#endif
+
+  if (!gl_ensure_egl_surface (fd)) return;
 
   if (!gl_bind_surface (fd->surf))
     return;
@@ -1288,6 +1891,26 @@ gl_present_to_window (struct gl_frame_data *fd)
       }
   }
 
+  /* On Wayland, request a wl_surface.frame callback so the compositor
+     signals when it is ready for the next frame (event-driven vsync).
+     This replaces the 12 ms time gate in the animation pump (gl_swap_ok).
+     Flush immediately so the compositor receives the request before the
+     next event-loop iteration.  Register after any size-recheck retry so
+     exactly one callback is pending after the final swap.  */
+#if defined HAVE_PGTK && defined GDK_WINDOWING_WAYLAND && defined HAVE_WAYLAND_EGL
+  if (g_dpy_type == GL_DPY_WAYLAND && fd->wl_surf)
+    {
+      if (fd->frame_cb)
+        { wl_callback_destroy (fd->frame_cb); fd->frame_cb = NULL; }
+      fd->frame_cb = wl_surface_frame (fd->wl_surf);
+      wl_callback_add_listener (fd->frame_cb, &gl_wl_frame_cb_listener, fd);
+      fd->frame_ready = false;
+      struct wl_display *wl_dpy =
+        gdk_wayland_display_get_wl_display (gdk_display_get_default ());
+      if (wl_dpy) wl_display_flush (wl_dpy);
+    }
+#endif
+
   /* Keep the window surface current (FBO rendering does not care which
      surface is bound), so the next frame needs no make-current at all.  */
   glBindFramebuffer (GL_FRAMEBUFFER, fd->fbo);
@@ -1303,9 +1926,20 @@ gl_drv_end_frame (struct frame *f, bool present_p)
   g_cur = NULL;
   if (present_p)
     {
-      /* The swap in the present flushes; no explicit glFlush needed.  */
-      gl_present_to_window (fd);
-      fd->needs_present = false;
+      /* On Wayland the compositor signals readiness via wl_surface.frame; a
+         second present before that callback fires submits to a swapchain slot
+         that still holds the content from two frames ago, producing visible
+         flicker.  Defer until gl_swap_ok so at most one swap per vblank goes
+         out; the pump or the next redisplay will flush needs_present.
+         On X11 / surfaceless the time-gate in gl_swap_ok guards the pump;
+         non-pump presents are rare enough that the 12 ms gap is never hit,
+         so we leave them unconditional to keep input latency minimal.  */
+#if defined HAVE_PGTK && defined HAVE_WAYLAND_EGL
+      if (g_dpy_type == GL_DPY_WAYLAND && !gl_swap_ok (fd))
+        { glFlush (); fd->needs_present = true; }
+      else
+#endif
+        { gl_present_to_window (fd); fd->needs_present = false; }
     }
   else
     {
@@ -2120,7 +2754,13 @@ gl_drv_frame_background (struct frame *f)
 static unsigned long
 gl_drv_cursor_color (struct frame *f)
 {
+  /* xterm.h names this cursor_pixel; pgtkterm.h names it cursor_color.
+     FRAME_CURSOR_COLOR is only defined in pgtkterm.h, so branch explicitly.  */
+#ifdef HAVE_PGTK
+  return FRAME_CURSOR_COLOR (f);
+#else
   return FRAME_X_OUTPUT (f)->cursor_pixel;
+#endif
 }
 
 static struct gfx_driver gl_gfx_driver =
@@ -2329,7 +2969,7 @@ gl_anim_tick (struct frame *f, double dt)
      swapchain (see last_swap in gl_frame_data).  The skipped motion still
      reaches the screen with the next tick or present.  */
   if (gl_anim_step (f, fd, dt)
-      && !fd->in_cycle && gl_now () - fd->last_swap >= 0.012)
+      && !fd->in_cycle && gl_swap_ok (fd))
     { gl_present_to_window (fd); fd->needs_present = false; }
   return g_gl_animations_enabled;
 }
@@ -2368,10 +3008,21 @@ gl_pump_tick (struct frame *f)
     fprintf (stderr, "[glpump] t=%.4f need=%d fade=%d in_cycle=%d gap=%.3f\n",
              now, need, fade, fd->in_cycle, now - fd->last_swap);
 
-  if (need && !fd->in_cycle && now - fd->last_swap >= 0.012)
+  if (need && !fd->in_cycle && gl_swap_ok (fd))
     { gl_present_to_window (fd); fd->needs_present = false; }
 
-  return (g_gl_animations_enabled ? GL_PUMP_ANIM : 0)
+  /* For overlay-based cursor modes (spring, torpedo, bursts) the pump must
+     keep ticking to advance physics even on quiet frames, so return ANIM
+     unconditionally when such a mode is active.
+     For BLOCK cursor (no overlay) return ANIM only while something actually
+     moved this tick; the Lisp timer stops when the screen is static and
+     restarts at the next animation event, eliminating spurious presents on
+     idle frames.  */
+  bool anim_live = g_gl_animations_enabled
+    && (g_gl_cursor_mode != GL_CURSOR_BLOCK
+        || need
+        || gl_anim_overlay_active (fd));
+  return (anim_live ? GL_PUMP_ANIM : 0)
     | (fade ? GL_PUMP_FADE : 0)
     | (fd->video ? GL_PUMP_VIDEO : 0);
 }
@@ -2570,7 +3221,7 @@ gl_frame_up_to_date (struct frame *f)
     {
       FRAME_MOUSE_UPDATE (f);
       struct gl_frame_data *fd = gl_get_frame_data (f);
-      if (fd && fd->needs_present)
+      if (fd && fd->needs_present && gl_swap_ok (fd))
         {
           gl_present_to_window (fd);
           fd->needs_present = false;
@@ -2630,6 +3281,18 @@ bool
 gl_backend_available (void)
 {
   return gl_global_init ();
+}
+
+const char *
+gl_display_type_name (void)
+{
+  switch (g_dpy_type)
+    {
+    case GL_DPY_SURFACELESS: return "surfaceless";
+    case GL_DPY_X11:         return "x11";
+    case GL_DPY_WAYLAND:     return "wayland";
+    default:                 return "unknown";
+    }
 }
 
 /* Enable the GL backend on frame F: bring up the context, allocate the
@@ -2728,9 +3391,32 @@ gl_transition_tick (struct frame *f)
      lands right after a redisplay present has nothing to add; skipping
      it keeps the present rate at the refresh rate instead of flooding
      the swapchain (see last_swap in gl_frame_data).  */
-  if (gl_now () - fd->last_swap >= 0.012)
+  if (gl_swap_ok (fd))
     gl_present_to_window (fd);
   return fd->trans_dur > 0;
+}
+
+/* Query whether a buffer-switch cross-fade is running on F, without
+   presenting or otherwise advancing it.  Test harnesses use this to
+   wait for a quiescent frame before capturing it.  Time-based: once the
+   fade duration has elapsed the next present shows the final state, so
+   report inactive even if that present has not landed yet (it may be
+   gated on the Wayland frame callback, which needs the event loop).  */
+bool
+gl_transition_active_p (struct frame *f)
+{
+  struct gl_frame_data *fd = gl_get_frame_data (f);
+  return fd && fd->trans_dur > 0
+    && (gl_now () - fd->trans_start) < fd->trans_dur;
+}
+
+/* Whether the GPU backend is rendering frame F.  Lets toolkit glue
+   (gtkutil.c scroll bars on PGTK) adapt to the EGL present path without
+   reaching into the driver's internals.  */
+bool
+gl_frame_active_p (struct frame *f)
+{
+  return gl_get_frame_data (f) != NULL;
 }
 
 void
@@ -2740,6 +3426,15 @@ gl_free_frame_data (struct frame *f)
     if (g_frames[i] && g_frames[i]->f == f)
       {
         struct gl_frame_data *fd = g_frames[i];
+#ifdef HAVE_PGTK
+        if (fd->after_paint_id && fd->frame_clock)
+          {
+            g_signal_handler_disconnect (fd->frame_clock,
+                                         fd->after_paint_id);
+            fd->after_paint_id = 0;
+            fd->frame_clock = NULL;
+          }
+#endif
         if (g_fd_mru == fd)
           g_fd_mru = NULL;
         if (g_glyph_batch_fd == fd)
@@ -2751,6 +3446,16 @@ gl_free_frame_data (struct frame *f)
                 g_bound_surf = EGL_NO_SURFACE; }
             eglDestroySurface (g_dpy, fd->surf);
           }
+#if defined HAVE_PGTK && defined HAVE_WAYLAND_EGL
+        if (fd->frame_cb)
+          { wl_callback_destroy (fd->frame_cb); fd->frame_cb = NULL; }
+        if (fd->wl_win)
+          { wl_egl_window_destroy (fd->wl_win); fd->wl_win = NULL; }
+        if (fd->wl_sub)
+          { wl_subsurface_destroy (fd->wl_sub); fd->wl_sub = NULL; }
+        if (fd->wl_surf && fd->wl_surf != fd->wl_parent_surf)
+          { wl_surface_destroy (fd->wl_surf); fd->wl_surf = NULL; }
+#endif
         if (fd->fbo) glDeleteFramebuffers (1, &fd->fbo);
         if (fd->scratch_fbo) glDeleteFramebuffers (1, &fd->scratch_fbo);
         if (fd->tex) glDeleteTextures (1, &fd->tex);
@@ -3058,7 +3763,7 @@ gl_video_tick (struct frame *f)
      presents, and a tick landing right after another present defers to
      it -- every present composites the video texture anyway.  */
   if (gl_video_pump (fd->video)
-      && !fd->in_cycle && gl_now () - fd->last_swap >= 0.012)
+      && !fd->in_cycle && gl_swap_ok (fd))
     { gl_present_to_window (fd); fd->needs_present = false; }
   return true;
 }

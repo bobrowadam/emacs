@@ -26,6 +26,10 @@ struct frame;
 /* Bring up the EGL context; true when the GL backend is usable.  */
 extern bool gl_backend_available (void);
 
+/* Return a static string naming the active EGL display type:
+   "surfaceless", "x11", or "wayland".  */
+extern const char *gl_display_type_name (void);
+
 /* Enable the GL backend on F (context + per-frame target + driver).  */
 extern bool gl_enable_for_frame (struct frame *f);
 
@@ -44,6 +48,8 @@ extern void gl_free_frame_data (struct frame *f);
    (DURATION seconds), then advance it from a Lisp timer.  */
 extern bool gl_transition_start (struct frame *f, double duration);
 extern bool gl_transition_tick (struct frame *f);
+extern bool gl_transition_active_p (struct frame *f);
+extern bool gl_frame_active_p (struct frame *f);
 
 /* Single animation pump (gpu-pump-tick): advance cursor effects, the
    cross-fade and the inline video together and present at most once.

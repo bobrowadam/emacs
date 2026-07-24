@@ -38,6 +38,9 @@ typedef struct x_output xp_output;
 #define xp pgtk
 #include "xsettings.h"
 typedef struct pgtk_output xp_output;
+# ifdef HAVE_GFX_GL
+#  include "glterm.h"
+# endif
 #endif
 #include "blockinput.h"
 #include "window.h"
@@ -4855,6 +4858,24 @@ xg_update_scrollbar_pos (struct frame *f,
 	  /* Don't obscure any child frames.  */
 	  XLowerWindow (FRAME_X_DISPLAY (f), GTK_WIDGET_TO_X_WIN (webox));
 #else
+# ifdef HAVE_GFX_GL
+	  /* With the GPU backend presenting EGL frames onto the frame's
+	     X window, a client-side scroll bar would be composited into
+	     that same window and overwritten by every present.  A native
+	     window makes the X server clip the presents under the widget,
+	     matching how the non-PGTK X11 build stacks its scroll bars.
+	     X11 sessions only: on Wayland a "native" subwindow becomes an
+	     unpainted wl_subsurface that covers the scroll bar instead
+	     (there the GPU backend renders on its own subsurface and
+	     punches alpha holes at the bar rects, see glterm.c).  */
+	  if (gl_frame_active_p (f)
+	      && strcmp (gl_display_type_name (), "x11") == 0)
+	    {
+	      GdkWindow *w = gtk_widget_get_window (webox);
+	      if (w)
+		gdk_window_ensure_native (w);
+	    }
+# endif
 	  gdk_window_lower (gtk_widget_get_window (webox));
 #endif
 	}

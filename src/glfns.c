@@ -68,6 +68,18 @@ DEFUN ("gpu-device-name", Fgl_device_name, Sgl_device_name, 0, 0, 0,
   return r ? build_string ((const char *) r) : Qnil;
 }
 
+DEFUN ("gpu-display-type", Fgl_display_type, Sgl_display_type, 0, 0, 0,
+       doc: /* Return the EGL display type as a string.
+Possible values: \"surfaceless\", \"x11\", \"wayland\".
+\"surfaceless\" means the GPU renders off-screen (FBO capture works but
+no on-screen present); \"wayland\" means a real Wayland EGL window surface
+is used for on-screen present.  */)
+  (void)
+{
+  if (!gl_backend_available ()) return Qnil;
+  return build_string (gl_display_type_name ());
+}
+
 /* -----------------------------------------------------------------------
    gpu-enable-for-frame
    ----------------------------------------------------------------------- */
@@ -76,15 +88,16 @@ DEFUN ("gpu-enable-for-frame", Fgl_enable_for_frame, Sgl_enable_for_frame,
        1, 1, 0,
        doc: /* Add OpenGL GPU rendering to an existing Emacs frame FRAME.
 Brings up the EGL context and an off-screen render target, then patches
-the X terminal's redisplay hooks so redisplay paints through the GPU.
-FRAME must be a live graphical X frame.  Returns t on success.  */)
+the terminal's redisplay hooks so redisplay paints through the GPU.
+FRAME must be a live graphical frame (X11 or PGTK/Wayland).  Returns t on
+success.  */)
   (Lisp_Object frame)
 {
   CHECK_LIVE_FRAME (frame);
   struct frame *f = XFRAME (frame);
 
-  if (!FRAME_X_P (f))
-    error ("gpu-enable-for-frame: FRAME must be an X (GTK/X11) frame");
+  if (!FRAME_X_P (f) && !FRAME_PGTK_P (f))
+    error ("gpu-enable-for-frame: FRAME must be an X or PGTK (Wayland/X11) frame");
 
   block_input ();
   bool ok = gl_enable_for_frame (f);
@@ -164,7 +177,7 @@ The argument order matches the Metal backend so gpu.el drives both.  */)
   CHECK_LIVE_FRAME (frame);
   CHECK_NUMBER (duration);
   struct frame *f = XFRAME (frame);
-  if (!FRAME_X_P (f)) return Qnil;
+  if (!FRAME_X_P (f) && !FRAME_PGTK_P (f)) return Qnil;
   bool ok;
   block_input ();
   ok = gl_transition_start (f, XFLOATINT (duration));
@@ -183,12 +196,28 @@ timer (the OpenGL backend has no display-link to drive it otherwise).  */)
   if (NILP (frame)) frame = selected_frame;
   CHECK_LIVE_FRAME (frame);
   struct frame *f = XFRAME (frame);
-  if (!FRAME_X_P (f)) return Qnil;
+  if (!FRAME_X_P (f) && !FRAME_PGTK_P (f)) return Qnil;
   bool active;
   block_input ();
   active = gl_transition_tick (f);
   unblock_input ();
   return active ? Qt : Qnil;
+}
+
+DEFUN ("gpu-transition-active-p", Fgl_transition_active_p,
+       Sgl_transition_active_p, 0, 1, 0,
+       doc: /* Return t while a buffer-switch cross-fade is running on FRAME.
+Unlike `gpu-transition-tick' this does not present a frame or advance
+the fade; it only reports its state.  FRAME defaults to the selected
+frame.  Test harnesses use it to wait for a quiescent frame before
+capturing the screen.  */)
+  (Lisp_Object frame)
+{
+  if (NILP (frame)) frame = selected_frame;
+  CHECK_LIVE_FRAME (frame);
+  struct frame *f = XFRAME (frame);
+  if (!FRAME_X_P (f) && !FRAME_PGTK_P (f)) return Qnil;
+  return gl_transition_active_p (f) ? Qt : Qnil;
 }
 
 /* -----------------------------------------------------------------------
@@ -213,7 +242,7 @@ one replaces the previous.  Returns t on success.  */)
   if (NILP (frame)) frame = selected_frame;
   CHECK_LIVE_FRAME (frame);
   struct frame *f = XFRAME (frame);
-  if (!FRAME_X_P (f)) return Qnil;
+  if (!FRAME_X_P (f) && !FRAME_PGTK_P (f)) return Qnil;
   CHECK_STRING (file);
   CHECK_FIXNUM (x); CHECK_FIXNUM (y);
   CHECK_FIXNUM (width); CHECK_FIXNUM (height);
@@ -462,7 +491,7 @@ while animations are enabled, nil otherwise.  */)
   if (NILP (frame)) frame = selected_frame;
   if (!FRAME_LIVE_P (XFRAME (frame))) return Qnil;
   struct frame *f = XFRAME (frame);
-  if (!FRAME_X_P (f)) return Qnil;
+  if (!FRAME_X_P (f) && !FRAME_PGTK_P (f)) return Qnil;
   double step = NILP (dt) ? 0.033 : XFLOATINT (dt);
   bool on;
   block_input ();
@@ -485,7 +514,7 @@ running, 4 = video open); 0 lets the timer cancel itself.  */)
   if (NILP (frame)) frame = selected_frame;
   if (!FRAME_LIVE_P (XFRAME (frame))) return make_fixnum (0);
   struct frame *f = XFRAME (frame);
-  if (!FRAME_X_P (f)) return make_fixnum (0);
+  if (!FRAME_X_P (f) && !FRAME_PGTK_P (f)) return make_fixnum (0);
   int mask;
   block_input ();
   mask = gl_pump_tick (f);
@@ -511,10 +540,12 @@ syms_of_glfns (void)
 {
   defsubr (&Sgl_backend_p);
   defsubr (&Sgl_device_name);
+  defsubr (&Sgl_display_type);
   defsubr (&Sgl_enable_for_frame);
   defsubr (&Sgl_capture_frame);
   defsubr (&Sgl_transition_start);
   defsubr (&Sgl_transition_tick);
+  defsubr (&Sgl_transition_active_p);
   defsubr (&Sgl_opengl_p);
   defsubr (&Sgl_cursor_mode);
   defsubr (&Sgl_scroll_effect);

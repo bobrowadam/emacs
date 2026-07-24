@@ -5681,10 +5681,12 @@ dnl the font backend's FreeType faces for the glyph atlas, so it only adds
 dnl EGL + OpenGL ES on top of what an X build already links.
 if test "${with_gl}" = yes; then
   if test "${opsys}" = darwin; then
-    AC_MSG_ERROR([--with-gl targets X11 systems; use --with-mtl on macOS.])
+    AC_MSG_ERROR([--with-gl targets X11/Wayland systems; use --with-mtl on macOS.])
   fi
-  if test "${HAVE_X_WINDOWS}" != yes; then
-    AC_MSG_ERROR([--with-gl requires the X11 build (do not pass --without-x).])
+  dnl Accept either an X11 build or a PGTK build (which can run on Wayland or X11
+  dnl through GDK).  A bare --without-x without --with-pgtk has neither.
+  if test "${HAVE_X_WINDOWS}" != yes && test "${HAVE_PGTK}" != yes; then
+    AC_MSG_ERROR([--with-gl requires X11 (default) or PGTK (--with-pgtk).])
   fi
   if test "${HAVE_FREETYPE}" != yes; then
     AC_MSG_ERROR([--with-gl requires the FreeType font backend.])
@@ -5712,6 +5714,20 @@ if test "${with_gl}" = yes; then
       AC_SUBST([GSTREAMER_CFLAGS])
       AC_DEFINE([HAVE_GSTREAMER], [1],
         [Define to 1 if the OpenGL backend has GStreamer inline video.])
+    fi
+    dnl PGTK builds: optional Wayland EGL window surface support.
+    dnl wayland-egl provides wl_egl_window_create/resize/destroy for
+    dnl creating EGL window surfaces directly on wl_surface handles from GDK.
+    dnl Without it the driver still works on X11-backed PGTK sessions; on a
+    dnl Wayland session present is a no-op (the FBO capture still functions).
+    if test "${HAVE_PGTK}" = yes; then
+      EMACS_CHECK_MODULES([WAYLAND_EGL], [wayland-egl wayland-client],
+        [HAVE_WAYLAND_EGL=yes
+         GL_LIBS="$GL_LIBS $WAYLAND_EGL_LIBS"
+         CFLAGS="$CFLAGS $WAYLAND_EGL_CFLAGS"
+         AC_DEFINE([HAVE_WAYLAND_EGL], [1],
+           [Define to 1 if the PGTK GPU backend has Wayland EGL window surfaces.])],
+        [HAVE_WAYLAND_EGL=no])
     fi
   fi
 fi

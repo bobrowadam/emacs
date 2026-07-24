@@ -780,6 +780,21 @@ defaults to the selected frame.  Returns t if the snapshot was taken.  */)
   return ok ? Qt : Qnil;
 }
 
+DEFUN ("gpu-transition-active-p", Fmtl_transition_active_p,
+       Smtl_transition_active_p, 0, 1, 0,
+       doc: /* Return t while a buffer-switch cross-fade is running on FRAME.
+Unlike the tick primitives this does not present a frame or advance the
+fade; it only reports its state.  FRAME defaults to the selected frame.
+Test harnesses use it to wait for a quiescent frame before capturing
+the screen.  */)
+  (Lisp_Object frame)
+{
+  if (NILP (frame)) frame = Fselected_frame ();
+  CHECK_LIVE_FRAME (frame);
+  MtlFrameData *fd = mtl_get_frame_data (XFRAME (frame));
+  return (fd && fd.transitionTexture) ? Qt : Qnil;
+}
+
 void
 syms_of_mtlfns (void)
 {
@@ -815,6 +830,7 @@ syms_of_mtlfns (void)
   defsubr (&Smtl_pump_tick);
   defsubr (&Smtl_vsync);
   defsubr (&Smtl_transition_start);
+  defsubr (&Smtl_transition_active_p);
 }
 
 #endif /* HAVE_MTL */

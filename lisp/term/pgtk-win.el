@@ -374,6 +374,30 @@ Users should not call this function; see `device-class' instead."
 (define-key special-event-map [drag-n-drop] #'pgtk-dnd-handle-drag-n-drop-event)
 (add-hook 'after-make-frame-functions #'pgtk-dnd-init-frame)
 
+;; OpenGL GPU backend (emacs-gpu).  When Emacs is built --with-gpu (which
+;; enables the OpenGL driver on PGTK, both under Wayland and under X11 via
+;; GDK) and the backend is available, load the `gpu' module and enable it
+;; on the initial frame at startup, mirroring the X11 and Metal auto-enable.
+;; Builds without the backend lack `gpu-backend-p', so this is a no-op
+;; there.  Set EMACS_GPU_DISABLE to a non-empty value to start with the
+;; stock CPU renderer instead.
+(declare-function gpu-backend-p "glfns.c")
+(declare-function gpu-enable "gpu" (&optional frame))
+(defvar gpu-enable-on-startup)
+(defun pgtk--maybe-enable-gpu ()
+  "Load and enable the OpenGL GPU backend on startup when available.
+Honors the EMACS_GPU_DISABLE environment variable as an opt-out."
+  (when (and (member (getenv "EMACS_GPU_DISABLE") '(nil ""))
+             (fboundp 'gpu-backend-p)
+             (gpu-backend-p))
+    (require 'gpu)
+    ;; Also enable graphic frames created later in this session.
+    (setq gpu-enable-on-startup t)
+    (when (display-graphic-p)
+      (ignore-errors (gpu-enable)))))
+
+(add-hook 'window-setup-hook #'pgtk--maybe-enable-gpu)
+
 (provide 'pgtk-win)
 (provide 'term/pgtk-win)
 
