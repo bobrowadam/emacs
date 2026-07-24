@@ -12,9 +12,9 @@ GNU Emacs with a GPU-accelerated display backend.
 
 | Platform | Backend | Status |
 |---|---|---|
-| macOS | Apple Metal | ✅ Supported (Apple Silicon, macOS 13+, feature-complete) |
+| macOS | Apple Metal | ✅ Supported (Apple Silicon, macOS 13+, feature-complete; the primary platform) |
 | GNU/Linux on X11 | OpenGL ES / EGL | ✅ Supported (beta) |
-| GNU/Linux on Wayland | OpenGL via XWayland | ⚠️ Partial (runs as an X11 client under XWayland; native Wayland support is planned) |
+| GNU/Linux on Wayland | OpenGL ES / EGL, native (PGTK) | ⚠️ Beta, needs testers: passes the full pixel-parity suite headless (llvmpipe), but has not been validated on real Wayland hardware yet |
 | Windows | - | ❌ Not supported |
 
 ## Demos
@@ -165,7 +165,7 @@ Text is rasterized once into a GPU glyph atlas and drawn as textured quads; scro
 
 ### Status
 
-> Status: **Beta**. The backend is fully functional on macOS (Metal) and GNU/Linux (OpenGL/X11), with comprehensive parity testing and production builds available as precompiled packages. Known limitations: Intel builds and universal binaries on macOS (currently arm64 only), and Wayland on Linux (X11 only). All Emacs display features are reproduced; the GPU path is opt-in via `--with-gpu` or runtime `EMACS_GPU_DISABLE=1`.
+> Status: **Beta**. The backend is fully functional on macOS (Metal) and GNU/Linux (OpenGL on X11, and natively on Wayland through the PGTK build), with comprehensive parity testing and production builds available as precompiled packages. **macOS is the priority platform.** Known limitations: Intel builds and universal binaries on macOS (currently arm64 only); native Wayland passes the full parity suite headless but still needs testing on real hardware. All Emacs display features are reproduced; the GPU path is opt-in via `--with-gpu` or runtime `EMACS_GPU_DISABLE=1`.
 >
 > **Note:** I am not answering issues for now. Feel free to open them as a public record (they will be read eventually), but do not expect a reply at this stage.
 
@@ -265,6 +265,8 @@ make -j$(nproc)
 ```
 
 `--with-gpu` auto-detects the platform and enables the OpenGL backend on X11 (it is the same as `--with-gl`). It requires the X11 build (do not pass `--without-x`) and the FreeType font backend; `configure` reports `HAVE_GFX_GL` and stops with a clear message if EGL, OpenGL ES or FreeType are missing.
+
+For **native Wayland**, build with PGTK instead: add `libwayland-dev` and `libwayland-egl1` to the packages above and configure with `./configure --with-pgtk --with-gpu`. The same binary also runs as an X11 client (`GDK_BACKEND=x11`). Native Wayland passes the full pixel-parity suite headless but has not been validated on real Wayland hardware yet; testers welcome.
 
 The binary is `src/emacs`. Install it under `--prefix` (default `/usr/local`) with:
 
