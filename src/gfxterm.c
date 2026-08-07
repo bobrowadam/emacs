@@ -611,12 +611,13 @@ gfx_draw_glyph_string_impl (struct glyph_string *s)
      to filling the full height.  */
   if (!s->background_filled_p)
     {
-      /* Images get the full cell height: NS fills s->height without the
-         box inset there (ns_dumpglyphs_image notes the inset "was causing
-         problems w/tabbar mode"), and the face box is drawn after the
-         image anyway.  */
-      int blw = (face && !(s->first_glyph
-                           && s->first_glyph->type == IMAGE_GLYPH))
+      /* Images and stretch glyphs get the full cell height.  NS fills
+         images without the box inset, and ns_draw_stretch_glyph_string
+         also fills the complete stretch area before drawing its box.  */
+      bool full_height_p = (s->first_glyph
+                            && (s->first_glyph->type == IMAGE_GLYPH
+                                || s->first_glyph->type == STRETCH_GLYPH));
+      int blw = (face && !full_height_p)
                 ? max (face->box_horizontal_line_width, 0) : 0;
       gfx_drv->fill_rect (f, s->x, s->y + blw,
                           s->background_width, s->height - 2 * blw, bg);
@@ -669,15 +670,14 @@ gfx_draw_glyph_string_impl (struct glyph_string *s)
       return;
     }
 
-  /* Skip stretch glyphs (background already filled).  */
-  if (s->first_glyph->type == STRETCH_GLYPH) return;
+  bool stretch_p = s->first_glyph->type == STRETCH_GLYPH;
 
   if (s->first_glyph->type == COMPOSITE_GLYPH)
     {
       /* Combining accents, ligatures, shaped scripts.  */
       gfx_draw_composite_glyph_string (s, fg);
     }
-  else
+  else if (!stretch_p)
     {
       /* Use s->font, NOT face->font: char2b holds glyph IDs encoded for
          s->font.  For a mouse-face highlight over text in a non-default
@@ -739,6 +739,15 @@ gfx_draw_glyph_string_impl (struct glyph_string *s)
         }
     }
 
+  /* NS draws a stretch glyph's box before its decorations.  This keeps
+     a thick mode-line box from leaving its alignment stretch unpainted.  */
+  if (stretch_p && face && face->box != FACE_NO_BOX)
+    gfx_draw_glyph_string_box (s);
+
+  int decoration_width = stretch_p ? s->background_width : s->width;
+  unsigned long decoration_fg = (s->hl == DRAW_CURSOR
+                                  ? gfx_drv->frame_background (f) : fg);
+
   /* Underline.  Wave FIRST: FACE_UNDERLINE_WAVE is above
      FACE_UNDERLINE_SINGLE in the enum, so the >= SINGLE branch would
      otherwise swallow it (NS checks wave first too).  */
@@ -751,10 +760,10 @@ gfx_draw_glyph_string_impl (struct glyph_string *s)
          continuous across adjacent strings, like NS's a.x = x - (x % dx)
          phase anchoring.  */
       unsigned long uc = face->underline_defaulted_p
-                         ? fg : face->underline_color;
+                         ? decoration_fg : face->underline_color;
       static const int wave[4] = {0, 1, 2, 1};
       int wy = s->ybase;
-      for (int cx = s->x; cx < s->x + s->width; cx++)
+      for (int cx = s->x; cx < s->x + decoration_width; cx++)
         gfx_drv->fill_rect (s->f, cx, wy + wave[cx & 3], 1, 1, uc);
     }
   else if (face && face->underline >= FACE_UNDERLINE_SINGLE)
@@ -764,7 +773,7 @@ gfx_draw_glyph_string_impl (struct glyph_string *s)
       s->underline_thickness = thickness;
       s->underline_position  = position;
       unsigned long uc = face->underline_defaulted_p
-                         ? fg : face->underline_color;
+                         ? decoration_fg : face->underline_color;
       if (face->underline == FACE_UNDERLINE_DOTS
           || face->underline == FACE_UNDERLINE_DASHES)
         {
@@ -775,7 +784,7 @@ gfx_draw_glyph_string_impl (struct glyph_string *s)
           int seg = (face->underline == FACE_UNDERLINE_DOTS
                      ? thickness : thickness * 3);
           int cycle = seg * 2;
-          int x0 = s->x, x1 = s->x + s->width;
+          int x0 = s->x, x1 = s->x + decoration_width;
           int cx = x0 - (((x0 % cycle) + cycle) % cycle);
           for (; cx < x1; cx += cycle)
             {
@@ -789,13 +798,13 @@ gfx_draw_glyph_string_impl (struct glyph_string *s)
       else
         {
           gfx_drv->fill_rect (f, s->x, s->ybase + position,
-                              s->width, thickness, uc);
+                              decoration_width, thickness, uc);
           /* Second line above the first for double underline.  */
           if (face->underline == FACE_UNDERLINE_DOUBLE_LINE)
             {
               int p2 = position - thickness - 1;
               gfx_drv->fill_rect (f, s->x, s->ybase + p2,
-                                  s->width, thickness, uc);
+                                  decoration_width, thickness, uc);
             }
         }
     }
@@ -805,8 +814,8 @@ gfx_draw_glyph_string_impl (struct glyph_string *s)
   if (face && face->overline_p)
     {
       unsigned long oc = face->overline_color_defaulted_p
-                         ? fg : face->overline_color;
-      gfx_drv->fill_rect (f, s->x, s->y, s->width, 1, oc);
+                         ? decoration_fg : face->overline_color;
+      gfx_drv->fill_rect (f, s->x, s->y, decoration_width, 1, oc);
     }
 
   /* Strike-through: a 1px line centered on the first glyph's body, like
@@ -818,12 +827,13 @@ gfx_draw_glyph_string_impl (struct glyph_string *s)
       int glyph_height = s->first_glyph->ascent + s->first_glyph->descent;
       int dy = lrint ((glyph_height - 1) / 2.0);
       unsigned long sc = face->strike_through_color_defaulted_p
-                         ? fg : face->strike_through_color;
-      gfx_drv->fill_rect (f, s->x, glyph_y + dy, s->width, 1, sc);
+                         ? decoration_fg : face->strike_through_color;
+      gfx_drv->fill_rect (f, s->x, glyph_y + dy, decoration_width, 1, sc);
     }
 
-  /* Face box / 3D relief (mode line, buttons, etc.).  */
-  if (face && face->box != FACE_NO_BOX)
+  /* Face box / 3D relief (mode line, buttons, etc.).  Stretch glyphs
+     were boxed before their decorations, matching the NS backend.  */
+  if (!stretch_p && face && face->box != FACE_NO_BOX)
     gfx_draw_glyph_string_box (s);
 }
 
