@@ -168,6 +168,13 @@ gfx_frame_gpu_p (struct frame *f)
   return gfx_ready (f);
 }
 
+void
+gfx_invalidate_image (struct image *img)
+{
+  if (gfx_drv && gfx_drv->invalidate_image)
+    gfx_drv->invalidate_image (img);
+}
+
 /* Open a render cycle and flush any queued scroll-bar gutter clears (they
    were queued during layout, when no cycle was open).  Every place the
    policy opens a cycle goes through here.  */
@@ -201,6 +208,30 @@ gfx_queue_clear (struct frame *f, int x, int y, int w, int h)
       st->pending_clears[st->n_pending_clears].h = h;
       st->n_pending_clears++;
     }
+}
+
+void
+gfx_invalidate_frame (struct frame *f)
+{
+  if (!FRAME_WINDOW_P (f) || !gfx_ready (f))
+    return;
+
+  struct gfx_frame_state *st = gfx_state (f);
+  bool immediate = !gfx_drv->in_cycle (f);
+  if (immediate)
+    gfx_begin_frame (f);
+
+  /* Any earlier draws are invalid once the face cache is discarded.  Do not
+     present a cycle that only contains those now-stale pixels.  */
+  st->cycle_saw_draw = false;
+  st->cycle_saw_clear = true;
+  gfx_drv->fill_rect (f, 0, 0, FRAME_PIXEL_WIDTH (f),
+                      FRAME_PIXEL_HEIGHT (f),
+                      gfx_drv->frame_background (f));
+  gfx_clear_under_internal_border (f);
+
+  if (immediate)
+    gfx_drv->end_frame (f, false);
 }
 
 /* -----------------------------------------------------------------------

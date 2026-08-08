@@ -35,6 +35,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.
 #include "lisp.h"
 #include "frame.h"
 #include "window.h"
+#include "dispextern.h"
 #include "blockinput.h"
 #include "coding.h"
 #include "glterm.h"
@@ -103,6 +104,10 @@ success.  */)
   bool ok = gl_enable_for_frame (f);
   if (ok)
     {
+      /* Images are shared by frames on the same display.  Move this frame to a
+         GPU-specific cache before reloading SVGs with GPU transparency.  */
+      image_cache_for_gpu_frame (f);
+      clear_image_cache (f, Qt);
       gl_patch_terminal_rif (f);
       gfx_warm_glyph_cache (f);
     }

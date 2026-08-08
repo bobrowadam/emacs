@@ -202,7 +202,9 @@ fragment float4 image_fragment(ImageOut in [[stage_in]],
                                 texture2d<float> img [[texture(0)]],
                                 sampler smp          [[sampler(0)]]) {
   float4 color = img.sample(smp, in.texCoord);
-  color.a *= in.alpha;
+  /* The CGContext source is premultiplied.  Scale every channel so the
+     image remains premultiplied when the caller supplies opacity.  */
+  color *= in.alpha;
   return color;
 }
 )MSL";
@@ -526,9 +528,10 @@ mtl_global_setup (void)
     pd.fragmentFunction = [g_library newFunctionWithName:@"image_fragment"];
     pd.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
     pd.colorAttachments[0].blendingEnabled = YES;
-    pd.colorAttachments[0].sourceRGBBlendFactor      = MTLBlendFactorSourceAlpha;
+    /* Image textures contain premultiplied alpha from CGContext. */
+    pd.colorAttachments[0].sourceRGBBlendFactor      = MTLBlendFactorOne;
     pd.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
-    pd.colorAttachments[0].sourceAlphaBlendFactor    = MTLBlendFactorSourceAlpha;
+    pd.colorAttachments[0].sourceAlphaBlendFactor    = MTLBlendFactorOne;
     pd.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
 
     MTLVertexDescriptor *vd = [MTLVertexDescriptor vertexDescriptor];
@@ -2547,12 +2550,14 @@ mtl_texture_for_image (struct image *img)
   return tex;
 }
 
-/* Invalidate cached texture for an image (used when image is reloaded or freed) */
-static void __attribute__((unused))
+/* Invalidate cached texture for an image before Emacs reloads or frees it. */
+static void
 mtl_invalidate_image_texture (struct image *img)
 {
-  if (g_image_texture_cache && img)
+  if (img && g_image_texture_cache)
     CFDictionaryRemoveValue (g_image_texture_cache, (const void *)img);
+  if (img && g_image_hash_cache)
+    CFDictionaryRemoveValue (g_image_hash_cache, (const void *)img);
 }
 
 /* Render the (U0,V0)-(U1,V1) subrect of a Metal RGBA texture as a quad at
@@ -2964,6 +2969,7 @@ static struct gfx_driver mtl_gfx_driver =
   .draw_color_glyph     = mtl_drv_draw_color_glyph,
   .warm_glyph_cache     = mtl_warm_glyph_cache,
   .image_texture        = mtl_drv_image_texture,
+  .invalidate_image     = mtl_invalidate_image_texture,
   .draw_texture         = mtl_drv_draw_texture,
   .draw_bitmap          = mtl_drv_draw_bitmap,
   .relief_colors        = mtl_drv_relief_colors,

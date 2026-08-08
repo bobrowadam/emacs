@@ -3370,6 +3370,10 @@ struct image_cache
      will be scaled, which is 10 or FRAME_COLUMN_WIDTH of each frame
      assigned this image cache, whichever is greater.  */
   int scaling_col_width;
+
+  /* GPU-backed frames must not share flattened image representations with
+     native frames.  */
+  bool gpu_p;
 };
 
 /* Size of bucket vector of image caches.  Should be prime.  */
@@ -3798,6 +3802,9 @@ int lookup_derived_face (struct window *, struct frame *,
                          Lisp_Object, int, bool);
 #ifdef HAVE_WINDOW_SYSTEM
 extern struct image_cache *share_image_cache (struct frame *f);
+#if defined (HAVE_MTL) || defined (HAVE_GFX_GL)
+extern void image_cache_for_gpu_frame (struct frame *f);
+#endif
 #endif /* HAVE_WINDOW_SYSTEM */
 void init_frame_faces (struct frame *);
 void free_frame_faces (struct frame *);

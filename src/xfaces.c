@@ -227,6 +227,10 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "character.h"
 #include "frame.h"
 
+#if defined (HAVE_MTL) || defined (HAVE_GFX_GL)
+#include "gfxdrv.h"
+#endif
+
 #ifdef USE_MOTIF
 #include <Xm/Xm.h>
 #include <Xm/XmStrDefs.h>
@@ -636,17 +640,21 @@ x_free_gc (struct frame *f, struct android_gc *gc)
 
 #ifdef HAVE_WINDOW_SYSTEM
 
-/* Find an existing image cache registered for a frame on F's display
-   and with a `scaling_col_width' of F's FRAME_COLUMN_WIDTH, or, in the
-   absence of an eligible image cache, allocate an image cache with the
-   same width value.  */
+/* Find an existing image cache registered for a frame on F's display,
+   with the same scaling width and GPU mode, or, in the absence of an
+   eligible image cache, allocate one with those values.  */
 
 struct image_cache *
 share_image_cache (struct frame *f)
 {
   int width = max (10, FRAME_COLUMN_WIDTH (f));
+  bool gpu_p = false;
   Lisp_Object tail, frame;
   struct image_cache *cache;
+
+#if defined (HAVE_MTL) || defined (HAVE_GFX_GL)
+  gpu_p = gfx_frame_gpu_p (f);
+#endif
 
   FOR_EACH_FRAME (tail, frame)
     {
@@ -654,14 +662,39 @@ share_image_cache (struct frame *f)
 
       if (FRAME_TERMINAL (x) == FRAME_TERMINAL (f)
 	  && FRAME_IMAGE_CACHE (x)
-	  && FRAME_IMAGE_CACHE (x)->scaling_col_width == width)
+	  && FRAME_IMAGE_CACHE (x)->scaling_col_width == width
+	  && FRAME_IMAGE_CACHE (x)->gpu_p == gpu_p)
 	return FRAME_IMAGE_CACHE (x);
     }
 
   cache = make_image_cache ();
   cache->scaling_col_width = width;
+  cache->gpu_p = gpu_p;
   return cache;
 }
+
+#if defined (HAVE_MTL) || defined (HAVE_GFX_GL)
+
+void
+image_cache_for_gpu_frame (struct frame *f)
+{
+  struct image_cache *cache = FRAME_IMAGE_CACHE (f);
+
+  if (!cache || cache->gpu_p)
+    return;
+
+  if (cache->refcount == 1)
+    {
+      cache->gpu_p = true;
+      return;
+    }
+
+  --cache->refcount;
+  FRAME_IMAGE_CACHE (f) = share_image_cache (f);
+  ++FRAME_IMAGE_CACHE (f)->refcount;
+}
+
+#endif
 
 #endif /* HAVE_WINDOW_SYSTEM */
 
@@ -4917,6 +4950,9 @@ free_realized_faces (struct face_cache *c)
       if (WINDOWP (f->root_window))
 	{
 	  clear_current_matrices (f);
+#if defined (HAVE_MTL) || defined (HAVE_GFX_GL)
+	  gfx_invalidate_frame (f);
+#endif
 	  fset_redisplay (f);
 	}
 

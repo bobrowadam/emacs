@@ -2460,7 +2460,7 @@ gl_img_slot (struct image *img)
       if (g_imgs[i].img == img) return &g_imgs[i];
       if (!free_slot && g_imgs[i].img == NULL) free_slot = &g_imgs[i];
     }
-  return free_slot;
+  return free_slot ? free_slot : &g_imgs[0];
 }
 
 /* Rasterize IMG through cairo at its display size (honoring the pattern
@@ -2484,6 +2484,11 @@ gl_drv_image_texture (struct frame *f, struct image *img, int *w, int *h)
   int H = img->height > 0 ? img->height : 1;
 
   struct gl_img_entry *e = gl_img_slot (img);
+  if (e && e->img != img && e->tex)
+    {
+      glDeleteTextures (1, &e->tex);
+      memset (e, 0, sizeof *e);
+    }
   if (e && e->img == img && e->hash == img->hash
       && e->tex && e->w == W && e->h == H)
     {
@@ -2541,6 +2546,26 @@ gl_drv_image_texture (struct frame *f, struct image *img, int *w, int *h)
   if (w) *w = W;
   if (h) *h = H;
   return (void *) (uintptr_t) tex;
+}
+
+static void
+gl_drv_invalidate_image (struct image *img)
+{
+  if (!img) return;
+
+  for (int i = 0; i < GL_IMG_CAP; i++)
+    if (g_imgs[i].img == img)
+      {
+        if (g_imgs[i].tex)
+          {
+            if (!g_bound_known)
+              gl_bind_surface (EGL_NO_SURFACE);
+            if (g_bound_known)
+              glDeleteTextures (1, &g_imgs[i].tex);
+          }
+        memset (&g_imgs[i], 0, sizeof g_imgs[i]);
+        return;
+      }
 }
 
 static void
@@ -2783,6 +2808,7 @@ static struct gfx_driver gl_gfx_driver =
   .draw_color_glyph     = gl_drv_draw_color_glyph,
   .warm_glyph_cache     = gl_drv_warm_glyph_cache,
   .image_texture        = gl_drv_image_texture,
+  .invalidate_image     = gl_drv_invalidate_image,
   .draw_texture         = gl_drv_draw_texture,
   .draw_bitmap          = gl_drv_draw_bitmap,
   .relief_colors        = gl_drv_relief_colors,

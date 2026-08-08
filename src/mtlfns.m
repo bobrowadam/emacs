@@ -122,6 +122,11 @@ FRAME must be a live graphical NS frame.  */)
   if (!fd)
     error ("gpu-enable-for-frame: failed to set up Metal layer (Metal not available?)");
 
+  /* Images are shared by frames on the same display.  Move this frame to a
+     GPU-specific cache before reloading SVGs with GPU transparency.  */
+  image_cache_for_gpu_frame (f);
+  clear_image_cache (f, Qt);
+
   /* Replace the terminal's redisplay_interface (rif) with our Metal rif.
      This redirects all rendering calls (draw_glyph_string, draw_window_cursor,
      etc.) from NS CoreGraphics to our Metal pipeline.

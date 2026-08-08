@@ -139,6 +139,7 @@ struct gfx_driver
      pixmap.  */
   void *(*image_texture) (struct frame *f, struct image *img,
                           int *w, int *h);
+  void (*invalidate_image) (struct image *img);
   void (*draw_texture) (struct frame *f, void *texture,
                         float x, float y, float w, float h,
                         float u0, float v0, float u1, float v1,
@@ -205,6 +206,10 @@ extern void gfx_clear_frame_area (struct frame *f, int x, int y,
 extern void gfx_clear_under_internal_border (struct frame *f);
 extern void gfx_flush_display (struct frame *f);
 extern bool gfx_frame_gpu_p (struct frame *f);
+extern void gfx_invalidate_image (struct image *img);
+/* Clear the persistent GPU backing texture when a frame's realized face
+   cache has been discarded.  */
+extern void gfx_invalidate_frame (struct frame *f);
 extern void gfx_update_begin (struct frame *f);
 extern void gfx_update_end (struct frame *f);
 extern void gfx_frame_up_to_date (struct frame *f);

@@ -52,6 +52,10 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "termhooks.h"
 #include "font.h"
 
+#if defined (HAVE_MTL) || defined (HAVE_GFX_GL)
+#include "gfxdrv.h"
+#endif
+
 #ifdef HAVE_SYS_STAT_H
 #include <sys/stat.h>
 #endif /* HAVE_SYS_STAT_H */
@@ -2077,6 +2081,13 @@ image_background_transparent (struct image *img, struct frame *f,
 static void
 image_clear_image_1 (struct frame *f, struct image *img, int flags)
 {
+#if defined (HAVE_MTL) || defined (HAVE_GFX_GL)
+  if (img->pixmap != NO_PIXMAP
+      && (flags & (CLEAR_IMAGE_PIXMAP | CLEAR_IMAGE_MASK
+                   | CLEAR_IMAGE_COLORS)))
+    gfx_invalidate_image (img);
+#endif
+
   if (flags & CLEAR_IMAGE_PIXMAP)
     {
       if (img->pixmap)
@@ -2205,8 +2216,9 @@ make_image_cache (void)
   c->used = c->refcount = 0;
   c->images = xmalloc (c->size * sizeof *c->images);
   c->buckets = xzalloc (IMAGE_CACHE_BUCKETS_SIZE * sizeof *c->buckets);
-  /* This value should never be encountered.  */
+  /* These values should never be encountered.  */
   c->scaling_col_width = -1;
+  c->gpu_p = false;
   return c;
 }
 
@@ -12141,6 +12153,8 @@ svg_load_image (struct frame *f, struct image *img, char *contents,
   bool empty_errmsg = true;
   const char *errmsg = "";
   ptrdiff_t errlen = 0;
+  bool background_p = false;
+  bool preserve_alpha = false;
 
 #if ! GLIB_CHECK_VERSION (2, 36, 0)
   /* g_type_init is a glib function that must be called prior to
@@ -12350,19 +12364,17 @@ svg_load_image (struct frame *f, struct image *img, char *contents,
     Lisp_Object encoded_contents
       = Fbase64_encode_string (make_unibyte_string (contents, size), Qt);
 
-    /* The wrapper sets the foreground color, width and height, and
-       viewBox must contain the dimensions of the original image.  It
-       also draws a rectangle over the whole space, set to the
-       background color, before including the original image.  This
-       acts to set the background color, instead of leaving it
-       transparent.  */
+    /* The wrapper sets the foreground color and dimensions, and
+       viewBox must contain the dimensions of the original image.  A
+       background rectangle is added when requested by the image spec;
+       GPU-backed frames otherwise preserve the SVG's native transparency.  */
     static char const wrapper[] =
       "<svg xmlns:xlink=\"http://www.w3.org/1999/xlink\" "
       "xmlns:xi=\"http://www.w3.org/2001/XInclude\" "
       "style=\"color: #%06X;\" "
       "width=\"%d\" height=\"%d\" preserveAspectRatio=\"none\" "
       "viewBox=\"0 0 %f %f\">"
-      "<rect width=\"100%%\" height=\"100%%\" fill=\"#%06X\"/>"
+      "%s"
       "<xi:include href=\"data:image/svg+xml;base64,%s\"></xi:include>"
       "</svg>";
 
@@ -12370,12 +12382,16 @@ svg_load_image (struct frame *f, struct image *img, char *contents,
     if (!NILP (value))
       foreground = image_alloc_image_color (f, img, value, img->face_foreground);
     value = image_spec_value (img->spec, QCbackground, NULL);
-    if (!NILP (value))
+    background_p = !NILP (value);
+    if (background_p)
       {
         background = image_alloc_image_color (f, img, value, img->face_background);
         img->background = background;
         img->background_valid = 1;
       }
+#if defined (HAVE_MTL) || (defined (HAVE_GFX_GL) && defined (USE_CAIRO))
+    preserve_alpha = !background_p && gfx_frame_gpu_p (f);
+#endif
 
 #if HAVE_NTGUI
     /* Windows stores the image colors in BGR format, and SVG expects
@@ -12390,10 +12406,17 @@ svg_load_image (struct frame *f, struct image *img, char *contents,
 #endif
 
     unsigned int color = foreground & 0xFFFFFF, fill = background & 0xFFFFFF;
+    Lisp_Object background_markup;
+    if (preserve_alpha)
+      background_markup = build_string ("");
+    else
+      background_markup
+        = make_formatted_string ("<rect width=\"100%%\" height=\"100%%\" "
+                                 "fill=\"#%06X\"/>", fill);
     wrapped_contents
       = make_formatted_string (wrapper, color, width, height,
 			       viewbox_width, viewbox_height,
-			       fill, SSDATA (encoded_contents));
+			       SSDATA (background_markup), SSDATA (encoded_contents));
   }
 
   /* Now we parse the wrapped version.  */
@@ -12475,18 +12498,31 @@ svg_load_image (struct frame *f, struct image *img, char *contents,
   {
     /* Try to create a x pixmap to hold the svg pixmap.  */
     Emacs_Pix_Container ximg;
+#if defined (HAVE_GFX_GL) && defined (USE_CAIRO)
+    Emacs_Pix_Container mask_img = NULL;
+#endif
     if (!image_create_x_image_and_pixmap (f, img, width, height, 0, &ximg, 0))
       {
 	g_object_unref (pixbuf);
 	return false;
       }
+#if defined (HAVE_GFX_GL) && defined (USE_CAIRO)
+    if (preserve_alpha
+        && !image_create_x_image_and_pixmap (f, img, width, height, 1,
+                                             &mask_img, 1))
+      {
+        image_clear_image_1 (f, img, CLEAR_IMAGE_PIXMAP);
+	g_object_unref (pixbuf);
+	return false;
+      }
+#endif
 
     init_color_table ();
 
-    /* This loop handles opacity values, since Emacs assumes
-       non-transparent images.  Each pixel must be "flattened" by
-       calculating the resulting color, given the transparency of the
-       pixel, and the image background color.  */
+    /* Non-GPU rendering receives the opaque SVG wrapper above.  GPU
+       rendering instead retains opacity here: NS stores RGB plus alpha
+       for Core Graphics to premultiply on rasterization, while Cairo
+       combines RGB with an alpha mask.  */
     for (int y = 0; y < height; ++y)
       {
 	for (int x = 0; x < width; ++x)
@@ -12494,11 +12530,22 @@ svg_load_image (struct frame *f, struct image *img, char *contents,
 	    int red     = *pixels++;
 	    int green   = *pixels++;
 	    int blue    = *pixels++;
+#if defined (HAVE_MTL) || (defined (HAVE_GFX_GL) && defined (USE_CAIRO))
+            int alpha = *pixels++;
+#else
+            pixels++;
+#endif
 
-            /* Skip opacity.  */
-	    pixels++;
-
-	    PUT_PIXEL (ximg, x, y, lookup_rgb_color (f, red << 8, green << 8, blue << 8));
+	    PUT_PIXEL (ximg, x, y,
+                       lookup_rgb_color (f, red << 8, green << 8, blue << 8));
+#ifdef HAVE_MTL
+	    if (preserve_alpha)
+	      ns_set_alpha (ximg, x, y, alpha);
+#endif
+#if defined (HAVE_GFX_GL) && defined (USE_CAIRO)
+            if (mask_img)
+              PUT_PIXEL (mask_img, x, y, alpha);
+#endif
 	  }
 
 	pixels += rowstride - 4 * width;
@@ -12521,6 +12568,10 @@ svg_load_image (struct frame *f, struct image *img, char *contents,
 
     /* Put ximg into the image.  */
     image_put_x_image (f, img, ximg, 0);
+#if defined (HAVE_GFX_GL) && defined (USE_CAIRO)
+    if (mask_img)
+      image_put_x_image (f, img, mask_img, 1);
+#endif
   }
 
   eassume (err == NULL);
