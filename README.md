@@ -336,6 +336,10 @@ A companion repository contains the manual visual test harness: one subdirectory
 
 **[emacs-gpu-qa](https://git.andros.dev/andros/emacs-gpu-qa)**
 
+## Contributing
+
+Contributions are welcome! Please see the [contribution guidelines](https://git.andros.dev/andros/contribute) for instructions on how to submit issues or pull requests.
+
 ## License
 
 GNU General Public License v3 or later, same as GNU Emacs.
