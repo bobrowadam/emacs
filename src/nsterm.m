@@ -6049,7 +6049,9 @@ ns_term_init (Lisp_Object display_name)
 
   delete_keyboard_wait_descriptor (0);
 
-  ns_app_name = [[NSProcessInfo processInfo] processName];
+  ns_app_name = [[NSBundle mainBundle] objectForInfoDictionaryKey: @"CFBundleDisplayName"];
+  if (!ns_app_name)
+    ns_app_name = [[NSProcessInfo processInfo] processName];
 
   /* Set up macOS app menu */
 
@@ -6062,12 +6064,12 @@ ns_term_init (Lisp_Object display_name)
     /* set up the application menu */
     svcsMenu = [[EmacsMenu alloc] initWithTitle: @"Services"];
     [svcsMenu setAutoenablesItems: NO];
-    appMenu = [[EmacsMenu alloc] initWithTitle: @"Emacs"];
+    appMenu = [[EmacsMenu alloc] initWithTitle: ns_app_name];
     [appMenu setAutoenablesItems: NO];
     mainMenu = [[EmacsMenu alloc] initWithTitle: @""];
     dockMenu = [[EmacsMenu alloc] initWithTitle: @""];
 
-    [appMenu insertItemWithTitle: @"About Emacs"
+    [appMenu insertItemWithTitle: [NSString stringWithFormat: @"About %@", ns_app_name]
                           action: @selector (orderFrontStandardAboutPanel:)
                    keyEquivalent: @""
                          atIndex: 0];
@@ -6083,7 +6085,7 @@ ns_term_init (Lisp_Object display_name)
                                 atIndex: 4];
     [appMenu setSubmenu: svcsMenu forItem: item];
     [appMenu insertItem: [NSMenuItem separatorItem] atIndex: 5];
-    [appMenu insertItemWithTitle: @"Hide Emacs"
+    [appMenu insertItemWithTitle: [NSString stringWithFormat: @"Hide %@", ns_app_name]
                           action: @selector (hide:)
                    keyEquivalent: @"h"
                          atIndex: 6];
@@ -6093,7 +6095,7 @@ ns_term_init (Lisp_Object display_name)
                          atIndex: 7];
     [item setKeyEquivalentModifierMask: NSEventModifierFlagCommand | NSEventModifierFlagOption];
     [appMenu insertItem: [NSMenuItem separatorItem] atIndex: 8];
-    [appMenu insertItemWithTitle: @"Quit Emacs"
+    [appMenu insertItemWithTitle: [NSString stringWithFormat: @"Quit %@", ns_app_name]
                           action: @selector (terminate:)
                    keyEquivalent: @"q"
                          atIndex: 9];
