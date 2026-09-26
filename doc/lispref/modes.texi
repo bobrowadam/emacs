@@ -2284,9 +2284,28 @@ The value of this variable is a mode line construct that controls the
 contents of the mode-line.  It is always buffer-local in all buffers.
 
 If you set this variable to @code{nil} in a buffer, that buffer does not
-have a mode line.  (A window that is just one line tall also does not
-display a mode line.)
+have a mode line unless @code{mode-line-rows-format} specifies two rows.
+(A window that is just one line tall also does not display a mode line.)
 @end defopt
+
+@defvar mode-line-rows-format
+When non-@code{nil}, this buffer-local variable specifies a list of
+exactly two mode-line constructs, displayed as separate rows from top
+to bottom.  Each construct follows the same rules as
+@code{mode-line-format}.  For example:
+
+@example
+(setq-local mode-line-rows-format
+            '((" " mode-line-buffer-identification)
+              (" " mode-name " " mode-line-position)))
+@end example
+
+A @code{nil} value uses the usual single-row @code{mode-line-format}.
+A non-@code{nil} @code{mode-line-format} window parameter overrides
+@code{mode-line-rows-format} for that window.  If the window is too
+short for two mode-line rows and a text row, Emacs uses the usual
+single-row format instead.
+@end defvar
 
   The default value of @code{mode-line-format} is designed to use the
 values of other variables such as @code{mode-line-position} and

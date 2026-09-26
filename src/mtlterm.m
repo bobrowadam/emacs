@@ -828,6 +828,7 @@ static const char mtl_frame_key;
 MtlFrameData *
 mtl_get_frame_data (struct frame *f)
 {
+  if (!FRAME_NS_P (f)) return NULL;
   NSView *view = FRAME_NS_VIEW (f);
   if (!view) return NULL;
   return (__bridge MtlFrameData *)objc_getAssociatedObject (

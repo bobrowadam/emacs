@@ -798,6 +798,9 @@ struct glyph_matrix
      with the smallest possible character height.  */
   int nrows;
 
+  /* Number of rows reserved for the mode line at the matrix bottom.  */
+  int mode_line_rows;
+
   /* Origin within the frame matrix if this is a window matrix on a
      frame having a frame matrix.  Both values are zero for
      window-based redisplay.  */
@@ -1159,6 +1162,9 @@ struct glyph_row *matrix_row (struct glyph_matrix *, int);
 #define MATRIX_MODE_LINE_ROW(MATRIX) \
      ((MATRIX)->rows + (MATRIX)->nrows - 1)
 
+#define MATRIX_FIRST_MODE_LINE_ROW(MATRIX) \
+     (MATRIX_MODE_LINE_ROW (MATRIX) - (MATRIX)->mode_line_rows + 1)
+
 /* Return a pointer to the row reserved for the tab line in MATRIX.
    This is always the first row in MATRIX because that's the only
    way that works in frame-based redisplay.  */
@@ -1219,7 +1225,7 @@ struct glyph_row *matrix_row (struct glyph_matrix *, int);
 #define MATRIX_BOTTOM_TEXT_ROW(MATRIX, W)		\
      ((MATRIX)->rows					\
       + (MATRIX)->nrows					\
-      - (window_wants_mode_line (W) ? 1 : 0))
+      - (window_wants_mode_line (W) ? (MATRIX)->mode_line_rows : 0))
 
 /* Non-zero if the face of the last glyph in ROW's text area has
    to be drawn to the end of the text area.  */
@@ -1507,7 +1513,9 @@ struct glyph_string
 
 #define MATRIX_MODE_LINE_HEIGHT(MATRIX)		\
      ((MATRIX) && (MATRIX)->rows		\
-      ? MATRIX_MODE_LINE_ROW (MATRIX)->height	\
+      ? (MATRIX_MODE_LINE_ROW (MATRIX)->height	\
+	 + ((MATRIX)->mode_line_rows == 2	\
+	    ? MATRIX_FIRST_MODE_LINE_ROW (MATRIX)->height : 0)) \
       : 0)
 
 /* Return the height of the header line in glyph matrix MATRIX, or zero
@@ -1562,12 +1570,18 @@ struct glyph_string
 
 #define CURRENT_MODE_LINE_HEIGHT(W)					\
   ((W)->mode_line_height >= 0						\
+   && (W)->current_matrix						\
+   && (W)->mode_line_height_rows == window_mode_line_rows (W) \
    ? (W)->mode_line_height						\
-   : ((W)->mode_line_height						\
-      = (MATRIX_MODE_LINE_HEIGHT ((W)->current_matrix)			\
+   : ((W)->mode_line_height_rows = window_mode_line_rows (W), \
+      (W)->mode_line_height						\
+      = ((W)->current_matrix						\
+	 && (W)->current_matrix->mode_line_rows == window_mode_line_rows (W) \
+	 && MATRIX_MODE_LINE_HEIGHT ((W)->current_matrix)		\
 	 ? MATRIX_MODE_LINE_HEIGHT ((W)->current_matrix)		\
 	 : estimate_mode_line_height					\
-	 (XFRAME ((W)->frame), CURRENT_MODE_LINE_ACTIVE_FACE_ID (W)))))
+	 (XFRAME ((W)->frame), CURRENT_MODE_LINE_ACTIVE_FACE_ID (W)) \
+	 * window_mode_line_rows (W))))
 
 /* Return the desired face id for the header line of a window, depending
    on whether the window is selected or not, or if the window is the

@@ -350,22 +350,22 @@ Must be set to a symbol.  Acceptable values are:
   :group 'mode-line
   :version "30.1")
 
+(defvar mode-line--current-row-format nil
+  "Format of the explicit mode-line row currently being displayed.")
+
 (defun mode--line-format-right-align ()
   "Right-align all following mode-line constructs.
 
-When the symbol `mode-line-format-right-align' appears in
-`mode-line-format', return a string of one space, with a display
-property to make it appear long enough to align anything after
-that symbol to the right of the rendered mode line.  Exactly how
-far to the right is controlled by `mode-line-right-align-edge'.
+When `mode-line-format-right-align' appears in `mode-line-format'
+or a row of `mode-line-rows-format', return a space with a display
+property that aligns subsequent constructs to the right.
+`mode-line-right-align-edge' controls the alignment edge.
 
-It is important that the symbol `mode-line-format-right-align' be
-included in `mode-line-format' (and not another similar construct
-such as `(:eval (mode-line-format-right-align)').  This is because
-the symbol `mode-line-format-right-align' is processed by
-`format-mode-line' as a variable."
+Include the symbol directly in the format, not inside an `:eval'
+construct.  `format-mode-line' processes it as a variable."
   (let* ((rest (cdr (memq 'mode-line-format-right-align
-			  mode-line-format)))
+			  (or mode-line--current-row-format
+			      mode-line-format))))
 	 (rest-str (format-mode-line `("" ,@rest)))
 	 (rest-width (progn
                        (add-face-text-property
@@ -395,6 +395,8 @@ the symbol `mode-line-format-right-align' is processed by
                                             (or (cadr (window-fringes)) 0))
                                            (_ 0))
                                          rest-width)))))))
+
+(put 'mode-line-rows-format 'risky-local-variable t)
 
 (defvar mode-line-format-right-align '(:eval (mode--line-format-right-align))
   "Mode line construct to right align all following constructs.")

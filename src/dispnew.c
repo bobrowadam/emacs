@@ -367,6 +367,8 @@ adjust_glyph_matrix (struct window *w, struct glyph_matrix *matrix, int x, int y
   bool tab_line_p = 0;
   bool header_line_changed_p = 0;
   bool header_line_p = 0;
+  int mode_line_rows = 1;
+  bool mode_line_rows_changed_p = 0;
   int left = -1, right = -1;
   int window_width = -1, window_height = -1;
 
@@ -381,9 +383,24 @@ adjust_glyph_matrix (struct window *w, struct glyph_matrix *matrix, int x, int y
 
       header_line_p = window_wants_header_line (w);
       header_line_changed_p = header_line_p != matrix->header_line_p;
+
+      mode_line_rows = window_mode_line_rows (w);
+      mode_line_rows_changed_p = mode_line_rows != matrix->mode_line_rows;
     }
   matrix->tab_line_p = tab_line_p;
   matrix->header_line_p = header_line_p;
+  if (w && matrix == w->current_matrix && mode_line_rows_changed_p)
+    {
+      w->mode_line_height = -1;
+      if (matrix->rows && matrix->nrows > 0)
+	for (int i = 0; i < matrix->mode_line_rows; ++i)
+	  {
+	    struct glyph_row *row = MATRIX_MODE_LINE_ROW (matrix) - i;
+	    row->mode_line_p = false;
+	    row->height = 0;
+	  }
+    }
+  matrix->mode_line_rows = mode_line_rows;
 
   /* If POOL is null, MATRIX is a window matrix for window-based redisplay.
      Do nothing if MATRIX' size, position, vscroll, and marginal areas
@@ -402,6 +419,7 @@ adjust_glyph_matrix (struct window *w, struct glyph_matrix *matrix, int x, int y
 	  && !XFRAME (w->frame)->fonts_changed
 	  && !tab_line_changed_p
 	  && !header_line_changed_p
+	  && !mode_line_rows_changed_p
 	  && matrix->window_pixel_left == WINDOW_LEFT_PIXEL_EDGE (w)
 	  && matrix->window_pixel_top == WINDOW_TOP_PIXEL_EDGE (w)
 	  && matrix->window_height == window_height
@@ -450,7 +468,7 @@ adjust_glyph_matrix (struct window *w, struct glyph_matrix *matrix, int x, int y
 	       + x);
 
 	  if (w == NULL
-	      || (row == matrix->rows + dim.height - 1
+	      || (row >= matrix->rows + dim.height - mode_line_rows
 		  && window_wants_mode_line (w))
 	      || (row == matrix->rows && matrix->tab_line_p)
 	      || (row == matrix->rows
@@ -493,6 +511,7 @@ adjust_glyph_matrix (struct window *w, struct glyph_matrix *matrix, int x, int y
 	  || new_rows
 	  || tab_line_changed_p
 	  || header_line_changed_p
+	  || mode_line_rows_changed_p
 	  || marginal_areas_changed_p)
 	{
 	  struct glyph_row *row = matrix->rows;
@@ -512,9 +531,10 @@ adjust_glyph_matrix (struct window *w, struct glyph_matrix *matrix, int x, int y
 			  dim.width * sizeof (struct glyph));
 		}
 
-	      if ((row == matrix->rows + dim.height - 1
-		   /* The mode line, if displayed, never has marginal
-                      areas.  */
+	      if ((row >= matrix->rows + dim.height - mode_line_rows
+		   && row < matrix->rows + dim.height
+		   /* If no mode line is displayed, its reserved rows have
+		      no marginal areas.  */
 		   && !(w && window_wants_mode_line (w)))
 		  || (row == matrix->rows && matrix->tab_line_p)
 		  || (row == matrix->rows
@@ -546,13 +566,14 @@ adjust_glyph_matrix (struct window *w, struct glyph_matrix *matrix, int x, int y
       matrix->left_margin_glyphs = left;
       matrix->right_margin_glyphs = right;
 
-      /* If we are resizing a window, make sure the previous mode-line
-	 row of the window's current matrix is no longer marked as such.  */
+      /* On resize, clear the old mode-line band before its rows can
+	 become text rows.  */
       if (w && matrix == w->current_matrix
 	  && matrix->nrows > 0
 	  && dim.height != matrix->nrows
 	  && matrix->nrows <= matrix->rows_allocated)
-	MATRIX_MODE_LINE_ROW (matrix)->mode_line_p = false;
+	for (int i = 0; i < matrix->mode_line_rows; ++i)
+	  (MATRIX_MODE_LINE_ROW (matrix) - i)->mode_line_p = false;
     }
 
   /* Number of rows to be used by MATRIX.  */
@@ -576,6 +597,7 @@ adjust_glyph_matrix (struct window *w, struct glyph_matrix *matrix, int x, int y
 	  if (!marginal_areas_changed_p
 	      && !tab_line_changed_p
 	      && !header_line_changed_p
+	      && !mode_line_rows_changed_p
 	      && new_rows == 0
 	      && dim.width == matrix->matrix_w
 	      && matrix->window_pixel_left == WINDOW_LEFT_PIXEL_EDGE (w)
@@ -1695,6 +1717,7 @@ allocate_matrices_for_frame_redisplay (Lisp_Object window, int x, int y,
 	      || y != w->desired_matrix->matrix_y
 	      || dim.width != w->desired_matrix->matrix_w
 	      || dim.height != w->desired_matrix->matrix_h
+	      || window_mode_line_rows (w) != w->desired_matrix->mode_line_rows
 	      || (margin_glyphs_to_reserve (w, dim.width,
 					    w->left_margin_cols)
 		  != w->desired_matrix->left_margin_glyphs)
@@ -1772,8 +1795,8 @@ required_matrix_height (struct window *w)
 	      /* One partially visible line at the top and
 		 bottom of the window.  */
 	      + 2
-	      /* 3 for tab, header and mode line.  */
-	      + 3);
+	      /* Two mode-line rows, plus tab and header lines.  */
+	      + 3 + (window_mode_line_rows (w) - 1));
     }
 #endif /* HAVE_WINDOW_SYSTEM */
 
@@ -4449,7 +4472,7 @@ update_window (struct window *w)
 #endif
   yb = window_text_bottom_y (w);
   row = MATRIX_ROW (desired_matrix, 0);
-  end = MATRIX_MODE_LINE_ROW (desired_matrix);
+  end = MATRIX_FIRST_MODE_LINE_ROW (desired_matrix);
 
   /* Take note of the tab line, if there is one.  We will
      update it below, after updating all of the window's lines.  */
@@ -4472,14 +4495,18 @@ update_window (struct window *w)
     header_line_row = NULL;
 
   /* Update the mode line, if necessary.  */
-  mode_line_row = MATRIX_MODE_LINE_ROW (desired_matrix);
-  if (mode_line_row->mode_line_p && mode_line_row->enabled_p)
-    {
-      mode_line_row->y = yb + WINDOW_SCROLL_BAR_AREA_HEIGHT (w);
-      update_window_line (w, MATRIX_ROW_VPOS (mode_line_row,
-					      desired_matrix),
-			  &mouse_face_overwritten_p);
-    }
+  for (mode_line_row = end;
+       mode_line_row <= MATRIX_MODE_LINE_ROW (desired_matrix);
+       ++mode_line_row)
+    if (mode_line_row->mode_line_p && mode_line_row->enabled_p)
+      {
+	mode_line_row->y = yb + WINDOW_SCROLL_BAR_AREA_HEIGHT (w);
+	if (mode_line_row != end)
+	  mode_line_row->y += end->height;
+	update_window_line (w, MATRIX_ROW_VPOS (mode_line_row,
+						 desired_matrix),
+			    &mouse_face_overwritten_p);
+      }
 
   /* Find first enabled row.  Optimizations in redisplay_internal
      may lead to an update with only one row enabled.  There may
@@ -4527,7 +4554,9 @@ update_window (struct window *w)
 	   in the first redisplay.  */
 	if (MATRIX_ROW_BOTTOM_Y (row) >= yb)
 	  {
-	    for (i = vpos + 1; i < w->current_matrix->nrows - 1; ++i)
+	    for (i = vpos + 1;
+		 i < w->current_matrix->nrows - desired_matrix->mode_line_rows;
+		 ++i)
 	      SET_MATRIX_ROW_ENABLED_P (w->current_matrix, i, false);
 	    invisible_rows_marked = true;
 	  }
@@ -4538,8 +4567,9 @@ update_window (struct window *w)
      that if and when the mode line is displayed again, it will be
      cleared and completely redrawn.  */
   if (!window_wants_mode_line (w))
-    SET_MATRIX_ROW_ENABLED_P (w->current_matrix,
-			      w->current_matrix->nrows - 1, false);
+    for (int i = 0; i < w->current_matrix->mode_line_rows; ++i)
+      SET_MATRIX_ROW_ENABLED_P (w->current_matrix,
+				w->current_matrix->nrows - 1 - i, false);
 
   if (!invisible_rows_marked)
     {
@@ -4549,13 +4579,13 @@ update_window (struct window *w)
 	 current matrix, in which case the above loop doesn't get
 	 to examine the last visible row.  */
       int i;
-      for (i = 0; i < w->current_matrix->nrows - 1; ++i)
+      for (i = 0; i < w->current_matrix->nrows - w->current_matrix->mode_line_rows; ++i)
 	{
 	  struct glyph_row *current_row = MATRIX_ROW (w->current_matrix, i);
 	  if (current_row->enabled_p
 	      && MATRIX_ROW_BOTTOM_Y (current_row) >= yb)
 	    {
-	      for (++i ; i < w->current_matrix->nrows - 1; ++i)
+	      for (++i ; i < w->current_matrix->nrows - w->current_matrix->mode_line_rows; ++i)
 		SET_MATRIX_ROW_ENABLED_P (w->current_matrix, i, false);
 	    }
 	}
@@ -6451,7 +6481,12 @@ mode_line_string (struct window *w, enum window_part part,
   Lisp_Object string = Qnil;
 
   if (part == ON_MODE_LINE)
-    row = MATRIX_MODE_LINE_ROW (w->current_matrix);
+    {
+      row = MATRIX_FIRST_MODE_LINE_ROW (w->current_matrix);
+      if (row != MATRIX_MODE_LINE_ROW (w->current_matrix)
+	  && *y >= row->y + row->height)
+	++row;
+    }
   else if (part == ON_TAB_LINE)
     row = MATRIX_TAB_LINE_ROW (w->current_matrix);
   else

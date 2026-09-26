@@ -1167,6 +1167,8 @@ static bool should_produce_line_number (struct it *);
 static bool display_line (struct it *, int);
 static int display_mode_lines (struct window *);
 static int display_mode_line (struct window *, enum face_id, Lisp_Object);
+static int display_window_mode_line (struct window *, enum face_id,
+				     Lisp_Object);
 static int display_mode_element (struct it *, int, int, int, Lisp_Object,
 				 Lisp_Object, bool);
 static int store_mode_line_string (const char *, Lisp_Object, bool, int, int,
@@ -1322,19 +1324,22 @@ window_box_height (struct window *w)
 
   if (window_wants_mode_line (w))
     {
-      if (w->mode_line_height >= 0)
+      if (w->mode_line_height >= 0
+	  && w->mode_line_height_rows == window_mode_line_rows (w))
 	height -= w->mode_line_height;
       else
 	{
 	  struct glyph_row *ml_row
 	    = (w->current_matrix && w->current_matrix->rows
+	       && w->current_matrix->mode_line_rows == window_mode_line_rows (w)
 	       ? MATRIX_MODE_LINE_ROW (w->current_matrix)
 	       : 0);
 	  if (ml_row && ml_row->mode_line_p)
-	    height -= ml_row->height;
+	    height -= MATRIX_MODE_LINE_HEIGHT (w->current_matrix);
 	  else
-	    height -= estimate_mode_line_height
-	      (f, CURRENT_MODE_LINE_ACTIVE_FACE_ID (w));
+	    height -= (estimate_mode_line_height
+		       (f, CURRENT_MODE_LINE_ACTIVE_FACE_ID (w))
+		       * window_mode_line_rows (w));
 	}
     }
 
@@ -1730,6 +1735,7 @@ pos_visible_p (struct window *w, ptrdiff_t charpos, int *x, int *y,
      selected/nonselected window dance during mode-line display, and
      we could infloop.  Avoid that.  */
   int prev_mode_line_height = w->mode_line_height;
+  int prev_mode_line_height_rows = w->mode_line_height_rows;
   int prev_header_line_height = w->header_line_height;
   int prev_tab_line_height = w->tab_line_height;
   /* Compute exact mode line heights.  */
@@ -1739,10 +1745,9 @@ pos_visible_p (struct window *w, ptrdiff_t charpos, int *x, int *y,
 	= window_parameter (w, Qmode_line_format);
 
       w->mode_line_height
-	= display_mode_line (w, CURRENT_MODE_LINE_ACTIVE_FACE_ID (w),
-			     NILP (window_mode_line_format)
-			     ? BVAR (current_buffer, mode_line_format)
-			     : window_mode_line_format);
+	= display_window_mode_line (w, CURRENT_MODE_LINE_ACTIVE_FACE_ID (w),
+				    window_mode_line_format);
+      w->mode_line_height_rows = window_mode_line_rows (w);
     }
 
   if (window_wants_tab_line (w))
@@ -2143,6 +2148,7 @@ pos_visible_p (struct window *w, ptrdiff_t charpos, int *x, int *y,
 
   /* Restore potentially overwritten values.  */
   w->mode_line_height = prev_mode_line_height;
+  w->mode_line_height_rows = prev_mode_line_height_rows;
   w->header_line_height = prev_header_line_height;
   w->tab_line_height = prev_tab_line_height;
 
@@ -2845,7 +2851,10 @@ remember_mouse_glyph (struct frame *f, int gx, int gy, NativeRectangle *rect)
 	    ? MATRIX_TAB_LINE_ROW (w->current_matrix)
 	    : (part == ON_HEADER_LINE
 	       ? MATRIX_HEADER_LINE_ROW (w->current_matrix)
-	       : MATRIX_MODE_LINE_ROW (w->current_matrix)));
+	       : (y >= MATRIX_FIRST_MODE_LINE_ROW (w->current_matrix)->y
+		  + MATRIX_FIRST_MODE_LINE_ROW (w->current_matrix)->height
+		  ? MATRIX_MODE_LINE_ROW (w->current_matrix)
+		  : MATRIX_FIRST_MODE_LINE_ROW (w->current_matrix))));
       gy = gr->y;
       area = TEXT_AREA;
       goto text_glyph_row_found;
@@ -12040,10 +12049,8 @@ window_text_pixel_size (Lisp_Object window, Lisp_Object from, Lisp_Object to,
       Lisp_Object window_mode_line_format
 	= window_parameter (w, Qmode_line_format);
 
-      y = y + display_mode_line (w, CURRENT_MODE_LINE_ACTIVE_FACE_ID (w),
-				 NILP (window_mode_line_format)
-				 ? BVAR (current_buffer, mode_line_format)
-				 : window_mode_line_format);
+      y = y + display_window_mode_line (w, CURRENT_MODE_LINE_ACTIVE_FACE_ID (w),
+				 window_mode_line_format);
     }
 
   bidi_unshelve_cache (itdata, false);
@@ -19953,7 +19960,7 @@ try_cursor_movement (Lisp_Object window, struct text_pos startp,
 		 we would rather display cursor in the next line.  */
 	      while (MATRIX_ROW_BOTTOM_Y (row) < last_y
 		     && MATRIX_ROW_END_CHARPOS (row) == PT
-		     && row < MATRIX_MODE_LINE_ROW (w->current_matrix)
+		     && row < MATRIX_FIRST_MODE_LINE_ROW (w->current_matrix)
 		     && MATRIX_ROW_START_CHARPOS (row+1) >= PT
 		     && !cursor_row_p (row))
 		++row;
@@ -20553,6 +20560,15 @@ redisplay_window (Lisp_Object window, bool just_this_one_p)
   /* Really select the buffer, for the sake of buffer-local
      variables.  */
   set_buffer_internal_1 (XBUFFER (w->contents));
+  SET_TEXT_POS (opoint, PT, PT_BYTE);
+  ochars_modiff = CHARS_MODIFF;
+
+  if (window_wants_mode_line (w)
+      && w->desired_matrix->mode_line_rows != window_mode_line_rows (w))
+    {
+      f->fonts_changed = true;
+      goto need_larger_matrices;
+    }
 
   current_matrix_up_to_date_p
     = (w->window_end_valid
@@ -20564,9 +20580,6 @@ redisplay_window (Lisp_Object window, bool just_this_one_p)
 
   beg_unchanged = BEG_UNCHANGED;
   end_unchanged = END_UNCHANGED;
-
-  SET_TEXT_POS (opoint, PT, PT_BYTE);
-  ochars_modiff = CHARS_MODIFF;
 
   specbind (Qinhibit_point_motion_hooks, Qt);
 
@@ -21452,9 +21465,24 @@ redisplay_window (Lisp_Object window, bool just_this_one_p)
 	  && CURRENT_MODE_LINE_HEIGHT (w) != DESIRED_MODE_LINE_HEIGHT (w))
 	{
 	  f->fonts_changed = true;
-	  w->mode_line_height = -1;
-	  MATRIX_MODE_LINE_ROW (w->current_matrix)->height
-	    = DESIRED_MODE_LINE_HEIGHT (w);
+	  if (w->desired_matrix->mode_line_rows == 2)
+	    {
+	      w->mode_line_height = DESIRED_MODE_LINE_HEIGHT (w);
+	      w->mode_line_height_rows = 2;
+	      if (w->current_matrix->mode_line_rows == 2)
+		{
+		  MATRIX_FIRST_MODE_LINE_ROW (w->current_matrix)->height
+		    = MATRIX_FIRST_MODE_LINE_ROW (w->desired_matrix)->height;
+		  MATRIX_MODE_LINE_ROW (w->current_matrix)->height
+		    = MATRIX_MODE_LINE_ROW (w->desired_matrix)->height;
+		}
+	    }
+	  else
+	    {
+	      w->mode_line_height = -1;
+	      MATRIX_MODE_LINE_ROW (w->current_matrix)->height
+		= DESIRED_MODE_LINE_HEIGHT (w);
+	    }
 	}
 
       /* If tab line height has changed, arrange for a thorough
@@ -21875,7 +21903,7 @@ try_window_reusing_current_matrix (struct window *w)
 	      start_row++;
 	      start = start_row->minpos;
 	      /* If there are no more rows to try, or just one, give up.  */
-	      if (start_row == MATRIX_MODE_LINE_ROW (w->current_matrix) - 1
+	      if (start_row == MATRIX_FIRST_MODE_LINE_ROW (w->current_matrix) - 1
 		  || w->vscroll || MATRIX_ROW_PARTIALLY_VISIBLE_P (w, start_row)
 		  || CHARPOS (start) == ZV)
 		{
@@ -28088,12 +28116,10 @@ display_mode_lines (struct window *w)
 	= window_parameter (w, Qmode_line_format);
 
       /* Select mode line face based on the real selected window.  */
-      display_mode_line (w,
+      display_window_mode_line (w,
 			 CURRENT_MODE_LINE_ACTIVE_FACE_ID_3 (sel_w, sel_w, w),
-			 NILP (window_mode_line_format)
-			 ? BVAR (current_buffer, mode_line_format)
-			 : window_mode_line_format);
-      ++n;
+			 window_mode_line_format);
+      n += w->desired_matrix->mode_line_rows;
     }
 
   if (window_wants_tab_line (w))
@@ -28136,13 +28162,18 @@ display_mode_lines (struct window *w)
    Value is the pixel height of the mode/header/tab line displayed.  */
 
 static int
-display_mode_line (struct window *w, enum face_id face_id, Lisp_Object format)
+display_mode_line_in_row (struct window *w, enum face_id face_id,
+			  Lisp_Object format, struct glyph_row *row)
 {
   struct it it;
   struct face *face;
   specpdl_ref count = SPECPDL_INDEX ();
 
-  init_iterator (&it, w, -1, -1, NULL, face_id);
+  init_iterator (&it, w, -1, -1, row, face_id);
+  /* Right alignment measures the constructs after its symbol in the
+     current row's format.  Keep the buffer's format unchanged.  */
+  if (row)
+    specbind (Qmode_line__current_row_format, format);
   /* Don't extend on a previously drawn mode-line.
      This may happen if called from pos_visible_p.  */
   it.glyph_row->enabled_p = false;
@@ -28319,6 +28350,37 @@ display_mode_line (struct window *w, enum face_id face_id, Lisp_Object format)
   unbind_to (count, Qnil);
 
   return it.glyph_row->height;
+}
+
+static int
+display_mode_line (struct window *w, enum face_id face_id, Lisp_Object format)
+{
+  return display_mode_line_in_row (w, face_id, format, NULL);
+}
+
+/* Display explicit mode-line rows, or the usual single format.  */
+static int
+display_window_mode_line (struct window *w, enum face_id face_id,
+			  Lisp_Object window_format)
+{
+  if (NILP (window_format) && window_mode_line_rows (w) == 2)
+    {
+      Lisp_Object formats = BVAR (current_buffer, mode_line_rows_format);
+      bool allocated = w->desired_matrix->mode_line_rows == 2;
+      struct glyph_row *row = (allocated
+			       ? MATRIX_FIRST_MODE_LINE_ROW (w->desired_matrix)
+			       : MATRIX_MODE_LINE_ROW (w->desired_matrix));
+      Lisp_Object second = XCAR (XCDR (formats));
+      int height = display_mode_line_in_row (w, face_id, XCAR (formats), row);
+      height += display_mode_line_in_row (w, face_id, second,
+					 row + allocated);
+      return height;
+    }
+
+  return display_mode_line (w, face_id,
+			    NILP (window_format)
+			    ? BVAR (current_buffer, mode_line_format)
+			    : window_format);
 }
 
 /* Move element ELT in LIST to the front of LIST.
@@ -30179,7 +30241,7 @@ display_string (const char *string, Lisp_Object lisp_string, Lisp_Object face_st
 		      if (row->mode_line_p)
 			{
 			  struct window *w = it->w;
-			  if (row == MATRIX_MODE_LINE_ROW (w->desired_matrix))
+			  if (row >= MATRIX_FIRST_MODE_LINE_ROW (w->desired_matrix))
 			    mode_line_p = true;
 			}
 		      if (!row->reversed_p)
@@ -36477,11 +36539,7 @@ note_line_or_margin_highlight (Lisp_Object window, int x, int y,
       string = mode_line_string (w, area, &x, &y, &charpos,
 				 &object, &dx, &dy, &width, &height);
 
-      row = (area == ON_MODE_LINE
-	     ? MATRIX_MODE_LINE_ROW (w->current_matrix)
-	     : (area == ON_TAB_LINE
-		? MATRIX_TAB_LINE_ROW (w->current_matrix)
-		: MATRIX_HEADER_LINE_ROW (w->current_matrix)));
+      row = MATRIX_FIRST_TEXT_ROW (w->current_matrix) + y;
 
       /* Find the glyph under the mouse pointer.  */
       if (row->mode_line_p && row->enabled_p)
@@ -36715,13 +36773,7 @@ note_line_or_margin_highlight (Lisp_Object window, int x, int y,
 	     column units here, after the call to mode_line_string or
 	     marginal_area_string.  */
 	  hpos = x - gpos;
-	  vpos = (area == ON_MODE_LINE
-		  ? (w->current_matrix)->nrows - 1
-		  : (area == ON_TAB_LINE
-		     ? 0
-		     : (w->current_matrix->tab_line_p
-			? 1
-			: 0)));
+	  vpos = MATRIX_ROW_VPOS (row, w->current_matrix);
 
 	  /* If GLYPH's position is included in the region that is
 	     already drawn in mouse face, we have nothing to do.  */
@@ -37962,14 +38014,12 @@ expose_window (struct window *w, const Emacs_Rectangle *fr)
 	set_buffer_internal_1 (oldbuf);
 
       /* Display the mode line if there is one.  */
-      if (window_wants_mode_line (w)
-	  && (row = MATRIX_MODE_LINE_ROW (w->current_matrix),
-	      row->enabled_p)
-	  && row->y < r_bottom)
-	{
-	  if (expose_line (w, row, &r))
-	    mouse_face_overwritten_p = true;
-	}
+      if (window_wants_mode_line (w))
+	for (row = MATRIX_FIRST_MODE_LINE_ROW (w->current_matrix);
+	     row <= MATRIX_MODE_LINE_ROW (w->current_matrix); ++row)
+	  if (row->enabled_p && row->y < r_bottom)
+	    if (expose_line (w, row, &r))
+	      mouse_face_overwritten_p = true;
 
       if (!w->pseudo_window_p)
 	{
@@ -38298,6 +38348,7 @@ be let-bound around code that needs to disable messages temporarily. */);
   DEFSYM (Qwindow_scroll_functions, "window-scroll-functions");
   DEFSYM (Qinhibit_point_motion_hooks, "inhibit-point-motion-hooks");
   DEFSYM (Qeval, "eval");
+  DEFSYM (Qmode_line__current_row_format, "mode-line--current-row-format");
   DEFSYM (QCdata, ":data");
 
   /* Names of text properties relevant for redisplay.  */
