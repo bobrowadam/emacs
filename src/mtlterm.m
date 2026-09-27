@@ -1187,7 +1187,7 @@ mtl_log_seq_p (void)
   if (needsComposite || self.cursorDirty)
     {
       self.cursorDirty = NO;
-      [fd compositeToScreen];
+      [fd presentCoalesced];
     }
 }
 
@@ -1317,6 +1317,7 @@ mtl_log_seq_p (void)
 
 @interface MtlFrameData ()
 - (void)shutdown;
+- (void)compositeToScreen;
 - (void)openRenderEncoderClear:(BOOL)clear;
 - (void)scrollRunFrom:(int)fromY to:(int)toY x:(int)x width:(int)w height:(int)h;
 - (void)shiftGlyphsX:(int)x y:(int)y width:(int)w height:(int)h by:(int)shift;
@@ -1838,7 +1839,10 @@ mtl_batch_append (MtlFrameData *fd, float x0, float y0, float x1, float y1,
    echo area) and, with display sync on, every present blocks on a
    drawable -- two blocking presents per keystroke halved typing
    throughput.  Half a 60 Hz frame keeps coalescing inside one refresh
-   while never delaying a visible update by more than ~8 ms.  */
+   while never delaying a visible update by more than ~8 ms.
+   Animation, video and cursor-only updates must use the same coalescer:
+   otherwise display-link callbacks can stay continuously ready while
+   waiting for drawables, starving Emacs input and process handling.  */
 #define MTL_PRESENT_COALESCE 0.008
 
 /* Schedule the deferred present: a one-shot main-queue block flushes it
@@ -1852,7 +1856,7 @@ mtl_batch_append (MtlFrameData *fd, float x0, float y0, float x1, float y1,
                   dispatch_get_main_queue (), ^{
     self.presentScheduled = NO;
     if (self.needsPresent && !self.encoder)
-      [self compositeToScreen];
+      [self presentCoalesced];
   });
 }
 
@@ -2975,7 +2979,7 @@ mtl_drv_note_cursor (struct frame *f, int x, int y, int w, int h,
         {
           fd.animator.cursorHidden = YES;
           if (!fd.encoder)
-            [fd compositeToScreen];
+            [fd presentCoalesced];
         }
       return true;
     }
@@ -2987,7 +2991,7 @@ mtl_drv_note_cursor (struct frame *f, int x, int y, int w, int h,
      does not fire while Emacs idles).  Composite now so the cursor is
      never left painted at its old position. */
   if (!fd.encoder)
-    [fd compositeToScreen];
+    [fd presentCoalesced];
   /* Only the modes that ANIMATE the cursor body draw it in the overlay;
      for the burst modes (sonicboom/ripple/pixiedust) the policy keeps
      drawing the proper static cursor (inverted glyph) and the overlay
@@ -3123,7 +3127,7 @@ mtl_video_close (struct frame *f)
   fd.videoPlayer = nil;
   if (!g_mtl_animations_enabled)
     [fd.animator stopAnimating];
-  [fd compositeToScreen];   /* repaint without the overlay */
+  [fd presentCoalesced];   /* repaint without the overlay */
   return true;
 }
 
@@ -3197,7 +3201,7 @@ mtl_video_seek (struct frame *f, double secs)
   CMTime tol = CMTimeMakeWithSeconds (0.05, NSEC_PER_SEC);
   [fd.videoPlayer.player seekToTime:t toleranceBefore:tol toleranceAfter:tol];
   if (!fd.encoder)
-    [fd compositeToScreen];   /* show the seeked frame immediately */
+    [fd presentCoalesced];   /* show the seeked frame */
   return true;
 }
 
@@ -3277,7 +3281,7 @@ mtl_video_tick (struct frame *f)
   MtlFrameData *fd = mtl_get_frame_data (f);
   if (!fd || !fd.videoPlayer) return false;
   if ([fd.videoPlayer isPlaying] && !fd.encoder)
-    [fd compositeToScreen];
+    [fd presentCoalesced];
   return true;
 }
 

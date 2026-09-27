@@ -238,8 +238,9 @@ typedef struct mtl_spring {
 @property (nonatomic, assign) CFTimeInterval              transitionStart;
 @property (nonatomic, assign) float                       transitionDuration;
 
-/* Coalesced present: present now, unless one landed very recently (then
-   schedule a deferred one).  Use for "make the frame visible" paths.  */
+/* All compositor requests, including animations and video, go through
+   this entry point.  Present now unless one landed very recently; then
+   defer and coalesce so drawable waits cannot monopolize the event loop. */
 - (void)presentCoalesced;
 
 /* Encode blit+overlays to DRAWABLE on CMD and queue its present.  */
@@ -253,9 +254,6 @@ typedef struct mtl_spring {
 /* Main Emacs render cycle (renders to staticTexture) */
 - (void)beginFrame;
 - (void)endFrame;
-
-/* Compositor render (called by animator: blit static + overlay animations) */
-- (void)compositeToScreen;
 
 /* Drawing helpers */
 - (void)fillRect:(NSRect)rect color:(unsigned long)color;
