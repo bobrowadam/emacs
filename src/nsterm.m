@@ -46,6 +46,9 @@ GNUstep port and post-20 update by Adrian Robert (arobert@cogsci.ucsd.edu)
 #include "blockinput.h"
 #include "sysselect.h"
 #include "nsterm.h"
+#ifdef HAVE_MTL
+#include "mtlterm.h"
+#endif
 #include "systime.h"
 #include "character.h"
 #include "xwidget.h"
@@ -1757,6 +1760,9 @@ ns_free_frame_resources (struct frame *f)
 
   block_input ();
 
+#ifdef HAVE_MTL
+  mtl_free_frame_resources (f);
+#endif
   free_frame_menubar (f);
   free_frame_faces (f);
 

@@ -877,12 +877,14 @@ mtl_setup_frame (struct frame *f)
   fd = [[MtlFrameData alloc] init];
   fd.metalLayer   = layer;
   fd.uniformBuffer = ubuf;
+  [ubuf release];
   fd.emacsFrame   = f;
 
   /* Phase 4: create animator.  Only start the 60fps loop when the animation
      layer is explicitly enabled (correctness first, animation opt-in). */
   MtlAnimator *anim = [[MtlAnimator alloc] initWithFrame:f];
   fd.animator = anim;
+  [anim release];
 
   /* Register the Metal implementation of the gfx driver vtable
      (the neutral policy in gfxterm.c draws through it).  */
@@ -892,6 +894,7 @@ mtl_setup_frame (struct frame *f)
 
   objc_setAssociatedObject (view, &mtl_frame_key,
                              fd, OBJC_ASSOCIATION_RETAIN);
+  [fd release];
   return fd;
 }
 
@@ -991,6 +994,12 @@ mtl_log_seq_p (void)
     }
 }
 
+- (void)dealloc
+{
+  [self stopAnimating];
+  [super dealloc];
+}
+
 - (void)setCursorX:(int)x y:(int)y width:(int)w height:(int)h
 {
   float fx = (float)x, fy = (float)y;
@@ -1079,7 +1088,9 @@ mtl_log_seq_p (void)
    never animate.  Same medicine as video playback (mtl-video-tick). */
 - (void)tickWithDt:(float)dt
 {
-  MtlFrameData *fd = mtl_get_frame_data (self.emacsFrame);
+  struct frame *f = self.emacsFrame;
+  if (!f) return;
+  MtlFrameData *fd = mtl_get_frame_data (f);
   if (!fd || !fd.metalLayer) return;
 
   BOOL needsComposite = NO;
@@ -1088,8 +1099,7 @@ mtl_log_seq_p (void)
      via internal-show-cursor -> erase_phys_cursor, which never reaches
      the rif: it just repaints the glyph, invisible to an overlay
      cursor).  Poll it here so the animated cursor blinks too.  */
-  struct frame *f = self.emacsFrame;
-  if (f && WINDOWP (f->selected_window))
+  if (WINDOWP (f->selected_window))
     {
       struct window *w = XWINDOW (f->selected_window);
       /* cursor_off_p is the blink phase itself (set by
@@ -1306,6 +1316,7 @@ mtl_log_seq_p (void)
    ----------------------------------------------------------------------- */
 
 @interface MtlFrameData ()
+- (void)shutdown;
 - (void)openRenderEncoderClear:(BOOL)clear;
 - (void)scrollRunFrom:(int)fromY to:(int)toY x:(int)x width:(int)w height:(int)h;
 - (void)shiftGlyphsX:(int)x y:(int)y width:(int)w height:(int)h by:(int)shift;
@@ -1318,6 +1329,43 @@ mtl_log_seq_p (void)
 @end
 
 @implementation MtlFrameData
+
+/* Stop callbacks and release frame-owned resources before the NS view closes.
+   A queued present can retain this object until the main queue drains.  */
+- (void)shutdown
+{
+  self.emacsFrame = NULL;
+  self.animator.emacsFrame = NULL;
+  [self.animator stopAnimating];
+  self.animator = nil;
+  [self.videoPlayer shutdown];
+  self.videoPlayer = nil;
+  self.needsPresent = NO;
+
+  if (g_batch_fd == self)
+    {
+      g_batch_fd = nil;
+      g_batch_verts = 0;
+      g_clip_on = NO;
+    }
+  [self.encoder endEncoding];
+  self.encoder = nil;
+  self.cmdBuf = nil;
+  self.drawable = nil;
+  self.staticTexture = nil;
+  self.scratchTexture = nil;
+  self.transitionTexture = nil;
+  self.blitPipeline = nil;
+  self.uniformBuffer = nil;
+  [self.metalLayer removeFromSuperlayer];
+  self.metalLayer = nil;
+}
+
+- (void)dealloc
+{
+  [self shutdown];
+  [super dealloc];
+}
 
 /* Clip subsequent draws to R (logical pixels), like the NS backend's
    ns_focus clipping with get_glyph_string_clip_rect.  This is what keeps
@@ -1551,8 +1599,8 @@ mtl_log_seq_p (void)
                                                            width:tw height:th mipmapped:NO];
       td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
       td.storageMode = MTLStorageModePrivate;
-      self.staticTexture = [g_device newTextureWithDescriptor:td];
-      self.scratchTexture = [g_device newTextureWithDescriptor:td];
+      self.staticTexture = [[g_device newTextureWithDescriptor:td] autorelease];
+      self.scratchTexture = [[g_device newTextureWithDescriptor:td] autorelease];
       needsClear = YES;  /* New or resized texture: clear to background color */
     }
 
@@ -3059,6 +3107,7 @@ mtl_video_open (struct frame *f, const char *path, int x, int y,
                                    loop:loop];
   if (!vp) return false;
   fd.videoPlayer = vp;
+  [vp release];
 
   /* The animator's CADisplayLink drives presents during playback. */
   [fd.animator startAnimating];
@@ -3437,11 +3486,10 @@ mtl_patch_terminal_rif (struct frame *f)
       term->set_horizontal_scroll_bar_hook = mtl_set_horizontal_scroll_bar;
     }
 
-  /* Install a KVO observer so the Metal layer tracks EmacsView size changes.
-     When the user resizes the window, the CAMetalLayer drawableSize updates
-     automatically without requiring an explicit Emacs resize event. */
+  /* Install one KVO observer per view, including when GPU rendering is
+     enabled repeatedly.  Remove it explicitly during frame teardown.  */
   MtlFrameData *fd = mtl_get_frame_data (f);
-  if (fd)
+  if (fd && !objc_getAssociatedObject (FRAME_NS_VIEW (f), &mtl_resize_obs_key))
     {
       NSView *view = FRAME_NS_VIEW (f);
       MtlResizeObserver *obs = [[MtlResizeObserver alloc] init];
@@ -3452,8 +3500,7 @@ mtl_patch_terminal_rif (struct frame *f)
       [view addObserver:obs forKeyPath:@"frame"
                  options:NSKeyValueObservingOptionNew context:NULL];
 
-      /* Store observer as associated object to keep it alive and
-         automatically remove it when the view is deallocated */
+      /* Keep the observer alive until frame teardown removes it.  */
       objc_setAssociatedObject (view, &mtl_resize_obs_key,
                                  obs, OBJC_ASSOCIATION_RETAIN);
 
@@ -3468,6 +3515,7 @@ mtl_patch_terminal_rif (struct frame *f)
          This uses the same KVO mechanism as the resize observer — stable and safe. */
       [view addObserver:obs forKeyPath:@"window"
                  options:NSKeyValueObservingOptionNew context:NULL];
+      [obs release];
     }
 }
 
@@ -3718,10 +3766,26 @@ mtl_term_shutdown (struct terminal *terminal)
 void
 mtl_free_frame_resources (struct frame *f)
 {
+  MtlFrameData *fd = mtl_get_frame_data (f);
+  if (fd)
+    {
+      NSView *view = FRAME_NS_VIEW (f);
+      MtlResizeObserver *obs = objc_getAssociatedObject (view,
+                                                        &mtl_resize_obs_key);
+      if (obs)
+        {
+          obs.emacsFrame = NULL;
+          obs.layer = nil;
+          [view removeObserver:obs forKeyPath:@"frame"];
+          [view removeObserver:obs forKeyPath:@"window"];
+          objc_setAssociatedObject (view, &mtl_resize_obs_key,
+                                    nil, OBJC_ASSOCIATION_RETAIN);
+        }
+      [fd shutdown];
+      objc_setAssociatedObject (view, &mtl_frame_key,
+                                nil, OBJC_ASSOCIATION_RETAIN);
+    }
   gfx_free_frame_state (f);
-  /* Metal data is stored as an associated object on EmacsView;
-     it will be released when EmacsView is deallocated. */
-  (void)f;
 }
 
 void
