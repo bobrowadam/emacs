@@ -1168,7 +1168,7 @@ static bool display_line (struct it *, int);
 static int display_mode_lines (struct window *);
 static int display_mode_line (struct window *, enum face_id, Lisp_Object);
 static int display_window_mode_line (struct window *, enum face_id,
-				     Lisp_Object);
+				     Lisp_Object, int);
 static int display_mode_element (struct it *, int, int, int, Lisp_Object,
 				 Lisp_Object, bool);
 static int store_mode_line_string (const char *, Lisp_Object, bool, int, int,
@@ -1744,10 +1744,11 @@ pos_visible_p (struct window *w, ptrdiff_t charpos, int *x, int *y,
       Lisp_Object window_mode_line_format
 	= window_parameter (w, Qmode_line_format);
 
+      int mode_line_rows = window_mode_line_rows (w);
       w->mode_line_height
 	= display_window_mode_line (w, CURRENT_MODE_LINE_ACTIVE_FACE_ID (w),
-				    window_mode_line_format);
-      w->mode_line_height_rows = window_mode_line_rows (w);
+				    window_mode_line_format, mode_line_rows);
+      w->mode_line_height_rows = mode_line_rows;
     }
 
   if (window_wants_tab_line (w))
@@ -12050,7 +12051,7 @@ window_text_pixel_size (Lisp_Object window, Lisp_Object from, Lisp_Object to,
 	= window_parameter (w, Qmode_line_format);
 
       y = y + display_window_mode_line (w, CURRENT_MODE_LINE_ACTIVE_FACE_ID (w),
-				 window_mode_line_format);
+				 window_mode_line_format, window_mode_line_rows (w));
     }
 
   bidi_unshelve_cache (itdata, false);
@@ -21459,6 +21460,14 @@ redisplay_window (Lisp_Object window, bool just_this_one_p)
       display_mode_lines (w);
       unbind_to (count1, Qnil);
 
+      /* Mode-line evaluation can change the number of rows after the
+	 matrix was sized.  Retry with the new layout.  */
+      if (w->desired_matrix->mode_line_rows != window_mode_line_rows (w))
+	{
+	  f->fonts_changed = true;
+	  goto need_larger_matrices;
+	}
+
       /* If mode line height has changed, arrange for a thorough
 	 immediate redisplay using the correct mode line height.  */
       if (window_wants_mode_line (w)
@@ -28066,6 +28075,9 @@ display_tty_menu_item (const char *item_text, int width, int face_id,
 			      Mode Line
  ***********************************************************************/
 
+static int display_mode_line_in_row (struct window *, enum face_id,
+                                     Lisp_Object, struct glyph_row *);
+
 /* Display the mode line, the header line, and the tab-line of window
    W.  Value is the sum number of mode lines, header lines, and tab
    lines actually displayed.  */
@@ -28077,12 +28089,14 @@ display_mode_lines (struct window *w)
   Lisp_Object new_frame = w->frame;
   specpdl_ref count = SPECPDL_INDEX ();
   int n = 0;
+  bool mode_line_p = window_wants_mode_line (w);
+  int mode_line_rows = 0;
 
   record_unwind_protect (restore_selected_window, selected_window);
   record_unwind_protect
     (restore_frame_selected_window, XFRAME (new_frame)->selected_window);
 
-  if (window_wants_mode_line (w))
+  if (mode_line_p)
     {
       Lisp_Object window;
       Lisp_Object default_help
@@ -28099,6 +28113,10 @@ display_mode_lines (struct window *w)
 	wset_mode_line_help_echo (w, Qnil);
     }
 
+  /* The help function can change the buffer's mode-line formats.  */
+  mode_line_p = window_wants_mode_line (w);
+  mode_line_rows = mode_line_p ? window_mode_line_rows (w) : 0;
+
   selected_frame = new_frame;
   /* FIXME: If we were to allow the mode-line's computation changing the buffer
      or window's point, then we'd need select_window_1 here as well.  */
@@ -28110,7 +28128,7 @@ display_mode_lines (struct window *w)
   w->column_number_displayed = -1;
 
   struct window *sel_w = XWINDOW (old_selected_window);
-  if (window_wants_mode_line (w))
+  if (mode_line_p)
     {
       Lisp_Object window_mode_line_format
 	= window_parameter (w, Qmode_line_format);
@@ -28118,8 +28136,8 @@ display_mode_lines (struct window *w)
       /* Select mode line face based on the real selected window.  */
       display_window_mode_line (w,
 			 CURRENT_MODE_LINE_ACTIVE_FACE_ID_3 (sel_w, sel_w, w),
-			 window_mode_line_format);
-      n += w->desired_matrix->mode_line_rows;
+			 window_mode_line_format, mode_line_rows);
+      n += mode_line_rows;
     }
 
   if (window_wants_tab_line (w))
@@ -28172,7 +28190,8 @@ display_mode_line_in_row (struct window *w, enum face_id face_id,
   init_iterator (&it, w, -1, -1, row, face_id);
   /* Right alignment measures the constructs after its symbol in the
      current row's format.  Keep the buffer's format unchanged.  */
-  if (row)
+  if (row && (face_id == MODE_LINE_ACTIVE_FACE_ID
+              || face_id == MODE_LINE_INACTIVE_FACE_ID))
     specbind (Qmode_line__current_row_format, format);
   /* Don't extend on a previously drawn mode-line.
      This may happen if called from pos_visible_p.  */
@@ -28361,19 +28380,21 @@ display_mode_line (struct window *w, enum face_id face_id, Lisp_Object format)
 /* Display explicit mode-line rows, or the usual single format.  */
 static int
 display_window_mode_line (struct window *w, enum face_id face_id,
-			  Lisp_Object window_format)
+			  Lisp_Object window_format, int mode_line_rows)
 {
-  if (NILP (window_format) && window_mode_line_rows (w) == 2)
+  if (NILP (window_format) && mode_line_rows == 2)
     {
       Lisp_Object formats = BVAR (current_buffer, mode_line_rows_format);
       bool allocated = w->desired_matrix->mode_line_rows == 2;
-      struct glyph_row *row = (allocated
-			       ? MATRIX_FIRST_MODE_LINE_ROW (w->desired_matrix)
-			       : MATRIX_MODE_LINE_ROW (w->desired_matrix));
+      struct glyph_row *first_row = (allocated
+				     ? MATRIX_FIRST_MODE_LINE_ROW (w->desired_matrix)
+				     : MATRIX_MODE_LINE_ROW (w->desired_matrix));
+      /* Before a matrix resize, measure both formats in the same row.  */
+      struct glyph_row *second_row = allocated ? first_row + 1 : first_row;
       Lisp_Object second = XCAR (XCDR (formats));
-      int height = display_mode_line_in_row (w, face_id, XCAR (formats), row);
-      height += display_mode_line_in_row (w, face_id, second,
-					 row + allocated);
+      int height = display_mode_line_in_row (w, face_id, XCAR (formats),
+					    first_row);
+      height += display_mode_line_in_row (w, face_id, second, second_row);
       return height;
     }
 

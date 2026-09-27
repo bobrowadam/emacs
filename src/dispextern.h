@@ -1564,24 +1564,10 @@ struct glyph_string
 					    XWINDOW (selected_window), \
 					    W)
 
-/* Return the current height of the mode line of window W.  If not known
-   from W->mode_line_height, look at W's current glyph matrix, or return
-   a default based on the height of the font of the face `mode-line'.  */
-
-#define CURRENT_MODE_LINE_HEIGHT(W)					\
-  ((W)->mode_line_height >= 0						\
-   && (W)->current_matrix						\
-   && (W)->mode_line_height_rows == window_mode_line_rows (W) \
-   ? (W)->mode_line_height						\
-   : ((W)->mode_line_height_rows = window_mode_line_rows (W), \
-      (W)->mode_line_height						\
-      = ((W)->current_matrix						\
-	 && (W)->current_matrix->mode_line_rows == window_mode_line_rows (W) \
-	 && MATRIX_MODE_LINE_HEIGHT ((W)->current_matrix)		\
-	 ? MATRIX_MODE_LINE_HEIGHT ((W)->current_matrix)		\
-	 : estimate_mode_line_height					\
-	 (XFRAME ((W)->frame), CURRENT_MODE_LINE_ACTIVE_FACE_ID (W)) \
-	 * window_mode_line_rows (W))))
+/* Return the current mode-line height, using the matrix or a face-based
+   estimate if the cached height does not describe the requested rows.  */
+extern int current_mode_line_height (struct window *);
+#define CURRENT_MODE_LINE_HEIGHT(W) current_mode_line_height (W)
 
 /* Return the desired face id for the header line of a window, depending
    on whether the window is selected or not, or if the window is the

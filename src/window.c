@@ -6030,13 +6030,46 @@ window_mode_line_rows (struct window *w)
     return 1;
 
   Lisp_Object formats = BVAR (XBUFFER (WINDOW_BUFFER (w)), mode_line_rows_format);
-  return (CONSP (formats) && CONSP (XCDR (formats))
-	  && NILP (XCDR (XCDR (formats)))
-	  && WINDOW_PIXEL_HEIGHT (w)
-	     >= WINDOW_FRAME_LINE_HEIGHT (w)
-	     + 2 * estimate_mode_line_height
-	       (XFRAME (w->frame), CURRENT_MODE_LINE_ACTIVE_FACE_ID (w))
-	  ? 2 : 1);
+  if (!(CONSP (formats) && CONSP (XCDR (formats))
+	&& NILP (XCDR (XCDR (formats)))))
+    return 1;
+
+  int needed = WINDOW_FRAME_LINE_HEIGHT (w)
+    + 2 * estimate_mode_line_height
+      (XFRAME (w->frame), CURRENT_MODE_LINE_ACTIVE_FACE_ID (w));
+  Lisp_Object header = window_parameter (w, Qheader_line_format);
+  Lisp_Object tab = window_parameter (w, Qtab_line_format);
+  if (!EQ (header, Qnone)
+      && (!NILP (header)
+	  || !NILP (BVAR (XBUFFER (WINDOW_BUFFER (w)), header_line_format))))
+    needed += CURRENT_HEADER_LINE_HEIGHT (w);
+  if (!EQ (tab, Qnone)
+      && (!NILP (tab)
+	  || !NILP (BVAR (XBUFFER (WINDOW_BUFFER (w)), tab_line_format))))
+    needed += CURRENT_TAB_LINE_HEIGHT (w);
+
+  return (WINDOW_PIXEL_HEIGHT (w)
+	  - WINDOW_BOTTOM_DIVIDER_WIDTH (w)
+	  - WINDOW_SCROLL_BAR_AREA_HEIGHT (w) >= needed ? 2 : 1);
+}
+
+int
+current_mode_line_height (struct window *w)
+{
+  int rows = window_mode_line_rows (w);
+  if (w->mode_line_height >= 0 && w->current_matrix
+      && w->mode_line_height_rows == rows)
+    return w->mode_line_height;
+
+  int height = (w->current_matrix
+		&& w->current_matrix->mode_line_rows == rows
+		? MATRIX_MODE_LINE_HEIGHT (w->current_matrix) : 0);
+  if (!height)
+    height = estimate_mode_line_height
+      (XFRAME (w->frame), CURRENT_MODE_LINE_ACTIVE_FACE_ID (w)) * rows;
+  w->mode_line_height_rows = rows;
+  w->mode_line_height = height;
+  return height;
 }
 
 /**
@@ -6095,10 +6128,10 @@ window_wants_header_line (struct window *w)
 	  && !EQ (window_header_line_format, Qnone)
 	  && (!NILP (window_header_line_format)
 	      || !NILP (BVAR (XBUFFER (WINDOW_BUFFER (w)), header_line_format)))
-	  && (WINDOW_PIXEL_HEIGHT (w)
-	      > (window_wants_mode_line (w)
-		 ? (1 + window_mode_line_rows (w)) * WINDOW_FRAME_LINE_HEIGHT (w)
-		 : WINDOW_FRAME_LINE_HEIGHT (w))));
+	  && WINDOW_PIXEL_HEIGHT (w)
+	     > (window_wants_mode_line (w)
+		? 2 * WINDOW_FRAME_LINE_HEIGHT (w)
+		: WINDOW_FRAME_LINE_HEIGHT (w)));
 }
 
 
@@ -6129,10 +6162,10 @@ window_wants_tab_line (struct window *w)
 	  && !EQ (window_tab_line_format, Qnone)
 	  && (!NILP (window_tab_line_format)
 	      || !NILP (BVAR (XBUFFER (WINDOW_BUFFER (w)), tab_line_format)))
-	  && (WINDOW_PIXEL_HEIGHT (w)
-	      > (((window_wants_mode_line (w) ? window_mode_line_rows (w) : 0)
-		  + (window_wants_header_line (w) ? 1 : 0)
-		  + 1) * WINDOW_FRAME_LINE_HEIGHT (w))));
+	  && WINDOW_PIXEL_HEIGHT (w)
+	     > (((window_wants_mode_line (w) ? 1 : 0)
+		 + (window_wants_header_line (w) ? 1 : 0)
+		 + 1) * WINDOW_FRAME_LINE_HEIGHT (w)));
 }
 
 /* Return number of lines of text in window W, not counting the mode
