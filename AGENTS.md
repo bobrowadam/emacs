@@ -5,6 +5,7 @@ Bmacs is Bob's Emacs fork. It includes GPU rendering.
 ## Branches and remotes
 
 - Use `bob` for fork development.
+- Create linked worktrees under `.worktrees/` in the main checkout. Keep builds outside source worktrees.
 - `master` follows the upstream Emacs mirror.
 - `origin` points to Bob's fork.
 - `upstream` points to the upstream mirror.
