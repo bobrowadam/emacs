@@ -16,8 +16,7 @@
 (defconst bmacs-checks--root
   (expand-file-name "../../" (file-name-directory load-file-name)))
 
-(load (expand-file-name "test/lisp/mode-line-rows-tests.el" bmacs-checks--root)
-      nil t)
+(load (expand-file-name "test/src/xdisp-tests.el" bmacs-checks--root) nil t)
 (load (expand-file-name "test/lisp/gpu-tests.el" bmacs-checks--root) nil t)
 
 (defun bmacs-checks-run (graphical output)
@@ -31,7 +30,7 @@ Write ERT counts as JSON to OUTPUT.  The caller checks failures and skips."
     (unwind-protect
         (with-selected-frame frame
           (setq stats (ert-run-tests-batch
-                       '(or "^mode-line-rows-format-" "^gpu-frame-teardown$"))))
+                       '(or "^xdisp-test" "^gpu-frame-teardown$"))))
       (when (and graphical (frame-live-p frame))
         (delete-frame frame t)))
     ;; Allow deferred native callbacks to run after frame deletion.

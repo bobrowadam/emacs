@@ -1135,6 +1135,11 @@ gfx_scroll_run (struct window *w, struct run *run)
 
   if (height <= 0) return;
 
+  /* The cursor is part of the static texture.  Erase it before copying
+     the rows, while the current glyph matrix still describes its old
+     position, just as ns_scroll_run does.  Otherwise a scroll combined
+     with cursor motion copies the old cursor into the moved text.  */
+  gui_clear_cursor (w);
   gfx_drv->copy_region (f, x, from_y, width, height, x, to_y);
 }
 

@@ -21,6 +21,9 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 #ifdef HAVE_MTL
 
+#include <float.h>
+#include <math.h>
+
 #import <Cocoa/Cocoa.h>
 #import <Metal/Metal.h>
 #import <CoreText/CoreText.h>
@@ -231,11 +234,13 @@ quads to an off-screen MTLTexture.  Returns t on success.  */)
    Used for visual regression testing and debugging rendering issues.
    ----------------------------------------------------------------------- */
 
-DEFUN ("gpu-capture-frame", Fmtl_capture_frame, Smtl_capture_frame, 1, 2, 0,
+DEFUN ("gpu-capture-frame", Fmtl_capture_frame, Smtl_capture_frame, 1, 3, 0,
        doc: /* Save the Metal staticTexture for FRAME (or selected frame) to PATH.
 Returns t on success.  The PNG shows exactly what Metal has rendered into
-the intermediate texture, before cursor/animation overlay.  */)
-  (Lisp_Object path, Lisp_Object frame)
+the intermediate texture, before cursor/animation overlay.
+With COMPOSITE non-nil, capture the full compositor, including decorations,
+using the same Metal rendering code on an offscreen texture.  */)
+  (Lisp_Object path, Lisp_Object frame, Lisp_Object composite)
 {
   CHECK_STRING (path);
   struct frame *f = NILP (frame) ? XFRAME (selected_frame) : XFRAME (frame);
@@ -255,21 +260,29 @@ the intermediate texture, before cursor/animation overlay.  */)
   MTLTextureDescriptor *td =
     [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
                                                        width:W height:H mipmapped:NO];
-  td.usage = MTLTextureUsageShaderRead;
+  td.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
   td.storageMode = MTLStorageModeShared;
   id<MTLTexture> readback = [dev newTextureWithDescriptor:td];
   if (!readback) return Qnil;
 
   id<MTLCommandBuffer> cmd = [q commandBuffer];
-  id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
-  [blit copyFromTexture:src
-            sourceSlice:0 sourceLevel:0
-           sourceOrigin:MTLOriginMake(0,0,0)
-             sourceSize:MTLSizeMake(W,H,1)
-              toTexture:readback
-     destinationSlice:0 destinationLevel:0
-     destinationOrigin:MTLOriginMake(0,0,0)];
-  [blit endEncoding];
+  if (!NILP (composite))
+    {
+      if (fd.encoder) return Qnil;
+      [fd encodeCompositeTextureOn:cmd texture:readback];
+    }
+  else
+    {
+      id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
+      [blit copyFromTexture:src
+                sourceSlice:0 sourceLevel:0
+               sourceOrigin:MTLOriginMake(0,0,0)
+                 sourceSize:MTLSizeMake(W,H,1)
+                  toTexture:readback
+         destinationSlice:0 destinationLevel:0
+         destinationOrigin:MTLOriginMake(0,0,0)];
+      [blit endEncoding];
+    }
   [cmd commit];
   [cmd waitUntilCompleted];
 
@@ -714,8 +727,8 @@ buffer-switch cross-fade and the inline video all advance together in
 one deterministic tick (the animator presents are already coalesced by
 the layer).  FRAME defaults to the selected frame.  Returns a mask of
 the subsystems that still need pumping (1 = cursor animations enabled,
-2 = cross-fade running, 4 = video open); 0 lets the timer cancel
-itself.  */)
+2 = cross-fade running, 4 = video open, 8 = visible tool-card borders, 16 = generic decorations);
+0 lets the timer cancel itself.  */)
   (Lisp_Object frame)
 {
   if (NILP (frame)) frame = Fselected_frame ();
@@ -726,23 +739,423 @@ itself.  */)
 
   int mask = (g_mtl_animations_enabled ? 1 : 0)
     | (fd.transitionTexture ? 2 : 0)
-    | (fd.videoPlayer ? 4 : 0);
+    | (fd.videoPlayer ? 4 : 0)
+    | ([fd borderOverlaysNeedPump] ? 8 : 0)
+    | ([fd decorationsNeedPump] ? 16 : 0);
   if (mask == 0) return make_fixnum (0);
 
   /* Real elapsed step: the pump re-paces between 30 and 60 Hz, so a
      fixed dt would speed the physics up and down with it.  */
-  static double last;
   double now = CACurrentMediaTime ();
+  double last = fd.lastPumpTime;
   float dt = (last > 0 && now - last < 0.1) ? (float) (now - last) : 0.033f;
-  last = now;
+  fd.lastPumpTime = now;
 
   block_input ();
   if (fd.videoPlayer)
     mtl_video_tick (f);                 /* pull the next decoded frame */
   if (!fd.encoder)
-    [fd.animator tickWithDt:dt];
+    {
+      if ((mask & ~24) == 0)
+        [fd presentCoalesced];
+      else
+        [fd.animator tickWithDt:dt];
+    }
   unblock_input ();
   return make_fixnum (mask);
+}
+
+/* -----------------------------------------------------------------------
+   Native animated border API
+   ----------------------------------------------------------------------- */
+
+static double
+mtl_border_number (Lisp_Object object, const char *label)
+{
+  CHECK_NUMBER (object);
+  double value = XFLOATINT (object);
+  /* Metal vertices and fragment math use single precision.  Keep conversions
+     finite and leave ample headroom for endpoint and perimeter arithmetic. */
+  if (!isfinite (value) || fabs (value) > FLT_MAX / 16.0)
+    error ("%s values must be finite and representable", label);
+  return value;
+}
+
+static NSRect
+mtl_border_rect (Lisp_Object object, const char *label, BOOL positive_size)
+{
+  double values[4];
+  Lisp_Object tail = object;
+  for (int i = 0; i < 4; i++)
+    {
+      if (!CONSP (tail))
+        error ("%s must be a four-number list", label);
+      values[i] = mtl_border_number (XCAR (tail), label);
+      tail = XCDR (tail);
+    }
+  if (!NILP (tail))
+    error ("%s must be a four-number list", label);
+  if ((positive_size && (values[2] <= 0 || values[3] <= 0))
+      || (!positive_size && (values[2] < 0 || values[3] < 0)))
+    error ("%s has invalid dimensions", label);
+  if (!isfinite (values[0] + values[2])
+      || !isfinite (values[1] + values[3]))
+    error ("%s endpoints must be finite", label);
+  return NSMakeRect (values[0], values[1], values[2], values[3]);
+}
+
+static MtlBorderStyle
+mtl_border_style (Lisp_Object plist, MtlBorderState state)
+{
+  MtlBorderStyle style = {
+    .cornerRadius = 11.0f,
+    .strokeWidth = state == MTL_BORDER_RUNNING ? 1.8f : 1.5f,
+    .opacity = 1.0f, .cycleDuration = 3.6f,
+    .runnerFraction = 0.11f, .glowOpacity = 0.65f
+  };
+  struct {
+    const char *name;
+    float *target;
+    double minimum, maximum;
+  } options[] = {
+    { ":corner-radius", &style.cornerRadius, 0, FLT_MAX / 16.0 },
+    { ":stroke-width", &style.strokeWidth, 0.001, FLT_MAX / 16.0 },
+    { ":opacity", &style.opacity, 0, 1 },
+    { ":cycle-duration", &style.cycleDuration, 0.001, FLT_MAX / 16.0 },
+    { ":runner-fraction", &style.runnerFraction, 0, 1 },
+    { ":glow-opacity", &style.glowOpacity, 0, 1 }
+  };
+  if (NILP (Fproper_list_p (plist)))
+    error ("STYLE must be a proper property list");
+  while (CONSP (plist))
+    {
+      Lisp_Object key = XCAR (plist);
+      plist = XCDR (plist);
+      if (!CONSP (plist))
+        error ("STYLE must have a value for each property");
+      bool found = false;
+      for (int i = 0; i < ARRAYELTS (options); i++)
+        if (EQ (key, intern (options[i].name)))
+          {
+            double value = mtl_border_number (XCAR (plist), options[i].name);
+            if (value < options[i].minimum || value > options[i].maximum)
+              error ("%s must be between %g and %g", options[i].name,
+                     options[i].minimum, options[i].maximum);
+            *options[i].target = value;
+            found = true;
+            break;
+          }
+      if (!found)
+        error ("Unknown border STYLE property");
+      plist = XCDR (plist);
+    }
+  return style;
+}
+
+static MtlFrameData *
+mtl_border_frame_data (Lisp_Object frame)
+{
+  if (NILP (frame))
+    frame = Fselected_frame ();
+  if (!FRAMEP (frame))
+    return NULL;
+  struct frame *f = XFRAME (frame);
+  if (!FRAME_LIVE_P (f) || !FRAME_NS_P (f))
+    return NULL;
+  MtlFrameData *fd = mtl_get_frame_data (f);
+  return fd && fd.metalLayer ? fd : NULL;
+}
+
+DEFUN ("gpu-border-set", Fmtl_border_set, Smtl_border_set, 5, 7, 0,
+       doc: /* Set or update an animated border on a live Metal frame.
+ID is a positive fixnum.  RECT and CLIP are (X Y WIDTH HEIGHT) lists in
+logical frame pixels.  STATE is running, complete, failed, or idle; COLOR is
+0xRRGGBB.  FRAME defaults to the selected frame.  Returns t when FRAME
+accepts the overlay, including for an empty clip that removes/skips it.
+
+STYLE is an optional property list.  Omitted properties use these defaults:
+  :corner-radius    11 logical pixels, clamped to half the shorter side
+  :stroke-width     1.8 logical pixels for running, 1.5 otherwise
+  :opacity          1, a multiplier for the entire border including glow
+  :cycle-duration   3.6 seconds for one running highlight circuit
+  :runner-fraction  0.11 of the perimeter; 0 leaves a static running outline
+  :glow-opacity     0.65; 0 disables the running highlight halo
+Opacity, runner fraction, and glow opacity must be between 0 and 1.
+Corner radius must be nonnegative; width and duration must be at least 0.001.
+All values must be finite numbers.  Unknown properties signal an error.
+Each call supplies a complete style, not a patch to the previous style.
+Updating geometry or style without changing STATE preserves animation time.  */)
+  (Lisp_Object id, Lisp_Object rect_value, Lisp_Object clip_value,
+   Lisp_Object state_value, Lisp_Object color_value, Lisp_Object frame,
+   Lisp_Object style_value)
+{
+  CHECK_FIXNUM (id);
+  if (XFIXNUM (id) <= 0)
+    error ("gpu-border-set: ID must be a positive fixnum");
+  NSRect rect = mtl_border_rect (rect_value, "RECT", YES);
+  NSRect clip = mtl_border_rect (clip_value, "CLIP", NO);
+
+  MtlBorderState state;
+  if (EQ (state_value, intern ("running")))
+    state = MTL_BORDER_RUNNING;
+  else if (EQ (state_value, intern ("complete")))
+    state = MTL_BORDER_COMPLETE;
+  else if (EQ (state_value, intern ("failed")))
+    state = MTL_BORDER_FAILED;
+  else if (EQ (state_value, intern ("idle")))
+    state = MTL_BORDER_IDLE;
+  else
+    error ("gpu-border-set: STATE must be running, complete, failed, or idle");
+
+  CHECK_FIXNUM (color_value);
+  if (XFIXNUM (color_value) < 0 || XFIXNUM (color_value) > 0xFFFFFF)
+    error ("gpu-border-set: COLOR must be an integer from 0x000000 to 0xFFFFFF");
+
+  MtlBorderStyle style = mtl_border_style (style_value, state);
+  MtlFrameData *fd = mtl_border_frame_data (frame);
+  if (!fd)
+    return Qnil;
+  return [fd setBorderWithID:(unsigned long long) XFIXNUM (id)
+                        rect:rect clip:clip state:state
+                       color:(unsigned long) XFIXNUM (color_value)
+                       style:style] ? Qt : Qnil;
+}
+
+DEFUN ("gpu-border-remove", Fmtl_border_remove, Smtl_border_remove, 1, 2, 0,
+       doc: /* Remove border ID from FRAME.  FRAME defaults to the selected frame.
+Returns non-nil only if a border was removed.  */)
+  (Lisp_Object id, Lisp_Object frame)
+{
+  CHECK_FIXNUM (id);
+  if (XFIXNUM (id) <= 0)
+    error ("gpu-border-remove: ID must be a positive fixnum");
+  MtlFrameData *fd = mtl_border_frame_data (frame);
+  return fd && [fd removeBorderWithID:(unsigned long long) XFIXNUM (id)]
+    ? Qt : Qnil;
+}
+
+DEFUN ("gpu-border-supported-p", Fmtl_border_supported_p,
+       Smtl_border_supported_p, 0, 1, 0,
+       doc: /* Return non-nil if FRAME is a live Metal-enabled frame.
+FRAME defaults to the selected frame.  */)
+  (Lisp_Object frame)
+{
+  return mtl_border_frame_data (frame) ? Qt : Qnil;
+}
+
+
+/* Generic retained decoration primitives.  Validation completes before mutation. */
+static double
+mtl_decoration_number (Lisp_Object object)
+{
+  double value = mtl_border_number (object, "Decoration");
+  if (fabs (value) > 1000000) error ("Decoration coordinate/style exceeds 1000000");
+  return value;
+}
+
+static NSRect
+mtl_decoration_rect (Lisp_Object object, BOOL line)
+{
+  float values[4];
+  Lisp_Object tail = object;
+  for (int i = 0; i < 4; i++)
+    { if (!CONSP (tail)) error ("Decoration rect requires four numbers");
+      values[i] = mtl_decoration_number (XCAR (tail)); tail = XCDR (tail); }
+  if (!NILP (tail)) error ("Decoration rect requires four numbers");
+  if (!line && (values[2] <= 0 || values[3] <= 0)) error ("Dimensions must be positive");
+  return NSMakeRect (values[0], values[1], values[2], values[3]);
+}
+
+static unsigned long
+mtl_decoration_color (Lisp_Object object)
+{
+  CHECK_FIXNUM (object);
+  if (XFIXNUM (object) < 0 || XFIXNUM (object) > 0xffffff)
+    error ("Decoration color must be 0xRRGGBB or nil");
+  return XFIXNUM (object);
+}
+
+static MtlDecoration
+mtl_decoration_value (Lisp_Object plist)
+{
+  MtlDecoration v = { .shape = MTL_DECORATION_RECT, .hasStroke = YES,
+    .stroke = 0xffffff, .strokeWidth = 1, .opacity = 1,
+    .sweepAngle = 2 * M_PI };
+  Lisp_Object rect = Qnil, seen = Qnil;
+  bool clip_seen = false;
+  if (NILP (Fproper_list_p (plist))) error ("Decoration must be a proper plist");
+  while (CONSP (plist))
+    {
+      Lisp_Object key = XCAR (plist);
+      if (!NILP (Fmemq (key, seen))) error ("Duplicate decoration property");
+      seen = Fcons (key, seen);
+      plist = XCDR (plist);
+      if (!CONSP (plist)) error ("Decoration property lacks a value");
+      Lisp_Object value = XCAR (plist);
+      if (EQ (key, intern (":shape")))
+        {
+          if (EQ (value, intern ("rounded-rectangle"))) v.shape = MTL_DECORATION_RECT;
+          else if (EQ (value, intern ("circle"))) v.shape = MTL_DECORATION_CIRCLE;
+          else if (EQ (value, intern ("arc"))) v.shape = MTL_DECORATION_ARC;
+          else if (EQ (value, intern ("line"))) v.shape = MTL_DECORATION_LINE;
+          else error ("Unknown decoration shape");
+        }
+      else if (EQ (key, intern (":rect"))) rect = value;
+      else if (EQ (key, intern (":clip")))
+        { v.clip = mtl_border_rect (value, "CLIP", NO); clip_seen = true; }
+      else if (EQ (key, intern (":fill")))
+        { v.hasFill = !NILP (value); if (v.hasFill) v.fill = mtl_decoration_color (value); }
+      else if (EQ (key, intern (":stroke")))
+        { v.hasStroke = !NILP (value); if (v.hasStroke) v.stroke = mtl_decoration_color (value); }
+      else if (EQ (key, intern (":z"))) { CHECK_FIXNUM (value); v.z = XFIXNUM (value); }
+      else if (EQ (key, intern (":opacity")))
+        { double number = mtl_decoration_number (value);
+          if (number < 0 || number > 1) error ("Opacity must be in 0..1");
+          v.opacity = number; }
+      else if (EQ (key, intern (":radius")))
+        { double number = mtl_decoration_number (value);
+          if (number < 0) error ("Radius must be nonnegative");
+          v.radius = number; }
+      else if (EQ (key, intern (":stroke-width")))
+        { double number = mtl_decoration_number (value);
+          if (number < 0.001) error ("Stroke width must be at least 0.001");
+          v.strokeWidth = number; }
+      else if (EQ (key, intern (":start-angle"))) v.startAngle = mtl_decoration_number (value);
+      else if (EQ (key, intern (":sweep-angle"))) v.sweepAngle = mtl_decoration_number (value);
+      else error ("Unknown decoration property");
+      plist = XCDR (plist);
+    }
+  /* Line width/height are signed endpoint deltas, including horizontal lines. */
+  if (v.shape == MTL_DECORATION_LINE)
+    {
+      v.rect = mtl_decoration_rect (rect, YES);
+    }
+  else v.rect = mtl_decoration_rect (rect, NO);
+  if (!clip_seen) error ("Decoration requires :clip");
+  if (v.radius < 0 || v.strokeWidth < 0.001 || v.opacity < 0 || v.opacity > 1)
+    error ("Invalid decoration radius, stroke width, or opacity");
+  if ((v.shape == MTL_DECORATION_CIRCLE || v.shape == MTL_DECORATION_ARC)
+      && v.rect.size.width != v.rect.size.height)
+    error ("Circle/arc requires square :rect");
+  if (fabs (v.sweepAngle) > 2 * M_PI + 0.000001)
+    error ("Arc sweep must be within -2pi..2pi");
+  if ((v.shape == MTL_DECORATION_ARC || v.shape == MTL_DECORATION_LINE) && v.hasFill)
+    error ("Arc/line does not support fill");
+  /* Normalize before shader fmod to keep angular arithmetic well conditioned. */
+  v.startAngle = fmod (v.startAngle, 2 * M_PI);
+  return v;
+}
+
+static void
+mtl_decoration_id (Lisp_Object id)
+{
+  CHECK_FIXNUM (id);
+  if (XFIXNUM (id) <= 0) error ("Decoration ID must be positive");
+}
+
+DEFUN ("gpu--decoration-create", Fmtl_decoration_create, Smtl_decoration_create, 1, 2, 0,
+       doc: /* Create a retained decoration from complete PROPERTIES on FRAME.
+Internal primitive for gpu.el.  Return a process-unique ID, or nil if unsupported.
+Validation precedes mutation even on unsupported frames.  */)
+  (Lisp_Object properties, Lisp_Object frame)
+{
+  MtlDecoration value = mtl_decoration_value (properties);
+  MtlFrameData *fd = mtl_border_frame_data (frame);
+  if (!fd) return Qnil;
+  static EMACS_INT next = 0;
+  if (next == MOST_POSITIVE_FIXNUM) error ("Decoration IDs exhausted");
+  EMACS_INT id = ++next;
+  return [fd setDecoration:value identifier:id cancel:3] ? make_fixnum (id) : Qnil;
+}
+
+DEFUN ("gpu--decoration-set", Fmtl_decoration_set, Smtl_decoration_set, 3, 4, 0,
+       doc: /* Replace decoration ID with complete PROPERTIES on FRAME.
+CANCEL is a bitmask: 1 cancels geometry animation, 2 cancels opacity animation.
+Omitted CANCEL means 3.  A missing ID is not recreated.  */)
+  (Lisp_Object id, Lisp_Object properties, Lisp_Object frame, Lisp_Object cancel)
+{
+  mtl_decoration_id (id);
+  MtlDecoration value = mtl_decoration_value (properties);
+  if (NILP (cancel)) cancel = make_fixnum (3);
+  CHECK_FIXNUM (cancel);
+  if (XFIXNUM (cancel) < 0 || XFIXNUM (cancel) > 3) error ("Invalid cancellation mask");
+  MtlFrameData *fd = mtl_border_frame_data (frame);
+  MtlDecorationRecord record;
+  return fd && [fd getDecoration:XFIXNUM (id) record:&record]
+    && [fd setDecoration:value identifier:XFIXNUM (id) cancel:XFIXNUM (cancel)] ? Qt : Qnil;
+}
+
+DEFUN ("gpu--decoration-remove", Fmtl_decoration_remove, Smtl_decoration_remove, 1, 2, 0,
+       doc: /* Remove retained decoration ID from FRAME.  Return t if removed.  */)
+  (Lisp_Object id, Lisp_Object frame)
+{
+  mtl_decoration_id (id);
+  MtlFrameData *fd = mtl_border_frame_data (frame);
+  return fd && [fd removeDecoration:XFIXNUM (id)] ? Qt : Qnil;
+}
+
+DEFUN ("gpu--decoration-animate", Fmtl_decoration_animate, Smtl_decoration_animate, 4, 7, 0,
+       doc: /* Animate ID's PROPERTY to TARGET over DURATION seconds on FRAME.
+PROPERTY is :rect or :opacity.  EASING is linear, ease-out, or ease-in-out.
+REPEAT is nil or t.  Retarget from the current native value, not the last Lisp
+snapshot.  Hidden objects use elapsed time when next presented.  */)
+  (Lisp_Object id, Lisp_Object property, Lisp_Object target, Lisp_Object duration,
+   Lisp_Object easing, Lisp_Object repeat, Lisp_Object frame)
+{
+  mtl_decoration_id (id);
+  double seconds = mtl_decoration_number (duration);
+  if (seconds < 0.001) error ("Animation duration must be at least 0.001 seconds");
+  int curve = 0, prop;
+  if (NILP (easing) || EQ (easing, intern ("linear"))) curve = 0;
+  else if (EQ (easing, intern ("ease-out"))) curve = 1;
+  else if (EQ (easing, intern ("ease-in-out"))) curve = 2;
+  else error ("Unknown decoration easing");
+  if (!NILP (repeat) && !EQ (repeat, Qt)) error ("Repeat must be nil or t");
+  float values[4] = { 0 };
+  if (EQ (property, intern (":opacity")))
+    {
+      prop = 2;
+      double number = mtl_decoration_number (target);
+      if (number < 0 || number > 1) error ("Opacity must be in 0..1");
+      values[0] = number;
+    }
+  else if (EQ (property, intern (":rect")))
+    {
+      prop = 1;
+      /* Dimensions are checked against the retained shape after lookup. */
+      Lisp_Object tail = target;
+      for (int i = 0; i < 4; i++)
+        { if (!CONSP (tail)) error ("Target rect requires four numbers");
+          values[i] = mtl_decoration_number (XCAR (tail)); tail = XCDR (tail); }
+      if (!NILP (tail)) error ("Target rect requires four numbers");
+    }
+  else error ("Only :rect and :opacity can animate");
+  MtlFrameData *fd = mtl_border_frame_data (frame);
+  MtlDecorationRecord record;
+  if (!fd || ![fd getDecoration:XFIXNUM (id) record:&record]) return Qnil;
+  if (prop == 1 && record.value.shape != MTL_DECORATION_LINE)
+    {
+      if (values[2] <= 0 || values[3] <= 0) error ("Target dimensions must be positive");
+      if ((record.value.shape == MTL_DECORATION_CIRCLE || record.value.shape == MTL_DECORATION_ARC)
+          && values[2] != values[3]) error ("Target circle/arc must be square");
+    }
+  return [fd animateDecoration:XFIXNUM (id) property:prop target:values
+                     duration:seconds easing:curve repeat:!NILP (repeat)] ? Qt : Qnil;
+}
+
+DEFUN ("gpu--decoration-state", Fmtl_decoration_state, Smtl_decoration_state, 1, 2, 0,
+       doc: /* Return sampled native geometry, opacity and animation flags for ID.
+Return nil for a missing decoration.  Does not retire animation tracks.  */)
+  (Lisp_Object id, Lisp_Object frame)
+{
+  mtl_decoration_id (id);
+  MtlFrameData *fd = mtl_border_frame_data (frame);
+  MtlDecorationRecord r;
+  if (!fd || ![fd getDecoration:XFIXNUM (id) record:&r]) return Qnil;
+  return list4 (list4 (make_float (r.value.rect.origin.x), make_float (r.value.rect.origin.y),
+                       make_float (r.value.rect.size.width), make_float (r.value.rect.size.height)),
+                make_float (r.value.opacity), r.geometry.active ? Qt : Qnil,
+                r.opacity.active ? Qt : Qnil);
 }
 
 DEFUN ("gpu-vsync", Fmtl_vsync, Smtl_vsync, 1, 2, 0,
@@ -833,6 +1246,14 @@ syms_of_mtlfns (void)
   defsubr (&Smtl_video_size);
   defsubr (&Smtl_anim_tick);
   defsubr (&Smtl_pump_tick);
+  defsubr (&Smtl_border_set);
+  defsubr (&Smtl_border_remove);
+  defsubr (&Smtl_border_supported_p);
+  defsubr (&Smtl_decoration_create);
+  defsubr (&Smtl_decoration_set);
+  defsubr (&Smtl_decoration_remove);
+  defsubr (&Smtl_decoration_animate);
+  defsubr (&Smtl_decoration_state);
   defsubr (&Smtl_vsync);
   defsubr (&Smtl_transition_start);
   defsubr (&Smtl_transition_active_p);

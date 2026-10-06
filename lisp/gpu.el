@@ -54,6 +54,8 @@
 
 ;;; Code:
 
+(require 'seq)
+
 ;; Primitives implemented in C (src/mtlfns.m); declared here so the byte
 ;; compiler knows their arity when this file is built without the backend.
 (declare-function gpu-backend-p "mtlfns.m" ())
@@ -122,6 +124,19 @@
 (defvar gpu--pump-fade-frame nil
   "Frame with a running buffer cross-fade, if any.")
 
+(defvar gpu--decoration-frames nil
+  "Frames whose decorations may need the shared pump.")
+
+(defvar gpu--border-frames nil
+  "Frames whose region borders may need the shared animation pump.")
+
+(defun gpu--border-forget-frame (frame)
+  "Forget deleted FRAME's GPU borders."
+  (setq gpu--border-frames (delq frame gpu--border-frames)
+        gpu--decoration-frames (delq frame gpu--decoration-frames)))
+
+(add-hook 'delete-frame-functions #'gpu--border-forget-frame)
+
 (defvar gpu--video-state)               ; defined with the inline video code
 
 (defun gpu--pump-start (&optional fast)
@@ -145,14 +160,15 @@ back to 30Hz when the fade ends (see `gpu--pump')."
         gpu--pump-interval nil))
 
 (defun gpu--pump-frames ()
-  "Frames the pump must tick: selected, video and fade frames, deduped."
+  "Frames the pump must tick: selected, video, fade and border frames."
+  (setq gpu--border-frames (seq-filter #'frame-live-p gpu--border-frames))
   (let ((fs (list (selected-frame))))
     (when gpu--video-state
       (let ((vf (nth 3 gpu--video-state)))
         (when (frame-live-p vf) (push vf fs))))
     (when (frame-live-p gpu--pump-fade-frame)
       (push gpu--pump-fade-frame fs))
-    (delete-dups fs)))
+    (delete-dups (append gpu--border-frames gpu--decoration-frames fs))))
 
 (defun gpu--pump ()
   "Advance every continuous GPU animation one step.
@@ -161,7 +177,12 @@ otherwise; cancels it once nothing needs pumping."
   (gpu--video-follow)
   (let ((mask 0))
     (dolist (f (gpu--pump-frames))
-      (setq mask (logior mask (or (gpu-pump-tick f) 0))))
+      (let ((active (or (gpu-pump-tick f) 0)))
+        (when (zerop (logand active 8))
+          (setq gpu--border-frames (delq f gpu--border-frames)))
+        (when (zerop (logand active 16))
+          (setq gpu--decoration-frames (delq f gpu--decoration-frames)))
+        (setq mask (logior mask active))))
     (when (zerop (logand mask 2))
       (setq gpu--pump-fade-frame nil))
     (if (zerop mask)
@@ -396,6 +417,278 @@ The NS backend still handles events, menus, and scrollbars."
                                     "ease-out-cubic" "spring" "ease-in-out-cubic")
                                   nil t))))
   (setopt gpu-scroll-easing easing))
+
+;; ---------------------------------------------------------------------------
+;; Experimental retained decorations
+
+(require 'cl-lib)
+
+(declare-function gpu--decoration-create "mtlfns.m" (properties &optional frame))
+(declare-function gpu--decoration-set "mtlfns.m" (id properties frame &optional cancel))
+(declare-function gpu--decoration-remove "mtlfns.m" (id &optional frame))
+(declare-function gpu--decoration-animate "mtlfns.m"
+                  (id property target duration &optional easing repeat frame))
+
+(cl-defstruct (gpu--decoration (:constructor gpu--decoration-handle))
+  id frame owner properties window start end padding)
+
+(defvar gpu--decorations nil
+  "Live Lisp-owned decoration handles.")
+
+(defun gpu-decoration-supported-p (&optional frame)
+  "Return non-nil if FRAME supports retained decorations.
+This does not enable Metal or any global animation effects."
+  (and (fboundp 'gpu--decoration-create)
+       (fboundp 'gpu-border-supported-p)
+       (gpu-border-supported-p (or frame (selected-frame)))))
+
+(defun gpu--decoration-plist (properties)
+  "Check that PROPERTIES is a finite, even plist without duplicate keys."
+  (unless (proper-list-p properties)
+    (error "Decoration properties must be a proper plist"))
+  (let ((tail properties) seen)
+    (while tail
+      (unless (cdr tail) (error "Decoration property lacks a value"))
+      (when (memq (car tail) seen) (error "Duplicate decoration property"))
+      (push (car tail) seen)
+      (setq tail (cddr tail))))
+  properties)
+
+(defun gpu--decoration-merge (base patch)
+  "Merge PATCH into BASE without mutating either plist."
+  (gpu--decoration-plist patch)
+  (let ((result (copy-tree base)))
+    (while patch
+      (setq result (plist-put result (car patch) (cadr patch))
+            patch (cddr patch)))
+    result))
+
+(defun gpu--decoration-wake (frame)
+  "Register FRAME with the existing shared animation pump."
+  (cl-pushnew frame gpu--decoration-frames)
+  (gpu--pump-start))
+
+(defun gpu-decoration-create (properties &optional frame owner)
+  "Create an opt-in retained decoration and return an owned handle.
+Return nil on unsupported FRAME, which defaults to the selected frame.
+OWNER is an optional buffer; killing it or changing its major mode deletes
+its decorations.  The caller must delete unowned handles.
+
+PROPERTIES is a plist with required :rect (X Y WIDTH HEIGHT), in logical
+frame pixels.  :shape is rounded-rectangle (default), circle, arc, or line.
+Circles/arcs require square bounds.  For a line :rect is (X1 Y1 DX DY),
+allowing either diagonal direction, horizontal/vertical or zero-length lines.
+:fill and :stroke are RGB integers or nil, defaulting to nil and white.
+:stroke-width defaults to 1; :radius to 0; :opacity to 1; :z to 0.
+:clip defaults to the current frame bounds and must have nonnegative sizes.
+Arc angles are radians: zero at right, positive clockwise, :start-angle 0,
+:sweep-angle 2pi by default, within -2pi..2pi.  Arcs and lines are stroked
+with round ends, not filled.  Unknown or invalid properties signal errors.
+
+Objects draw above cached text/video/crossfade and legacy borders, below
+animated cursors, in ascending :z then creation order.  Fill can obscure
+text.  This is not arbitrary behind-text layering."
+  (setq frame (or frame (selected-frame)))
+  (when (and owner (not (buffer-live-p owner))) (error "Owner must be a live buffer"))
+  (gpu--decoration-plist properties)
+  (when (fboundp 'gpu--decoration-create)
+    (let* ((clip (if (frame-live-p frame)
+                     (list 0 0 (frame-pixel-width frame) (frame-pixel-height frame))
+                   '(0 0 0 0)))
+           (snapshot (gpu--decoration-merge (list :clip clip) properties))
+           (id (gpu--decoration-create snapshot frame)))
+      (when id
+        (let ((handle (gpu--decoration-handle
+                       :id id :frame frame :owner owner :properties snapshot)))
+          (push handle gpu--decorations)
+          (when owner
+            (with-current-buffer owner
+              (add-hook 'kill-buffer-hook #'gpu--decoration-owner-cleanup nil t)
+              (add-hook 'change-major-mode-hook #'gpu--decoration-owner-cleanup nil t)))
+          handle)))))
+
+(defun gpu-decoration-update (handle properties)
+  "Patch HANDLE with PROPERTIES, returning t when accepted.
+Only an explicit :rect or :opacity cancels that property's native animation.
+Other updates preserve animation time.  Deleted handles cannot resurrect.
+Validation failures leave both the accepted native state and handle intact."
+  (unless (gpu--decoration-p handle) (signal 'wrong-type-argument (list 'gpu--decoration-p handle)))
+  (when (gpu--decoration-id handle)
+    (let ((snapshot (gpu--decoration-merge (gpu--decoration-properties handle) properties))
+          (cancel (+ (if (or (plist-member properties :rect)
+                             (plist-member properties :shape)) 1 0)
+                     (if (plist-member properties :opacity) 2 0))))
+      (if (gpu--decoration-set (gpu--decoration-id handle) snapshot
+                              (gpu--decoration-frame handle) cancel)
+          (progn
+            (setf (gpu--decoration-properties handle) snapshot)
+            (gpu--decoration-wake (gpu--decoration-frame handle))
+            t)
+        (gpu-decoration-delete handle)
+        nil))))
+
+(defun gpu-decoration-delete (handle)
+  "Delete HANDLE's retained object and release its ownership and markers.
+Repeated deletion is harmless.  Return non-nil if a native object was removed."
+  (when (and (gpu--decoration-p handle) (gpu--decoration-id handle))
+    (let ((id (gpu--decoration-id handle)) (frame (gpu--decoration-frame handle)))
+      (setf (gpu--decoration-id handle) nil
+            (gpu--decoration-owner handle) nil
+            (gpu--decoration-window handle) nil)
+      (setq gpu--decorations (delq handle gpu--decorations))
+      (dolist (marker (list (gpu--decoration-start handle) (gpu--decoration-end handle)))
+        (when (markerp marker) (set-marker marker nil)))
+      (when (frame-live-p frame) (gpu--decoration-remove id frame)))))
+
+(defun gpu-decoration-animate (handle property target duration &optional easing repeat)
+  "Animate HANDLE's PROPERTY to TARGET over DURATION seconds.
+PROPERTY is :opacity or :rect.  EASING is linear, ease-out (quadratic) or
+ease-in-out (smoothstep).  REPEAT t resets to the original start each cycle.
+Retargeting starts from the current native value.  Terminal values stay
+retained and are presented before the track retires.  Hidden/clipped frames
+stop pumping; monotonic elapsed time is used when presentation resumes.
+No decoration gets its own timer."
+  (unless (gpu--decoration-p handle) (signal 'wrong-type-argument (list 'gpu--decoration-p handle)))
+  (when (and (gpu--decoration-id handle)
+             (gpu--decoration-animate (gpu--decoration-id handle) property target
+                                      duration easing repeat (gpu--decoration-frame handle)))
+    (gpu--decoration-wake (gpu--decoration-frame handle))
+    t))
+
+(defun gpu-decoration-region (window start end &optional padding viewport-end)
+  "Return (RECT CLIP) for buffer START..END as displayed in WINDOW.
+Use actual window text pixel measurements, not stale glyph matrices.
+PADDING is (LEFT TOP RIGHT BOTTOM) added outward, default zero.
+VIEWPORT-END overrides a stale window end during redisplay-driven scrolling.
+Partially visible regions retain offscreen bounds so clip does not invent
+edges at the viewport.  This bounded helper is not a general layout engine."
+  (with-current-buffer (window-buffer window)
+    (unless (<= (point-min) start end (point-max)) (error "Invalid region bounds"))
+    (let* ((edges (window-inside-pixel-edges window))
+           (left (nth 0 edges)) (top (nth 1 edges))
+           (width (- (nth 2 edges) left)) (height (- (nth 3 edges) top))
+           (origin (window-start window))
+           (visible-end (or viewport-end (window-end window t) (point-max)))
+           (limit (* 3 (max 1 height)))
+           (start-y (if (< start origin) (- top height)
+                      (+ top (cdr (window-text-pixel-size window origin start nil limit nil t)))))
+           (end-y (if (> end visible-end) (+ top (* 2 height))
+                    (+ top (cdr (window-text-pixel-size
+                                 window origin end nil limit nil (eq (char-before end) ?\n))))))
+           (pad (or padding '(0 0 0 0))))
+      (list (list (- left (nth 0 pad)) (- start-y (nth 1 pad))
+                  (max 1 (+ width (nth 0 pad) (nth 2 pad)))
+                  (max 1 (+ (- end-y start-y) (nth 1 pad) (nth 3 pad))))
+            (list left top width height)))))
+
+(defun gpu-decoration-anchor (handle window start end &optional padding)
+  "Bind HANDLE to WINDOW's buffer region START..END, with optional PADDING.
+Ownership becomes that buffer.  Redisplay and scrolling update its geometry
+without touching opacity.  Window reassignment/deletion releases the handle."
+  (unless (and (gpu--decoration-p handle) (gpu--decoration-id handle)
+               (window-live-p window)
+               (eq (gpu--decoration-frame handle) (window-frame window)))
+    (error "Anchor requires a live handle on the window's frame"))
+  (let ((geometry (gpu-decoration-region window start end padding)))
+    (when (gpu-decoration-update handle (list :rect (car geometry) :clip (cadr geometry)))
+      (dolist (marker (list (gpu--decoration-start handle) (gpu--decoration-end handle)))
+        (when (markerp marker) (set-marker marker nil)))
+      (with-current-buffer (window-buffer window)
+        (setf (gpu--decoration-window handle) window
+              (gpu--decoration-owner handle) (current-buffer)
+              (gpu--decoration-start handle) (copy-marker start)
+              (gpu--decoration-end handle) (copy-marker end t)
+              (gpu--decoration-padding handle) padding)
+        (add-hook 'kill-buffer-hook #'gpu--decoration-owner-cleanup nil t)
+        (add-hook 'change-major-mode-hook #'gpu--decoration-owner-cleanup nil t))
+      handle)))
+
+(defun gpu--decoration-owner-cleanup ()
+  "Delete all decorations owned by the current buffer."
+  (dolist (handle (copy-sequence gpu--decorations))
+    (when (eq (gpu--decoration-owner handle) (current-buffer))
+      (gpu-decoration-delete handle))))
+
+(defun gpu--decoration-prune (&optional frame)
+  "Delete stale owned handles, including those on deleted FRAME."
+  (dolist (handle (copy-sequence gpu--decorations))
+    (let ((window (gpu--decoration-window handle)) (owner (gpu--decoration-owner handle)))
+      (when (or (eq frame (gpu--decoration-frame handle))
+                (not (frame-live-p (gpu--decoration-frame handle)))
+                (and owner (not (buffer-live-p owner)))
+                (and window (or (not (window-live-p window))
+                                (not (eq (window-buffer window) owner)))))
+        (gpu-decoration-delete handle)))))
+
+(defun gpu--decoration-redisplay (window &optional scrolling)
+  "Maintain owned anchors in WINDOW; SCROLLING avoids stale window ends."
+  (gpu--decoration-prune)
+  (dolist (handle (copy-sequence gpu--decorations))
+    (when (eq (gpu--decoration-window handle) window)
+      (condition-case err
+          (let* ((start (gpu--decoration-start handle))
+                 (end (gpu--decoration-end handle))
+                 (viewport-end (and scrolling
+                                    (with-current-buffer (window-buffer window)
+                                      (save-excursion
+                                        (goto-char (window-start window))
+                                        (vertical-motion (1+ (window-body-height window)) window)
+                                        (point)))))
+                 (geometry (gpu-decoration-region window start end
+                                                  (gpu--decoration-padding handle) viewport-end))
+                 (properties (gpu--decoration-properties handle)))
+            (unless (and (equal (car geometry) (plist-get properties :rect))
+                         (equal (cadr geometry) (plist-get properties :clip)))
+              (gpu-decoration-update handle (list :rect (car geometry) :clip (cadr geometry)))))
+        (error (gpu-decoration-delete handle)
+               (message "GPU decoration released: %s" (error-message-string err)))))))
+
+(defun gpu--decoration-scrolled (window _start)
+  "Maintain WINDOW's anchors after redisplay-driven scrolling."
+  (gpu--decoration-redisplay window t))
+
+(defun gpu--decoration-window-change (&rest _)
+  "Prune stale anchors and resume visible retained animations."
+  (gpu--decoration-prune)
+  (dolist (handle gpu--decorations)
+    (when (eq (frame-visible-p (gpu--decoration-frame handle)) t)
+      (gpu--decoration-wake (gpu--decoration-frame handle)))))
+
+(add-hook 'delete-frame-functions #'gpu--decoration-prune)
+(add-hook 'window-state-change-functions #'gpu--decoration-window-change)
+(add-hook 'pre-redisplay-functions #'gpu--decoration-redisplay)
+(add-hook 'window-scroll-functions #'gpu--decoration-scrolled)
+
+;; ---------------------------------------------------------------------------
+;; Region border overlays
+
+(declare-function gpu-border-set "mtlfns.m"
+                  (id rect clip state color &optional frame style))
+(declare-function gpu-border-remove "mtlfns.m" (id &optional frame))
+(declare-function gpu-border-supported-p "mtlfns.m" (&optional frame))
+
+(defun gpu-border-update (id rect clip state color &optional frame style)
+  "Draw border ID around RECT, clipped to CLIP, on FRAME.
+RECT and CLIP are (X Y WIDTH HEIGHT) in frame-relative logical pixels.
+STATE is `running', `complete', `failed', or `idle'; COLOR is an RGB integer.
+`idle' draws a static outline without keeping the animation pump active.
+FRAME defaults to the selected frame.  Return non-nil if supported.
+STYLE is the optional style plist described by `gpu-border-set'.
+Omitted properties use native defaults, rather than the previous style.
+Updating geometry or style preserves the border's animation time.
+The caller owns the region anchors and must delete borders no longer shown.
+Resubmit a running border when its frame becomes visible again."
+  (let ((frame (or frame (selected-frame))))
+    (when (and (fboundp 'gpu-border-set)
+               (gpu-border-set id rect clip state color frame style))
+      (cl-pushnew frame gpu--border-frames)
+      (gpu--pump-start)
+      t)))
+
+(defun gpu-border-delete (id &optional frame)
+  "Remove border ID from FRAME, which defaults to the selected frame."
+  (when (fboundp 'gpu-border-remove)
+    (gpu-border-remove id (or frame (selected-frame)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Buffer-switch transitions

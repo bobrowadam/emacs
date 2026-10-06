@@ -1,6 +1,6 @@
 # Bmacs
 
-Bmacs is Bob's Emacs fork. It includes GPU rendering and native two-row mode lines.
+Bmacs is Bob's Emacs fork. It includes GPU rendering.
 
 ## Branches and remotes
 
@@ -45,12 +45,13 @@ python3 admin/bmacs/manage.py install "/path/printed/by/prepare"
 ```
 
 - **Prepare** builds serially, runs sanity checks, installs into the build directory, and stages a complete app under `~/Library/Application Support/bmacs-updates/`. It applies the source-controlled branding and `admin/bmacs/Emacs.icns`, signs the bundle, checks startup, and runs focused batch and hidden-GUI tests. It never updates the installed app.
+- **Signing**: `prepare --signing-identity NAME_OR_SHA1` or `BMACS_SIGNING_IDENTITY` selects a persistent Keychain code-signing identity so privacy grants can survive rebuilds. The default remains ad-hoc signing with a warning. An unavailable or ambiguous configured identity fails before building, and signing failures must never silently fall back to ad-hoc. Setup instructions are in [admin/bmacs/README.md](admin/bmacs/README.md). Never create certificates, alter Keychain trust, or regrant permissions without authorization.
 - **Install** is a separate, explicitly authorized action. It verifies the prepared artifacts, creates a rollback ZIP, refuses to quit with unsaved file buffers, quits Bmacs, swaps whole bundles, and reopens Bmacs in the background. It confirms the new process's startup acknowledgment before reporting success. Use `--socket PATH` if the current Emacs uses a nondefault server socket; if it has no server, quit it manually first.
 - Run installation from standalone Pi or Terminal, not through tools hosted by the Emacs being replaced. The helper rejects installation when the target Emacs is its ancestor. Do not add a background updater or depend on Emacs surviving its own replacement.
 - When native Emacs is in use, `install PREPARED --isolated-launch` requires Bmacs to be stopped and starts it with `-Q` and its own private socket. It does not load user init or Mentat; use the printed socket for Bmacs-only checks, and never assume the default socket belongs to Bmacs.
 - Preserve the helper's logs, manifest, and rollback. The manifest records source revision, dirty state, configure options, checks, and artifact hashes. The portable dump's embedded revision alone is not proof of which build was installed.
 - Report **BUILT**, **STAGED**, **INSTALLED**, and **RUNNING** distinctly. A prepared app is not an installed app; a successful copy is not a confirmed running process. If startup fails, report the recovery directory instead of claiming completion.
-- Report skipped tests separately from passes. Hidden-frame checks do not cover visible painting or the five visibility-dependent mode-line tests. Run additional checks appropriate to the source change before approving installation.
+- Report skipped tests separately from passes. Hidden-frame checks do not cover visible painting or visible mode-line behavior. Run additional checks appropriate to the source change before approving installation.
 
 When changing the helper, run `python3 -m unittest discover -s admin/bmacs -p 'test_*.py'`. For deployment changes, also run `BMACS_PREPARED="/path/printed/by/prepare" python3 -m unittest discover -s admin/bmacs -p 'test_*.py'`; this opt-in test swaps a disposable app and leaves the working installation alone. It skips when `BMACS_PREPARED` is unset.
 

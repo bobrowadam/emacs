@@ -374,9 +374,6 @@ struct window
     /* Effective height of the mode line, or -1 if not known.  */
     int mode_line_height;
 
-    /* Number of rows used when mode_line_height was computed.  */
-    int mode_line_height_rows;
-
     /* Effective height of the header line, or -1 if not known.  */
     int header_line_height;
 
@@ -1026,7 +1023,7 @@ wset_next_buffers (struct window *w, Lisp_Object val)
    : 0)
 
 #define WINDOW_MODE_LINE_LINES(W)	\
-  (window_wants_mode_line (W) ? window_mode_line_rows (W) : 0)
+  window_wants_mode_line (W)
 
 /* Height in pixels of the header line.
    Zero if W doesn't have a header line.  */
@@ -1212,7 +1209,6 @@ extern Lisp_Object window_parameter (struct window *, Lisp_Object parameter);
 extern struct window *decode_live_window (Lisp_Object);
 extern struct window *decode_any_window (Lisp_Object);
 extern void mark_window_cursors_off (struct window *);
-extern int window_mode_line_rows (struct window *);
 extern bool window_wants_mode_line (struct window *);
 extern bool window_wants_header_line (struct window *);
 extern bool window_wants_tab_line (struct window *);

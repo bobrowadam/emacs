@@ -34,7 +34,7 @@ ARTIFACTS = (
     "Contents/Info.plist",
     "Contents/Resources/Emacs.icns",
 )
-STARTUP_CHECK = "(unless (boundp 'mode-line-rows-format) (error \"Missing two-row support\"))"
+STARTUP_CHECK = "(unless (and (featurep 'ns) (fboundp 'gpu-backend-p)) (error \"Missing NS/GPU support\"))"
 
 
 def run(*args, **kwargs):
@@ -53,6 +53,45 @@ def require(condition, message):
 def hashes(app):
     return {name: hashlib.sha256((app / name).read_bytes()).hexdigest()
             for name in ARTIFACTS}
+
+
+def resolve_signing_identity(identity):
+    """Resolve a certificate name or SHA-1 to one valid Keychain identity."""
+    identity = identity.strip()
+    require(identity, "Signing identity must not be empty; use '-' for ad-hoc signing")
+    if identity == "-":
+        return identity
+    identities = re.findall(
+        r'^\s*\d+\) ([0-9A-Fa-f]{40}) "(.*)"\s*$',
+        output("/usr/bin/security", "find-identity", "-v", "-p", "codesigning"),
+        re.MULTILINE)
+    matches = {fingerprint.upper() for fingerprint, name in identities
+               if identity.upper() == fingerprint.upper() or identity == name}
+    require(matches, f"No valid code-signing identity matches {identity!r}; "
+            "check 'security find-identity -v -p codesigning'")
+    require(len(matches) == 1,
+            f"Ambiguous code-signing identity {identity!r}; use its SHA-1 fingerprint")
+    return matches.pop()
+
+
+def sign_bundle(app, identity):
+    """Sign a staged bundle and record its public code identity, never its key."""
+    if identity == "-":
+        print("Warning: ad-hoc signing changes Bmacs's identity on rebuild; "
+              "privacy permissions may need to be granted again. "
+              "Set BMACS_SIGNING_IDENTITY or use --signing-identity.", file=sys.stderr)
+    run("/usr/bin/codesign", "--force", "--deep", "--sign", identity, "--identifier",
+        BRANDING["CFBundleIdentifier"], app)
+    requirements = output("/usr/bin/codesign", "--display", "--requirements", "-", app)
+    match = re.search(r'^#?\s*designated => (.+)$', requirements, re.MULTILINE)
+    require(match, "Signed bundle has no designated requirement")
+    requirement = match.group(1)
+    if identity != "-":
+        require("cdhash" not in requirement
+                and re.search(r'\b(?:certificate|anchor)\b', requirement),
+                "Signing did not produce a certificate-based designated requirement")
+    return {"mode": "ad-hoc" if identity == "-" else "certificate",
+            "identity": identity, "designated_requirement": requirement}
 
 
 def verify_bundle(app):
@@ -127,7 +166,7 @@ def graphical_checks(app, directory):
                     process.wait()
 
 
-def prepare(build):
+def prepare(build, signing_identity="-"):
     build = build.expanduser().resolve()
     require(build != ROOT and ROOT not in build.parents,
             "Use a build directory outside the source checkout")
@@ -140,6 +179,8 @@ def prepare(build):
     require(settings.get("ns_self_contained") == "yes"
             and Path(settings.get("ns_appdir", "")).resolve() == source_app,
             "Configure a self-contained NS build whose install target stays in the build directory")
+    # Fail before building or staging, never silently fall back to ad-hoc signing.
+    signing_identity = resolve_signing_identity(signing_identity)
     updates = SUPPORT / "bmacs-updates"
     updates.mkdir(parents=True, exist_ok=True)
     directory = Path(tempfile.mkdtemp(prefix="prepared-", dir=updates))
@@ -160,8 +201,7 @@ def prepare(build):
     require((app / ARTIFACTS[1]).read_bytes() == (build / "src/emacs.pdmp").read_bytes(),
             "Installed portable dump does not match the build")
     brand_bundle(app)
-    run("/usr/bin/codesign", "--force", "--deep", "--sign", "-", "--identifier",
-        BRANDING["CFBundleIdentifier"], app)
+    manifest["signing"] = sign_bundle(app, signing_identity)
     verify_bundle(app)
     with (directory / "batch.log").open("w") as log:
         code = f'(bmacs-checks-run nil {json.dumps(str(directory / "batch.json"))})'
@@ -306,6 +346,9 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     build = commands.add_parser("prepare", help="build and verify without changing the installed app")
     build.add_argument("build_directory", type=Path, help="existing configured, separate NS build directory")
+    build.add_argument("--signing-identity", default=os.environ.get("BMACS_SIGNING_IDENTITY", "-"),
+                       help="Keychain code-signing certificate name or SHA-1 fingerprint "
+                       "(default: BMACS_SIGNING_IDENTITY, otherwise '-' for ad-hoc)")
     deploy = commands.add_parser("install", help="back up, quit, replace, and reopen Bmacs (explicit authorization)")
     deploy.add_argument("prepared_directory", type=Path, help="directory printed by prepare")
     deploy.add_argument("--socket", type=Path, default=SOCKET, help="current Bmacs server socket")
@@ -314,7 +357,7 @@ def main():
     args = parser.parse_args()
     require(sys.platform == "darwin", "This helper is for macOS")
     if args.command == "prepare":
-        prepare(args.build_directory)
+        prepare(args.build_directory, args.signing_identity)
     else:
         install(args.prepared_directory, args.socket, args.isolated_launch)
 

@@ -68,7 +68,8 @@ class DisposableInstallationTest(unittest.TestCase):
                 return real_run(*args, **kwargs)
 
             try:
-                code = (f'(progn (require (quote server)) '
+                code = (f'(progn (setq native-comp-jit-compilation nil) '
+                        f'(require (quote server)) '
                         f'(setq server-name {json.dumps(str(socket))}) (server-start))')
                 real_run("/usr/bin/open", "-g", "-n", app, "--args", "-Q", "--eval", code)
                 deadline = time.monotonic() + 30
@@ -79,6 +80,14 @@ class DisposableInstallationTest(unittest.TestCase):
                     except (subprocess.SubprocessError, ValueError):
                         self.assertLess(time.monotonic(), deadline, "Private test server did not start")
                         time.sleep(0.2)
+                # NS startup can start a native compiler before --eval runs.
+                # Wait for owned compiler children instead of weakening the
+                # installer's multiple-instance safeguard for this fixture.
+                deadline = time.monotonic() + 30
+                while manage.running_pids(app) != [old_pid]:
+                    self.assertLess(time.monotonic(), deadline,
+                                    "Disposable app still has extra processes")
+                    time.sleep(0.1)
                 unsaved = json.dumps(str(root / "unsaved.txt"))
                 manage.client(app, socket,
                               f'(with-current-buffer (find-file-noselect {unsaved}) (insert "test"))')

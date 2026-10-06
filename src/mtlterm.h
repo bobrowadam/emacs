@@ -196,6 +196,43 @@ typedef struct mtl_spring {
    Stored as ObjC associated object on EmacsView.
    ----------------------------------------------------------------------- */
 
+typedef NS_ENUM (NSUInteger, MtlBorderState) {
+  MTL_BORDER_RUNNING,
+  MTL_BORDER_COMPLETE,
+  MTL_BORDER_FAILED,
+  MTL_BORDER_IDLE,
+};
+
+/* Per-border styling, supplied by the Lisp API in logical pixels. */
+typedef struct {
+  float cornerRadius, strokeWidth, opacity;
+  float cycleDuration, runnerFraction, glowOpacity;
+} MtlBorderStyle;
+
+/* Generic compositor geometry and paint, independent of application state. */
+typedef NS_ENUM (NSUInteger, MtlDecorationShape) {
+  MTL_DECORATION_RECT, MTL_DECORATION_CIRCLE,
+  MTL_DECORATION_ARC, MTL_DECORATION_LINE
+};
+typedef struct {
+  NSRect rect, clip;
+  MtlDecorationShape shape;
+  unsigned long fill, stroke;
+  BOOL hasFill, hasStroke;
+  float radius, strokeWidth, opacity, startAngle, sweepAngle;
+  EMACS_INT z;
+} MtlDecoration;
+typedef struct {
+  BOOL active, repeat;
+  CFTimeInterval start, duration;
+  int easing;
+  float from[4], to[4];
+} MtlDecorationTrack;
+typedef struct {
+  MtlDecoration value;
+  MtlDecorationTrack geometry, opacity;
+} MtlDecorationRecord;
+
 @interface MtlFrameData : NSObject
 /* Metal resources */
 @property (nonatomic, strong) CAMetalLayer               *metalLayer;
@@ -230,6 +267,8 @@ typedef struct mtl_spring {
    the previous one are deferred and flushed by a one-shot main-queue
    block (or absorbed by the next cycle's present).  */
 @property (nonatomic, assign) CFTimeInterval              lastPresentTime;
+/* Pump dt is per frame: border-bearing frames can be ticked independently. */
+@property (nonatomic, assign) CFTimeInterval              lastPumpTime;
 @property (nonatomic, assign) BOOL                        presentScheduled;
 
 /* Buffer-switch transition: a snapshot of the previous content cross-
@@ -243,9 +282,33 @@ typedef struct mtl_spring {
    defer and coalesce so drawable waits cannot monopolize the event loop. */
 - (void)presentCoalesced;
 
+/* Generic objects have their own ID namespace, separate from borders. */
+- (BOOL)setDecoration:(MtlDecoration)value identifier:(unsigned long long)identifier
+               cancel:(int)cancel;
+- (BOOL)removeDecoration:(unsigned long long)identifier;
+- (BOOL)getDecoration:(unsigned long long)identifier record:(MtlDecorationRecord *)record;
+- (BOOL)animateDecoration:(unsigned long long)identifier property:(int)property
+                  target:(float *)target duration:(double)duration
+                  easing:(int)easing repeat:(BOOL)repeat;
+- (BOOL)decorationsNeedPump;
+
+/* Moving tool-card borders are independent compositor overlays. */
+- (BOOL)setBorderWithID:(unsigned long long)identifier
+                   rect:(NSRect)rect
+                   clip:(NSRect)clip
+                  state:(MtlBorderState)state
+                  color:(unsigned long)color
+                  style:(MtlBorderStyle)style;
+- (BOOL)removeBorderWithID:(unsigned long long)identifier;
+- (BOOL)borderOverlaysNeedPump;
+
 /* Encode blit+overlays to DRAWABLE on CMD and queue its present.  */
 - (void)encodeCompositeOn:(id<MTLCommandBuffer>)cmd
                  drawable:(id<CAMetalDrawable>)drawable;
+
+/* Offscreen capture uses exactly the same compositor, without presenting. */
+- (void)encodeCompositeTextureOn:(id<MTLCommandBuffer>)cmd
+                          texture:(id<MTLTexture>)texture;
 
 /* Active inline video (one per frame for now), drawn by
    compositeToScreen over the static texture. */
