@@ -1,6 +1,6 @@
 # Bmacs
 
-Bmacs is Bob's Emacs fork. It includes GPU rendering and native two-row mode lines.
+Bmacs is Bob's Emacs fork. It includes GPU rendering.
 
 ## Branches and remotes
 
@@ -51,7 +51,7 @@ python3 admin/bmacs/manage.py install "/path/printed/by/prepare"
 - When native Emacs is in use, `install PREPARED --isolated-launch` requires Bmacs to be stopped and starts it with `-Q` and its own private socket. It does not load user init or Mentat; use the printed socket for Bmacs-only checks, and never assume the default socket belongs to Bmacs.
 - Preserve the helper's logs, manifest, and rollback. The manifest records source revision, dirty state, configure options, checks, and artifact hashes. The portable dump's embedded revision alone is not proof of which build was installed.
 - Report **BUILT**, **STAGED**, **INSTALLED**, and **RUNNING** distinctly. A prepared app is not an installed app; a successful copy is not a confirmed running process. If startup fails, report the recovery directory instead of claiming completion.
-- Report skipped tests separately from passes. Hidden-frame checks do not cover visible painting or the five visibility-dependent mode-line tests. Run additional checks appropriate to the source change before approving installation.
+- Report skipped tests separately from passes. Hidden-frame checks do not cover visible painting or visible mode-line behavior. Run additional checks appropriate to the source change before approving installation.
 
 When changing the helper, run `python3 -m unittest discover -s admin/bmacs -p 'test_*.py'`. For deployment changes, also run `BMACS_PREPARED="/path/printed/by/prepare" python3 -m unittest discover -s admin/bmacs -p 'test_*.py'`; this opt-in test swaps a disposable app and leaves the working installation alone. It skips when `BMACS_PREPARED` is unset.
 

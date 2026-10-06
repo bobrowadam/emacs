@@ -207,6 +207,172 @@ fragment float4 image_fragment(ImageOut in [[stage_in]],
   color *= in.alpha;
   return color;
 }
+
+struct BorderVertex {
+  float2 position [[attribute(0)]];
+  float2 local    [[attribute(1)]];
+};
+struct BorderOut {
+  float4 position [[position]];
+  float2 local;
+};
+struct BorderUniforms {
+  float2 size;
+  float radius;
+  float stroke;
+  float elapsed;
+  float opacity;
+  float state;
+  float padding;
+  float cycleDuration;
+  float runnerFraction;
+  float glowOpacity;
+  float stylePadding;
+  float4 color;
+};
+vertex BorderOut border_vertex(BorderVertex in [[stage_in]],
+                                constant Uniforms &u [[buffer(1)]]) {
+  BorderOut out;
+  out.position = float4(to_ndc(in.position, u.screenSize), 0.0, 1.0);
+  out.local = in.local;
+  return out;
+}
+
+static float rounded_rect_distance(float2 p, float2 size, float radius) {
+  float2 q = abs(p - size * 0.5) - (size * 0.5 - radius);
+  return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - radius;
+}
+
+static float rounded_rect_path(float2 p, float2 size, float radius) {
+  const float half_pi = 1.57079632679;
+  const float pi = 3.14159265359;
+  const float two_pi = 6.28318530718;
+  float top = max(size.x - 2.0 * radius, 0.0);
+  float side = max(size.y - 2.0 * radius, 0.0);
+  float quarter = half_pi * radius;
+  float perimeter = 2.0 * (top + side) + two_pi * radius;
+  float angle, path;
+  if (p.y < radius && p.x > size.x - radius) {
+    angle = atan2(p.y - radius, p.x - (size.x - radius));
+    path = top + radius * (angle + half_pi);
+  } else if (p.y > size.y - radius && p.x > size.x - radius) {
+    angle = atan2(p.y - (size.y - radius), p.x - (size.x - radius));
+    path = top + quarter + side + radius * angle;
+  } else if (p.y > size.y - radius && p.x < radius) {
+    angle = atan2(p.y - (size.y - radius), p.x - radius);
+    path = top + quarter + side + quarter + top
+      + radius * (angle - half_pi);
+  } else if (p.y < radius && p.x < radius) {
+    angle = atan2(p.y - radius, p.x - radius);
+    if (angle < 0.0) angle += two_pi;
+    path = perimeter - quarter + radius * (angle - pi);
+  } else {
+    /* Interior stroke pixels can lie beyond the corner regions when the
+       radius is smaller than half the stroke width.  Choose the nearest
+       straight edge instead of treating every such pixel as a left edge. */
+    float2 distance = min(p, size - p);
+    if (distance.y <= distance.x) {
+      if (p.y < size.y * 0.5)
+        path = clamp(p.x - radius, 0.0, top);
+      else
+        path = top + quarter + side + quarter
+          + clamp(size.x - radius - p.x, 0.0, top);
+    } else if (p.x > size.x * 0.5)
+      path = top + quarter + clamp(p.y - radius, 0.0, side);
+    else
+      path = top + quarter + side + quarter + top + quarter
+        + clamp(size.y - radius - p.y, 0.0, side);
+  }
+  return path / perimeter;
+}
+
+static float dash_along_distance(float phase, float perimeter,
+                                 float dash_fraction) {
+  float position = phase * perimeter;
+  float dash_length = dash_fraction * perimeter;
+  return position < dash_length
+    ? min(position, dash_length - position)
+    : -min(position - dash_length, perimeter - position);
+}
+
+fragment float4 border_fragment(BorderOut in [[stage_in]],
+                                 constant BorderUniforms &b [[buffer(0)]]) {
+  float d = rounded_rect_distance(in.local, b.size, b.radius);
+  float aa = max(fwidth(d), 0.5);
+  float edge = 1.0 - smoothstep(b.stroke * 0.5 - aa,
+                                b.stroke * 0.5 + aa, abs(d));
+  float alpha = 0.0;
+  if (b.state < 0.5 && b.runnerFraction > 0.0) {
+    float path = rounded_rect_path(in.local, b.size, b.radius);
+    float phase = fract(path - b.elapsed / b.cycleDuration);
+    float perimeter = 2.0 * (b.size.x + b.size.y - 4.0 * b.radius)
+      + 6.28318530718 * b.radius;
+    float runner_along = dash_along_distance(phase, perimeter, b.runnerFraction);
+    float runner_distance = length(float2(min(runner_along, 0.0), d));
+    float core = 1.0 - smoothstep(b.stroke * 0.5 - aa,
+                                  b.stroke * 0.5 + aa, runner_distance);
+    float halo_along = dash_along_distance(phase, perimeter,
+                                           b.runnerFraction * (9.0 / 11.0));
+    float halo_distance = length(float2(min(halo_along, 0.0), d));
+    float halo_falloff = max(halo_distance - 3.5, 0.0) / 2.0;
+    float halo = b.glowOpacity * exp(-0.5 * halo_falloff * halo_falloff);
+    alpha = max(0.24 * edge, core + halo * (1.0 - core));
+  } else {
+    float opacity = 1.0;
+    if (b.state > 2.5) opacity = 0.35;
+    else if (b.state > 1.5) opacity = 0.7;
+    else if (b.state < 0.5) opacity = 0.24;
+    alpha = edge * opacity;
+  }
+  return float4(b.color.rgb, alpha * b.opacity);
+}
+
+struct DecorationUniforms {
+  float2 size;
+  float radius, strokeWidth;
+  float opacity, shape, startAngle, sweepAngle;
+  float4 fill, stroke;
+};
+static float decoration_distance(float2 p, constant DecorationUniforms &b) {
+  if (b.shape < 0.5)
+    return rounded_rect_distance(p, b.size, b.radius);
+  if (b.shape < 2.5)
+    return length(p - b.size * 0.5) - b.size.x * 0.5;
+  float denominator = dot(b.size, b.size);
+  float t = denominator > 0.0 ? clamp(dot(p, b.size) / denominator, 0.0, 1.0) : 0.0;
+  return length(p - t * b.size);
+}
+static float4 decoration_paint(float2 p, constant DecorationUniforms &b) {
+  const float tau = 6.28318530718;
+  float d = decoration_distance(p, b);
+  if (b.shape > 1.5 && b.shape < 2.5) {
+    if (abs(b.sweepAngle) < 0.000001) return float4(0);
+    float2 center = b.size * 0.5;
+    float angle = atan2(p.y - center.y, p.x - center.x);
+    float direction = b.sweepAngle < 0.0 ? -1.0 : 1.0;
+    float phase = fmod(direction * (angle - b.startAngle) + tau * 2.0, tau);
+    if (phase > abs(b.sweepAngle)) {
+      float2 a = center + center.x * float2(cos(b.startAngle), sin(b.startAngle));
+      float end = b.startAngle + b.sweepAngle;
+      float2 z = center + center.x * float2(cos(end), sin(end));
+      d = min(length(p - a), length(p - z));
+    }
+  }
+  /* Arc endpoint selection is discontinuous away from its stroke.  Taking
+     derivatives of that distance invents a radial fringe at the end angle.
+     Screen-space coordinate derivatives give bounded antialiasing instead. */
+  float aa = max(max(fwidth(p.x), fwidth(p.y)), 0.5);
+  float fill = b.shape < 1.5 ? (1.0 - smoothstep(-aa, aa, d)) * b.fill.a : 0.0;
+  float stroke = (1.0 - smoothstep(b.strokeWidth * 0.5 - aa,
+                                  b.strokeWidth * 0.5 + aa, abs(d))) * b.stroke.a;
+  float alpha = stroke + fill * (1.0 - stroke);
+  float3 rgb = alpha > 0.0 ? (b.stroke.rgb * stroke + b.fill.rgb * fill * (1.0 - stroke)) / alpha : float3(0);
+  return float4(rgb, alpha * b.opacity);
+}
+fragment float4 decoration_fragment(BorderOut in [[stage_in]],
+                                     constant DecorationUniforms &b [[buffer(0)]]) {
+  return decoration_paint(in.local, b);
+}
 )MSL";
 
 /* -----------------------------------------------------------------------
@@ -222,8 +388,31 @@ typedef struct {
 } MtlRectVertex;
 
 typedef struct {
+  float x, y, local_x, local_y;
+} MtlBorderVertex;
+
+typedef struct {
+  float width, height, radius, stroke;
+  float elapsed, opacity, state, padding;
+  float cycleDuration, runnerFraction, glowOpacity, stylePadding;
+  float color[4];
+} MtlBorderUniforms;
+
+typedef struct {
   float screen_width, screen_height;
 } MtlUniforms;
+
+typedef struct {
+  NSRect rect;
+  NSRect clip;
+  MtlBorderState state;
+  unsigned long color;
+  MtlBorderStyle style;
+  CFTimeInterval startTime;
+  BOOL cleanupPresented;
+} MtlBorderRecord;
+
+#define MTL_BORDER_COMPLETE_DURATION 1.9
 
 /* -----------------------------------------------------------------------
    Global state
@@ -313,6 +502,8 @@ BOOL            g_mtl_cursor_suppress_effects = NO;
 /* Phase 4: additional global pipeline state */
 static id<MTLRenderPipelineState> g_blit_pipeline     = nil;
 static id<MTLRenderPipelineState> g_particle_pipeline = nil;
+static id<MTLRenderPipelineState> g_border_pipeline   = nil;
+static id<MTLRenderPipelineState> g_decoration_pipeline = nil;
 
 /* Phase 5: inline image pipeline (RGBA, full texture output) */
 static id<MTLRenderPipelineState> g_image_pipeline    = nil;
@@ -521,6 +712,57 @@ mtl_global_setup (void)
     if (!g_particle_pipeline) NSLog(@"emacs-mtl: particle pipeline error: %@", err);
   }
 
+  /* Rounded, alpha-blended tool-card border overlay. */
+  {
+    MTLRenderPipelineDescriptor *pd = [[MTLRenderPipelineDescriptor alloc] init];
+    pd.vertexFunction = [g_library newFunctionWithName:@"border_vertex"];
+    pd.fragmentFunction = [g_library newFunctionWithName:@"border_fragment"];
+    pd.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+    pd.colorAttachments[0].blendingEnabled = YES;
+    pd.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
+    pd.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+    pd.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorSourceAlpha;
+    pd.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+
+    MTLVertexDescriptor *vd = [MTLVertexDescriptor vertexDescriptor];
+    vd.attributes[0].format = MTLVertexFormatFloat2;
+    vd.attributes[0].offset = offsetof (MtlBorderVertex, x);
+    vd.attributes[0].bufferIndex = 0;
+    vd.attributes[1].format = MTLVertexFormatFloat2;
+    vd.attributes[1].offset = offsetof (MtlBorderVertex, local_x);
+    vd.attributes[1].bufferIndex = 0;
+    vd.layouts[0].stride = sizeof (MtlBorderVertex);
+    pd.vertexDescriptor = vd;
+
+    g_border_pipeline = [g_device newRenderPipelineStateWithDescriptor:pd error:&err];
+    if (!g_border_pipeline)
+      NSLog (@"emacs-mtl: border pipeline error: %@", err);
+  }
+
+  /* Same quad layout and blend policy, independent generic paint. */
+  {
+    MTLRenderPipelineDescriptor *pd = [[MTLRenderPipelineDescriptor alloc] init];
+    pd.vertexFunction = [g_library newFunctionWithName:@"border_vertex"];
+    pd.fragmentFunction = [g_library newFunctionWithName:@"decoration_fragment"];
+    pd.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+    pd.colorAttachments[0].blendingEnabled = YES;
+    pd.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
+    pd.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+    pd.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorOne;
+    pd.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+    MTLVertexDescriptor *vd = [MTLVertexDescriptor vertexDescriptor];
+    vd.attributes[0].format = MTLVertexFormatFloat2;
+    vd.attributes[0].offset = 0;
+    vd.attributes[0].bufferIndex = 0;
+    vd.attributes[1].format = MTLVertexFormatFloat2;
+    vd.attributes[1].offset = 8;
+    vd.attributes[1].bufferIndex = 0;
+    vd.layouts[0].stride = sizeof (MtlBorderVertex);
+    pd.vertexDescriptor = vd;
+    g_decoration_pipeline = [g_device newRenderPipelineStateWithDescriptor:pd error:&err];
+    if (!g_decoration_pipeline) NSLog (@"emacs-mtl: decoration pipeline error: %@", err);
+  }
+
   /* Phase 5: image pipeline (RGBA textures, alpha blending) */
   {
     MTLRenderPipelineDescriptor *pd = [[MTLRenderPipelineDescriptor alloc] init];
@@ -590,6 +832,7 @@ glyph_cache_init (void)
 static void
 mtl_atlas_reset (void)
 {
+  if (getenv ("MTL_LOG_SEQ")) fprintf (stderr, "[mtlatlas] RESET\n");
   mtl_flush_batch ();
   glyph_cache_init ();
   if (g_atlas)
@@ -1184,7 +1427,8 @@ mtl_log_seq_p (void)
   if (fd.transitionTexture)
     needsComposite = YES;
 
-  if (needsComposite || self.cursorDirty)
+  if (needsComposite || self.cursorDirty || [fd borderOverlaysNeedPump]
+      || [fd decorationsNeedPump])
     {
       self.cursorDirty = NO;
       [fd presentCoalesced];
@@ -1312,8 +1556,32 @@ mtl_log_seq_p (void)
 @end
 
 /* -----------------------------------------------------------------------
-   @implementation MtlFrameData
+   MtlFrameData
    ----------------------------------------------------------------------- */
+
+static void
+mtl_decoration_sample_track (MtlDecorationTrack *track, float *values, int count,
+                             CFTimeInterval now, BOOL retire)
+{
+  if (!track->active) return;
+  double elapsed = MAX (0.0, (now - track->start) / track->duration);
+  float t = track->repeat ? (float) (elapsed - floor (elapsed)) : MIN (elapsed, 1.0);
+  if (track->easing == 1) t = 1.0f - (1.0f - t) * (1.0f - t);
+  else if (track->easing == 2) t = t * t * (3.0f - 2.0f * t);
+  for (int i = 0; i < count; i++)
+    values[i] = track->from[i] + (track->to[i] - track->from[i]) * t;
+  if (retire && !track->repeat && elapsed >= 1.0) track->active = NO;
+}
+
+static void
+mtl_decoration_sample (MtlDecorationRecord *record, CFTimeInterval now, BOOL retire)
+{
+  float rect[] = { record->value.rect.origin.x, record->value.rect.origin.y,
+                   record->value.rect.size.width, record->value.rect.size.height };
+  mtl_decoration_sample_track (&record->geometry, rect, 4, now, retire);
+  record->value.rect = NSMakeRect (rect[0], rect[1], rect[2], rect[3]);
+  mtl_decoration_sample_track (&record->opacity, &record->value.opacity, 1, now, retire);
+}
 
 @interface MtlFrameData ()
 - (void)shutdown;
@@ -1324,6 +1592,15 @@ mtl_log_seq_p (void)
 - (void)drawFringeBits:(unsigned short *)bits dh:(int)dh bw:(int)bw
                     wd:(int)wd h:(int)h
                    atX:(int)x y:(int)y color:(unsigned long)color;
+@property (nonatomic, strong) NSMutableDictionary *decorationRecords;
+- (void)drawDecorationsOnEncoder:(id<MTLRenderCommandEncoder>)encoder
+                       texture:(id<MTLTexture>)texture;
+@property (nonatomic, strong) NSMutableDictionary *borderRecords;
+- (void)drawBorderOverlaysOnEncoder:(id<MTLRenderCommandEncoder>)encoder
+                           texture:(id<MTLTexture>)texture;
+- (void)requestBorderPresent;
+- (void)requestDecorationPresent;
+- (void)schedulePresent;
 - (void)applyClipRect:(NSRect)r;
 - (void)clearClipRect;
 - (void)applyScissorNow;
@@ -1342,6 +1619,8 @@ mtl_log_seq_p (void)
   [self.videoPlayer shutdown];
   self.videoPlayer = nil;
   self.needsPresent = NO;
+  self.borderRecords = nil;
+  self.decorationRecords = nil;
 
   if (g_batch_fd == self)
     {
@@ -1366,6 +1645,253 @@ mtl_log_seq_p (void)
 {
   [self shutdown];
   [super dealloc];
+}
+
+- (BOOL)getDecoration:(unsigned long long)identifier record:(MtlDecorationRecord *)record
+{
+  NSValue *stored = [self.decorationRecords objectForKey:@(identifier)];
+  if (!stored) return NO;
+  [stored getValue:record];
+  mtl_decoration_sample (record, CACurrentMediaTime (), NO);
+  return YES;
+}
+
+- (BOOL)setDecoration:(MtlDecoration)value identifier:(unsigned long long)identifier
+               cancel:(int)cancel
+{
+  if (!g_decoration_pipeline) return NO;
+  MtlDecorationRecord record = { .value = value }, previous;
+  if ([self getDecoration:identifier record:&previous])
+    {
+      if (!(cancel & 1)) { record.geometry = previous.geometry; record.value.rect = previous.value.rect; }
+      if (!(cancel & 2)) { record.opacity = previous.opacity; record.value.opacity = previous.value.opacity; }
+      /* Shape changes must not inherit a track with incompatible dimensions. */
+      if (value.shape != previous.value.shape) record.geometry.active = NO;
+    }
+  if (!self.decorationRecords) self.decorationRecords = [NSMutableDictionary dictionary];
+  [self.decorationRecords setObject:[NSValue valueWithBytes:&record objCType:@encode(MtlDecorationRecord)]
+                            forKey:@(identifier)];
+  [self requestDecorationPresent];
+  return YES;
+}
+
+- (BOOL)removeDecoration:(unsigned long long)identifier
+{
+  if (![self.decorationRecords objectForKey:@(identifier)]) return NO;
+  [self.decorationRecords removeObjectForKey:@(identifier)];
+  [self requestDecorationPresent];
+  return YES;
+}
+
+- (BOOL)animateDecoration:(unsigned long long)identifier property:(int)property
+                  target:(float *)target duration:(double)duration
+                  easing:(int)easing repeat:(BOOL)repeat
+{
+  MtlDecorationRecord record;
+  if (![self getDecoration:identifier record:&record]) return NO;
+  MtlDecorationTrack *track = property == 1 ? &record.geometry : &record.opacity;
+  *track = (MtlDecorationTrack) { .active = YES, .repeat = repeat,
+    .start = CACurrentMediaTime (), .duration = duration, .easing = easing };
+  float rect[] = { record.value.rect.origin.x, record.value.rect.origin.y,
+                   record.value.rect.size.width, record.value.rect.size.height };
+  for (int i = 0; i < (property == 1 ? 4 : 1); i++)
+    { track->from[i] = property == 1 ? rect[i] : record.value.opacity; track->to[i] = target[i]; }
+  [self.decorationRecords setObject:[NSValue valueWithBytes:&record objCType:@encode(MtlDecorationRecord)]
+                            forKey:@(identifier)];
+  [self requestDecorationPresent];
+  return YES;
+}
+
+- (BOOL)decorationsNeedPump
+{
+  struct frame *f = self.emacsFrame;
+  if (!f || !FRAME_LIVE_P (f) || !FRAME_VISIBLE_P (f) || !self.decorationRecords.count)
+    return NO;
+  NSSize size = self.metalLayer.frame.size;
+  NSRect bounds = NSMakeRect (0, 0, size.width, size.height);
+  for (NSNumber *key in self.decorationRecords)
+    {
+      MtlDecorationRecord record;
+      [self getDecoration:key.unsignedLongLongValue record:&record];
+      if (!NSIntersectsRect (record.value.clip, bounds)) continue;
+      if (!record.value.hasFill && !record.value.hasStroke) continue;
+      BOOL canShow = record.value.opacity > 0 || (record.opacity.active
+        && (record.opacity.from[0] > 0 || record.opacity.to[0] > 0));
+      if (!canShow) continue;
+      NSRect rect = record.value.rect;
+      if (record.geometry.active)
+        {
+          float *a = record.geometry.from, *b = record.geometry.to;
+          float left = MIN (MIN (a[0], a[0] + a[2]), MIN (b[0], b[0] + b[2]));
+          float top = MIN (MIN (a[1], a[1] + a[3]), MIN (b[1], b[1] + b[3]));
+          float right = MAX (MAX (a[0], a[0] + a[2]), MAX (b[0], b[0] + b[2]));
+          float bottom = MAX (MAX (a[1], a[1] + a[3]), MAX (b[1], b[1] + b[3]));
+          rect = NSMakeRect (left, top, right - left, bottom - top);
+        }
+      /* Signed line deltas require normalized bounds for visibility checks. */
+      if (record.value.shape == MTL_DECORATION_LINE)
+        rect = NSMakeRect (MIN (rect.origin.x, rect.origin.x + rect.size.width),
+                           MIN (rect.origin.y, rect.origin.y + rect.size.height),
+                           fabs (rect.size.width), fabs (rect.size.height));
+      CGFloat extent = record.value.strokeWidth * 0.5 + 1;
+      if (!NSIntersectsRect (NSInsetRect (rect, -extent, -extent),
+                             NSIntersectionRect (record.value.clip, bounds))) continue;
+      if (record.geometry.active || record.opacity.active) return YES;
+    }
+  return NO;
+}
+
+- (void)drawDecorationsOnEncoder:(id<MTLRenderCommandEncoder>)enc
+                       texture:(id<MTLTexture>)texture
+{
+  if (!self.decorationRecords.count || !g_decoration_pipeline) return;
+  NSSize screen = self.metalLayer.frame.size;
+  if (screen.width <= 0 || screen.height <= 0) return;
+  NSArray *keys = [[self.decorationRecords allKeys]
+    sortedArrayUsingComparator:^NSComparisonResult (NSNumber *a, NSNumber *b) {
+      MtlDecorationRecord left, right;
+      [[self.decorationRecords objectForKey:a] getValue:&left];
+      [[self.decorationRecords objectForKey:b] getValue:&right];
+      if (left.value.z != right.value.z)
+        return left.value.z < right.value.z ? NSOrderedAscending : NSOrderedDescending;
+      return [a compare:b];
+    }];
+  typedef struct {
+    float width, height, radius, strokeWidth;
+    float opacity, shape, startAngle, sweepAngle;
+    float fill[4], stroke[4];
+  } Params;
+  CGFloat sx = texture.width / screen.width;
+  CGFloat sy = texture.height / screen.height;
+  NSRect bounds = NSMakeRect (0, 0, screen.width, screen.height);
+  [enc setRenderPipelineState:g_decoration_pipeline];
+  for (NSNumber *key in keys)
+    {
+      MtlDecorationRecord record;
+      [[self.decorationRecords objectForKey:key] getValue:&record];
+      NSRect clip = NSIntersectionRect (record.value.clip, bounds);
+      if (NSIsEmptyRect (clip)) continue;
+      BOOL visible = self.emacsFrame && FRAME_VISIBLE_P (self.emacsFrame);
+      mtl_decoration_sample (&record, CACurrentMediaTime (), visible);
+      [self.decorationRecords setObject:[NSValue valueWithBytes:&record objCType:@encode(MtlDecorationRecord)] forKey:key];
+      MtlDecoration v = record.value;
+      if (v.opacity == 0 || (!v.hasFill && !v.hasStroke)) continue;
+      NSUInteger x0 = MIN ((NSUInteger) floor (NSMinX (clip) * sx), texture.width);
+      NSUInteger y0 = MIN ((NSUInteger) floor (NSMinY (clip) * sy), texture.height);
+      NSUInteger x1 = MIN ((NSUInteger) ceil (NSMaxX (clip) * sx), texture.width);
+      NSUInteger y1 = MIN ((NSUInteger) ceil (NSMaxY (clip) * sy), texture.height);
+      if (x1 <= x0 || y1 <= y0) continue;
+      [enc setScissorRect:(MTLScissorRect) { x0, y0, x1 - x0, y1 - y0 }];
+      float w = v.rect.size.width, h = v.rect.size.height;
+      float extent = v.hasStroke ? v.strokeWidth * 0.5f + 1.0f : 1.0f;
+      float x = v.rect.origin.x, y = v.rect.origin.y;
+      float l = MIN (0, w) - extent, r = MAX (0, w) + extent;
+      float t = MIN (0, h) - extent, b = MAX (0, h) + extent;
+      MtlBorderVertex vertices[6] = {
+        {x+l,y+t,l,t}, {x+r,y+t,r,t}, {x+l,y+b,l,b},
+        {x+r,y+t,r,t}, {x+r,y+b,r,b}, {x+l,y+b,l,b} };
+      Params params = { .width = w, .height = h,
+        .radius = MIN (v.radius, MIN (w, h) * 0.5f), .strokeWidth = v.strokeWidth,
+        .opacity = v.opacity, .shape = v.shape,
+        .startAngle = v.startAngle, .sweepAngle = v.sweepAngle };
+      unpack_color (v.fill, &params.fill[0], &params.fill[1], &params.fill[2]);
+      unpack_color (v.stroke, &params.stroke[0], &params.stroke[1], &params.stroke[2]);
+      params.fill[3] = v.hasFill; params.stroke[3] = v.hasStroke;
+      [enc setVertexBytes:vertices length:sizeof vertices atIndex:0];
+      [enc setVertexBuffer:self.uniformBuffer offset:0 atIndex:1];
+      [enc setFragmentBytes:&params length:sizeof params atIndex:0];
+      [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+    }
+  [enc setScissorRect:(MTLScissorRect) { 0, 0, texture.width, texture.height }];
+}
+
+- (BOOL)setBorderWithID:(unsigned long long)identifier
+                   rect:(NSRect)rect
+                   clip:(NSRect)clip
+                  state:(MtlBorderState)state
+                  color:(unsigned long)color
+                  style:(MtlBorderStyle)style
+{
+  if (!self.borderRecords)
+    self.borderRecords = [NSMutableDictionary dictionary];
+  if (NSIsEmptyRect (clip))
+    {
+      [self removeBorderWithID:identifier];
+      return YES;
+    }
+
+  NSNumber *key = [NSNumber numberWithUnsignedLongLong:identifier];
+  NSValue *oldValue = [self.borderRecords objectForKey:key];
+  MtlBorderRecord record = { .rect = rect, .clip = clip, .state = state,
+                             .color = color, .style = style };
+  if (oldValue)
+    {
+      MtlBorderRecord previous;
+      [oldValue getValue:&previous];
+      if (previous.state == state)
+        {
+          /* Geometry and style updates must not restart the animation. */
+          record.startTime = previous.startTime;
+          record.cleanupPresented = previous.cleanupPresented;
+        }
+      else
+        record.startTime = CACurrentMediaTime ();
+
+      if (NSEqualRects (previous.rect, rect)
+          && NSEqualRects (previous.clip, clip)
+          && previous.state == state && previous.color == color
+          && previous.style.cornerRadius == style.cornerRadius
+          && previous.style.strokeWidth == style.strokeWidth
+          && previous.style.opacity == style.opacity
+          && previous.style.cycleDuration == style.cycleDuration
+          && previous.style.runnerFraction == style.runnerFraction
+          && previous.style.glowOpacity == style.glowOpacity)
+        return YES;
+    }
+  else
+    record.startTime = CACurrentMediaTime ();
+
+  [self.borderRecords setObject:[NSValue valueWithBytes:&record
+                                               objCType:@encode(MtlBorderRecord)]
+                         forKey:key];
+  [self requestBorderPresent];
+  return YES;
+}
+
+- (BOOL)removeBorderWithID:(unsigned long long)identifier
+{
+  NSNumber *key = [NSNumber numberWithUnsignedLongLong:identifier];
+  if (![self.borderRecords objectForKey:key])
+    return NO;
+  [self.borderRecords removeObjectForKey:key];
+  [self requestBorderPresent];
+  return YES;
+}
+
+- (BOOL)borderOverlaysNeedPump
+{
+  struct frame *f = self.emacsFrame;
+  if (!self.borderRecords.count || !g_border_pipeline || !f
+      || !FRAME_LIVE_P (f) || !FRAME_VISIBLE_P (f))
+    return NO;
+
+  NSSize size = self.metalLayer.frame.size;
+  NSRect bounds = NSMakeRect (0, 0, size.width, size.height);
+  CFTimeInterval now = CACurrentMediaTime ();
+  for (NSNumber *key in self.borderRecords)
+    {
+      MtlBorderRecord record;
+      [[self.borderRecords objectForKey:key] getValue:&record];
+      if (!NSIntersectsRect (record.clip, bounds) || record.style.opacity == 0)
+        continue;
+      if (record.state == MTL_BORDER_RUNNING && record.style.runnerFraction > 0)
+        return YES;
+      if (record.state == MTL_BORDER_COMPLETE
+          && (now - record.startTime < MTL_BORDER_COMPLETE_DURATION
+              || !record.cleanupPresented))
+        return YES;
+    }
+  return NO;
 }
 
 /* Clip subsequent draws to R (logical pixels), like the NS backend's
@@ -1855,20 +2381,42 @@ mtl_batch_append (MtlFrameData *fd, float x0, float y0, float x1, float y1,
                                  (int64_t) (MTL_PRESENT_COALESCE * NSEC_PER_SEC)),
                   dispatch_get_main_queue (), ^{
     self.presentScheduled = NO;
-    if (self.needsPresent && !self.encoder)
+    if (self.needsPresent)
       [self presentCoalesced];
   });
 }
 
 - (void)presentCoalesced
 {
-  if (CACurrentMediaTime () - self.lastPresentTime < MTL_PRESENT_COALESCE)
+  /* Layout hooks can mutate decorations before update_begin opens an encoder.
+     Do not combine those records with text from the previous redisplay.  The
+     deferred flush retries through this gate if redisplay is still active.  */
+  if (redisplaying_p || self.encoder
+      || CACurrentMediaTime () - self.lastPresentTime < MTL_PRESENT_COALESCE)
     {
       self.needsPresent = YES;
       [self schedulePresent];
     }
   else
     [self compositeToScreen];
+}
+
+- (void)requestDecorationPresent
+{
+  struct frame *f = self.emacsFrame;
+  /* Hidden frames retain elapsed tracks but do not ask AppKit for drawables. */
+  if (f && FRAME_LIVE_P (f) && FRAME_VISIBLE_P (f)) [self requestBorderPresent];
+}
+
+- (void)requestBorderPresent
+{
+  if (self.encoder)
+    {
+      self.needsPresent = YES;
+      [self schedulePresent];
+    }
+  else
+    [self presentCoalesced];
 }
 
 /* Commit the static-texture draws.  When PRESENT is NO, only the static texture
@@ -1929,6 +2477,122 @@ mtl_batch_append (MtlFrameData *fd, float x0, float y0, float x1, float y1,
    targeting DRAWABLE on CMD, and queue its present.  Shared by the
    standalone present (compositeToScreen) and the single-commit path in
    endFramePresent:.  */
+- (void)drawBorderOverlaysOnEncoder:(id<MTLRenderCommandEncoder>)enc
+                           texture:(id<MTLTexture>)texture
+{
+  if (!self.borderRecords.count || !g_border_pipeline || !self.metalLayer)
+    return;
+  NSSize screen = self.metalLayer.frame.size;
+  if (screen.width <= 0 || screen.height <= 0)
+    return;
+
+  CGFloat scale_x = texture.width / screen.width;
+  CGFloat scale_y = texture.height / screen.height;
+  NSRect bounds = NSMakeRect (0, 0, screen.width, screen.height);
+  /* Static outlines sit below their activity accents. */
+  NSArray *keys = [[self.borderRecords allKeys]
+    sortedArrayUsingComparator:^NSComparisonResult (NSNumber *a, NSNumber *b) {
+      MtlBorderRecord left, right;
+      [[self.borderRecords objectForKey:a] getValue:&left];
+      [[self.borderRecords objectForKey:b] getValue:&right];
+      if ((left.state == MTL_BORDER_IDLE) != (right.state == MTL_BORDER_IDLE))
+        return left.state == MTL_BORDER_IDLE ? NSOrderedAscending : NSOrderedDescending;
+      return [a compare:b];
+    }];
+  CFTimeInterval now = CACurrentMediaTime ();
+  MTLScissorRect full = { 0, 0, texture.width,
+                          texture.height };
+
+  [enc setRenderPipelineState:g_border_pipeline];
+  for (NSNumber *key in keys)
+    {
+      MtlBorderRecord record;
+      [[self.borderRecords objectForKey:key] getValue:&record];
+      NSRect clip = NSIntersectionRect (record.clip, bounds);
+      if (NSIsEmptyRect (clip) || record.style.opacity == 0)
+        continue;
+      if (record.state == MTL_BORDER_COMPLETE
+          && now - record.startTime >= MTL_BORDER_COMPLETE_DURATION)
+        {
+          if (!record.cleanupPresented)
+            {
+              record.cleanupPresented = YES;
+              [self.borderRecords setObject:[NSValue valueWithBytes:&record
+                                                           objCType:@encode(MtlBorderRecord)]
+                                     forKey:key];
+            }
+          /* The static blit clears the last visible border.  Do not shade an
+             invisible completed rectangle on subsequent redisplays. */
+          continue;
+        }
+
+      NSUInteger x0 = (NSUInteger) floor (NSMinX (clip) * scale_x);
+      NSUInteger y0 = (NSUInteger) floor (NSMinY (clip) * scale_y);
+      NSUInteger x1 = (NSUInteger) ceil (NSMaxX (clip) * scale_x);
+      NSUInteger y1 = (NSUInteger) ceil (NSMaxY (clip) * scale_y);
+      x0 = MIN (x0, texture.width);
+      y0 = MIN (y0, texture.height);
+      x1 = MIN (x1, texture.width);
+      y1 = MIN (y1, texture.height);
+      if (x1 <= x0 || y1 <= y0)
+        continue;
+      MTLScissorRect scissor = { x0, y0, x1 - x0, y1 - y0 };
+      [enc setScissorRect:scissor];
+
+      float width = (float) record.rect.size.width - 2.0f;
+      float height = (float) record.rect.size.height - 2.0f;
+      if (width <= 0 || height <= 0)
+        continue;
+      float radius = MIN (record.style.cornerRadius, MIN (width, height) * 0.5f);
+      float extent = MAX (record.style.strokeWidth * 0.5f + 1.0f,
+                          record.state == MTL_BORDER_RUNNING ? 9.0f : 2.0f);
+      float left = (float) NSMinX (record.rect) + 1.0f;
+      float top = (float) NSMinY (record.rect) + 1.0f;
+      float right = left + width;
+      float bottom = top + height;
+      MtlBorderVertex vertices[6] = {
+        {left - extent, top - extent, -extent, -extent},
+        {right + extent, top - extent, width + extent, -extent},
+        {left - extent, bottom + extent, -extent, height + extent},
+        {right + extent, top - extent, width + extent, -extent},
+        {right + extent, bottom + extent, width + extent, height + extent},
+        {left - extent, bottom + extent, -extent, height + extent},
+      };
+
+      MtlBorderUniforms params = { 0 };
+      params.width = width;
+      params.height = height;
+      params.radius = radius;
+      params.stroke = record.style.strokeWidth;
+      params.elapsed = (float) (now - record.startTime);
+      params.opacity = record.style.opacity;
+      params.cycleDuration = record.style.cycleDuration;
+      params.runnerFraction = record.style.runnerFraction;
+      params.glowOpacity = record.style.glowOpacity;
+      params.state = (float) record.state;
+      float red, green, blue;
+      unpack_color (record.color, &red, &green, &blue);
+      params.color[0] = red;
+      params.color[1] = green;
+      params.color[2] = blue;
+      params.color[3] = 1.0f;
+      if (record.state == MTL_BORDER_COMPLETE)
+        {
+          float progress = (params.elapsed / MTL_BORDER_COMPLETE_DURATION - 0.18f)
+            / 0.82f;
+          progress = MAX (0.0f, MIN (progress, 1.0f));
+          params.opacity *= (1.0f - progress) * (1.0f - progress);
+        }
+
+      [enc setVertexBytes:vertices length:sizeof (vertices) atIndex:0];
+      [enc setVertexBuffer:self.uniformBuffer offset:0 atIndex:1];
+      [enc setFragmentBytes:&params length:sizeof (params) atIndex:0];
+      [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+
+    }
+  [enc setScissorRect:full];
+}
+
 - (void)encodeCompositeOn:(id<MTLCommandBuffer>)cmd
                  drawable:(id<CAMetalDrawable>)drawable
 {
@@ -1942,6 +2606,13 @@ mtl_batch_append (MtlFrameData *fd, float x0, float y0, float x1, float y1,
   self.needsPresent = NO;   /* about to present whatever is in the static texture */
   self.lastPresentTime = CACurrentMediaTime ();
 
+  [self encodeCompositeTextureOn:cmd texture:drawable.texture];
+  [cmd presentDrawable:drawable];
+}
+
+- (void)encodeCompositeTextureOn:(id<MTLCommandBuffer>)cmd
+                          texture:(id<MTLTexture>)texture
+{
   NSSize sz = self.metalLayer.frame.size;
   MtlAnimator *anim = self.animator;
 
@@ -1951,7 +2622,7 @@ mtl_batch_append (MtlFrameData *fd, float x0, float y0, float x1, float y1,
   u->screen_height = (float)sz.height;
 
   MTLRenderPassDescriptor *rpd = [MTLRenderPassDescriptor renderPassDescriptor];
-  rpd.colorAttachments[0].texture    = drawable.texture;
+  rpd.colorAttachments[0].texture    = texture;
   rpd.colorAttachments[0].loadAction = MTLLoadActionDontCare;
   rpd.colorAttachments[0].storeAction = MTLStoreActionStore;
 
@@ -1992,8 +2663,8 @@ mtl_batch_append (MtlFrameData *fd, float x0, float y0, float x1, float y1,
               CGSize dsz = self.metalLayer.drawableSize;
               double scx = sz.width  > 0 ? dsz.width  / sz.width  : 1.0;
               double scy = sz.height > 0 ? dsz.height / sz.height : 1.0;
-              long tw = (long) drawable.texture.width;
-              long th = (long) drawable.texture.height;
+              long tw = (long) texture.width;
+              long th = (long) texture.height;
               long cx0 = lround (NSMinX (cr) * scx);
               long cy0 = lround (NSMinY (cr) * scy);
               long cx1 = lround (NSMaxX (cr) * scx);
@@ -2026,8 +2697,8 @@ mtl_batch_append (MtlFrameData *fd, float x0, float y0, float x1, float y1,
 
           if (clipped)
             {
-              MTLScissorRect full = { 0, 0, drawable.texture.width,
-                                      drawable.texture.height };
+              MTLScissorRect full = { 0, 0, texture.width,
+                                      texture.height };
               [enc setScissorRect:full];
             }
         }
@@ -2059,6 +2730,10 @@ mtl_batch_append (MtlFrameData *fd, float x0, float y0, float x1, float y1,
                   vertexStart:0 vertexCount:6];
         }
     }
+
+  /* Draw tool-card borders over the text and crossfade, but behind the cursor. */
+  [self drawBorderOverlaysOnEncoder:enc texture:texture];
+  [self drawDecorationsOnEncoder:enc texture:texture];
 
   /* Animation overlay (cursor effects, trail, particles) is opt-in.  When off,
      the cursor lives in the static texture (drawn by mtl_draw_window_cursor),
@@ -2163,7 +2838,7 @@ mtl_batch_append (MtlFrameData *fd, float x0, float y0, float x1, float y1,
     }
 
   [enc endEncoding];
-  [cmd presentDrawable:drawable];
+
 }
 
 @end
@@ -2802,6 +3477,7 @@ mtl_drv_clip_to_glyph_string (struct glyph_string *s)
   if (!fd) return;
   NSRect clip;
   get_glyph_string_clip_rect (s, &clip);
+  if (getenv ("MTL_LOG_SEQ")) fprintf (stderr, "[mtlclip] %g %g %g %g\n", clip.origin.x, clip.origin.y, clip.size.width, clip.size.height);
   [fd applyClipRect:clip];
 }
 
@@ -2815,6 +3491,7 @@ static void
 mtl_drv_fill_rect (struct frame *f, int x, int y, int w, int h,
                    unsigned long color)
 {
+  if (getenv ("MTL_LOG_SEQ")) fprintf (stderr, "[mtlfill] %d %d %d %d %lx\n", x, y, w, h, color);
   [mtl_get_frame_data (f) fillRect:NSMakeRect (x, y, w, h) color:color];
 }
 

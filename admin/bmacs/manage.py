@@ -34,7 +34,7 @@ ARTIFACTS = (
     "Contents/Info.plist",
     "Contents/Resources/Emacs.icns",
 )
-STARTUP_CHECK = "(unless (boundp 'mode-line-rows-format) (error \"Missing two-row support\"))"
+STARTUP_CHECK = "(unless (and (featurep 'ns) (fboundp 'gpu-backend-p)) (error \"Missing NS/GPU support\"))"
 
 
 def run(*args, **kwargs):

@@ -319,11 +319,6 @@ bset_mode_line_format (struct buffer *b, Lisp_Object val)
   b->mode_line_format_ = val;
 }
 static void
-bset_mode_line_rows_format (struct buffer *b, Lisp_Object val)
-{
-  b->mode_line_rows_format_ = val;
-}
-static void
 bset_mode_name (struct buffer *b, Lisp_Object val)
 {
   b->mode_name_ = val;
@@ -4756,7 +4751,6 @@ init_buffer_once (void)
 
   idx = 1;
   XSETFASTINT (BVAR (&buffer_local_flags, mode_line_format), idx); ++idx;
-  XSETFASTINT (BVAR (&buffer_local_flags, mode_line_rows_format), idx); ++idx;
   XSETFASTINT (BVAR (&buffer_local_flags, abbrev_mode), idx); ++idx;
   XSETFASTINT (BVAR (&buffer_local_flags, overwrite_mode), idx); ++idx;
   XSETFASTINT (BVAR (&buffer_local_flags, auto_fill_function), idx); ++idx;
@@ -4847,7 +4841,6 @@ init_buffer_once (void)
 
   /* real setup is done in bindings.el */
   bset_mode_line_format (&buffer_defaults, build_string ("%-"));
-  bset_mode_line_rows_format (&buffer_defaults, Qnil);
   bset_header_line_format (&buffer_defaults, Qnil);
   bset_tab_line_format (&buffer_defaults, Qnil);
   bset_abbrev_mode (&buffer_defaults, Qnil);
@@ -5138,14 +5131,6 @@ line appears at the bottom.
 
 Also see `header-line-indent-mode' if `display-line-numbers-mode' is
 turned on and header-line text should be aligned with buffer text.  */);
-
-  DEFVAR_PER_BUFFER ("mode-line-rows-format", mode_line_rows_format,
-		     Qnil,
-		     doc: /* Formats for two mode-line rows, or nil for the usual mode line.
-The value must be a list of exactly two mode-line formats, displayed from
-top to bottom.  Each format follows the rules of `mode-line-format'.
-The `mode-line-format' window parameter takes precedence over this variable.
-A nil value leaves the existing `mode-line-format' behavior unchanged.  */);
 
   DEFVAR_PER_BUFFER ("mode-line-format", mode_line_format,
 		     Qnil,

@@ -373,9 +373,6 @@ struct buffer
   /* Mode line element that controls format of mode line.  */
   Lisp_Object mode_line_format_;
 
-  /* Two explicit formats for the rows of a mode line, or nil.  */
-  Lisp_Object mode_line_rows_format_;
-
   /* Analogous to mode_line_format for the line displayed at the top
      of windows.  Nil means don't display that line.  */
   Lisp_Object header_line_format_;
