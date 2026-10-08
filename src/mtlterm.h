@@ -154,6 +154,9 @@ typedef struct mtl_spring {
    link starves while Emacs idles). */
 - (void)tickWithDt:(float)dt;
 
+/* Whether a cursor or scroll effect still has frames to show. */
+- (BOOL)isAnimating;
+
 /* Spawn particles at cursor for pixiedust/sonicboom/ripple modes */
 - (void)spawnParticlesAtX:(float)x y:(float)y;
 

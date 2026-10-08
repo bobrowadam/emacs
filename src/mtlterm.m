@@ -1435,6 +1435,18 @@ mtl_log_seq_p (void)
     }
 }
 
+/* Whether a cursor or scroll effect still has frames to show.  Blinking is
+   not counted: it changes rarely, so the pump only polls for it.  */
+- (BOOL)isAnimating
+{
+  return self.cursorDirty
+    || self.trailCount > 0 || self.nParticles > 0
+    || fabsf (self.scrollOffset) > 0.5f
+    || (self.cursorMode == MTL_CURSOR_SPRING
+        && (fabsf (self.springX.pos - self.curTargetX) > 0.5f
+            || fabsf (self.springY.pos - self.curTargetY) > 0.5f));
+}
+
 @end
 
 /* -----------------------------------------------------------------------

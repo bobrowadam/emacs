@@ -726,9 +726,11 @@ Single pump behind gpu.el's animation timer: the cursor effects, the
 buffer-switch cross-fade and the inline video all advance together in
 one deterministic tick (the animator presents are already coalesced by
 the layer).  FRAME defaults to the selected frame.  Returns a mask of
-the subsystems that still need pumping (1 = cursor animations enabled,
-2 = cross-fade running, 4 = video open, 8 = visible tool-card borders, 16 = generic decorations);
-0 lets the timer cancel itself.  */)
+the subsystems that still need pumping (1 = cursor or scroll effect in
+motion, 2 = cross-fade running, 4 = video open, 8 = visible tool-card
+borders, 16 = generic decorations, 32 = cursor animations enabled, which
+needs only slow polling for blink changes); 0 lets the timer cancel
+itself.  */)
   (Lisp_Object frame)
 {
   if (NILP (frame)) frame = Fselected_frame ();
@@ -737,7 +739,7 @@ the subsystems that still need pumping (1 = cursor animations enabled,
   MtlFrameData *fd = mtl_get_frame_data (f);
   if (!fd || !fd.animator) return make_fixnum (0);
 
-  int mask = (g_mtl_animations_enabled ? 1 : 0)
+  int mask = (g_mtl_animations_enabled ? 32 : 0)
     | (fd.transitionTexture ? 2 : 0)
     | (fd.videoPlayer ? 4 : 0)
     | ([fd borderOverlaysNeedPump] ? 8 : 0)
@@ -761,6 +763,10 @@ the subsystems that still need pumping (1 = cursor animations enabled,
       else
         [fd.animator tickWithDt:dt];
     }
+  /* Report cursor effects only while they move, so an idle cursor lets
+     the pump slow to its polling rate.  */
+  if (g_mtl_animations_enabled && [fd.animator isAnimating])
+    mask |= 1;
   unblock_input ();
   return make_fixnum (mask);
 }

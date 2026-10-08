@@ -139,19 +139,26 @@
 
 (defvar gpu--video-state)               ; defined with the inline video code
 
+(defconst gpu--pump-idle-interval 0.25
+  "Pump interval while it only polls an idle cursor for blink changes.")
+
+(defun gpu--pump-run (interval)
+  "Start the animation pump with repeat INTERVAL."
+  (setq gpu--pump-interval interval
+        gpu--pump-timer (run-at-time 0 interval #'gpu--pump)))
+
 (defun gpu--pump-start (&optional fast)
   "Ensure the animation pump is running (idempotent).
-With FAST non-nil tick at 60Hz (cross-fades); the pump drops itself
-back to 30Hz when the fade ends (see `gpu--pump')."
+With FAST non-nil tick at 60Hz (cross-fades), otherwise at least at 30Hz.
+The pump slows itself again once nothing moves (see `gpu--pump')."
   (when (fboundp 'gpu-pump-tick)
     (let ((want (if fast 0.016 0.033)))
       (when (and (timerp gpu--pump-timer)
-                 fast (not (eql gpu--pump-interval want)))
+                 (> gpu--pump-interval want))
         (cancel-timer gpu--pump-timer)
         (setq gpu--pump-timer nil))
       (unless (timerp gpu--pump-timer)
-        (setq gpu--pump-interval want
-              gpu--pump-timer (run-at-time 0 want #'gpu--pump))))))
+        (gpu--pump-run want)))))
 
 (defun gpu--pump-stop ()
   "Cancel the animation pump timer."
@@ -172,8 +179,9 @@ back to 30Hz when the fade ends (see `gpu--pump')."
 
 (defun gpu--pump ()
   "Advance every continuous GPU animation one step.
-Re-paces the timer to 60Hz while a cross-fade runs and back to 30Hz
-otherwise; cancels it once nothing needs pumping."
+Re-paces the timer to 60Hz while a cross-fade runs, to 30Hz while anything
+else moves, and to `gpu--pump-idle-interval' while only an idle cursor
+remains; cancels it once nothing needs pumping."
   (gpu--video-follow)
   (let ((mask 0))
     (dolist (f (gpu--pump-frames))
@@ -187,10 +195,13 @@ otherwise; cancels it once nothing needs pumping."
       (setq gpu--pump-fade-frame nil))
     (if (zerop mask)
         (gpu--pump-stop)
-      (let ((want (if (zerop (logand mask 2)) 0.033 0.016)))
+      (let ((want (cond ((/= 0 (logand mask 2)) 0.016)
+                        ((/= 0 (logand mask 31)) 0.033)
+                        ;; Only an idle cursor remains: poll for blink changes.
+                        (t gpu--pump-idle-interval))))
         (unless (eql want gpu--pump-interval)
           (gpu--pump-stop)
-          (gpu--pump-start (eql want 0.016)))))))
+          (gpu--pump-run want))))))
 
 ;; Old names (pre-0.2) for the customs defined below.
 (define-obsolete-variable-alias 'mtl-animations-enabled 'gpu-animations-enabled "0.2")
@@ -318,7 +329,15 @@ to fire the motion effects.  See `gpu-cursor-effects-while-typing'."
   (when (fboundp 'gpu-cursor-suppress-effects)
     (gpu-cursor-suppress-effects
      (and (not gpu-cursor-effects-while-typing)
-          (gpu--cursor-typing-p)))))
+          (gpu--cursor-typing-p))))
+  ;; The command may move the cursor, so leave the idle polling rate.
+  (when gpu-animations-enabled
+    (gpu--pump-start)))
+
+(defun gpu--cursor-blinked ()
+  "Show the cursor's new blink phase without waiting for the idle pump."
+  (when (and gpu-animations-enabled (fboundp 'gpu-pump-tick))
+    (gpu-pump-tick (selected-frame))))
 
 ;; ---------------------------------------------------------------------------
 ;; Public API
@@ -363,6 +382,8 @@ The NS backend still handles events, menus, and scrollbars."
           (when gpu-animations-enabled (gpu--pump-start))
           ;; Distinguish typing from cursor movement for the effects.
           (add-hook 'pre-command-hook #'gpu--cursor-pre-command)
+          ;; Show blink changes at once: an idle pump only polls for them.
+          (advice-add 'blink-cursor-timer-function :after #'gpu--cursor-blinked)
           (message "GPU enabled on frame: %s (device: %s, animations: %s)"
                    f (gpu-device-name) (if gpu-animations-enabled "on" "off")))
       (message "GPU enabled on frame: %s (device: %s)" f (gpu-device-name)))))
