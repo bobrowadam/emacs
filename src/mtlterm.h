@@ -298,8 +298,9 @@ typedef struct {
                   target:(float *)target duration:(double)duration
                   easing:(int)easing repeat:(BOOL)repeat;
 - (BOOL)decorationsNeedPump;
-/* With BMACS_CA_DECORATIONS, Core Animation draws decorations: one clipped
-   shape layer per record inside this container above the Metal layer.  */
+/* Unless BMACS_CA_DECORATIONS is 0, Core Animation draws decorations: one
+   clipped shape layer per record inside this container above the Metal
+   layer.  */
 @property (nonatomic, strong) CALayer *decorationLayer;
 @property (nonatomic, strong) NSMutableDictionary *decorationLayers;
 /* A text decoration's label, font, size and sweep period, by identifier.  */

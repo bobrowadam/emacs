@@ -1123,11 +1123,12 @@ mtl_setup_frame (struct frame *f)
   [ubuf release];
   fd.emacsFrame   = f;
 
-  /* Decorations as Core Animation layers (a spike, opt in with
-     BMACS_CA_DECORATIONS).  The container sits above the Metal layer, in
-     the same flipped frame coordinates, and frames present with the
-     transaction that carries its changes.  */
-  if (getenv ("BMACS_CA_DECORATIONS"))
+  /* Decorations as Core Animation layers, unless BMACS_CA_DECORATIONS is
+     0.  The container sits above the Metal layer, in the same flipped
+     frame coordinates, and frames present with the transaction that
+     carries its changes.  */
+  const char *ca_decorations = getenv ("BMACS_CA_DECORATIONS");
+  if (!ca_decorations || strcmp (ca_decorations, "0") != 0)
     {
       CALayer *decorations = [CALayer layer];
       decorations.frame = layer.frame;
