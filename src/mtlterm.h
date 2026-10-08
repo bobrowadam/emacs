@@ -294,6 +294,10 @@ typedef struct {
                   target:(float *)target duration:(double)duration
                   easing:(int)easing repeat:(BOOL)repeat;
 - (BOOL)decorationsNeedPump;
+/* With BMACS_CA_DECORATIONS, Core Animation draws decorations: one clipped
+   shape layer per record inside this container above the Metal layer.  */
+@property (nonatomic, strong) CALayer *decorationLayer;
+@property (nonatomic, strong) NSMutableDictionary *decorationLayers;
 
 /* Moving tool-card borders are independent compositor overlays. */
 - (BOOL)setBorderWithID:(unsigned long long)identifier

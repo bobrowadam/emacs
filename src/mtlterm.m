@@ -1123,6 +1123,21 @@ mtl_setup_frame (struct frame *f)
   [ubuf release];
   fd.emacsFrame   = f;
 
+  /* Decorations as Core Animation layers (a spike, opt in with
+     BMACS_CA_DECORATIONS).  The container sits above the Metal layer, in
+     the same flipped frame coordinates, and frames present with the
+     transaction that carries its changes.  */
+  if (getenv ("BMACS_CA_DECORATIONS"))
+    {
+      CALayer *decorations = [CALayer layer];
+      decorations.frame = layer.frame;
+      decorations.autoresizingMask = kCALayerWidthSizable | kCALayerHeightSizable;
+      decorations.contentsScale = scale;
+      [view.layer addSublayer:decorations];
+      fd.decorationLayer = decorations;
+      layer.presentsWithTransaction = YES;
+    }
+
   /* Phase 4: create animator.  Only start the 60fps loop when the animation
      layer is explicitly enabled (correctness first, animation opt-in). */
   MtlAnimator *anim = [[MtlAnimator alloc] initWithFrame:f];
@@ -1605,6 +1620,8 @@ mtl_decoration_sample (MtlDecorationRecord *record, CFTimeInterval now, BOOL ret
                     wd:(int)wd h:(int)h
                    atX:(int)x y:(int)y color:(unsigned long)color;
 @property (nonatomic, strong) NSMutableDictionary *decorationRecords;
+- (void)syncDecorationLayer:(unsigned long long)identifier;
+- (void)presentDrawable:(id<CAMetalDrawable>)drawable afterCommitting:(id<MTLCommandBuffer>)cmd;
 - (void)drawDecorationsOnEncoder:(id<MTLRenderCommandEncoder>)encoder
                        texture:(id<MTLTexture>)texture;
 @property (nonatomic, strong) NSMutableDictionary *borderRecords;
@@ -1633,6 +1650,9 @@ mtl_decoration_sample (MtlDecorationRecord *record, CFTimeInterval now, BOOL ret
   self.needsPresent = NO;
   self.borderRecords = nil;
   self.decorationRecords = nil;
+  [self.decorationLayer removeFromSuperlayer];
+  self.decorationLayer = nil;
+  self.decorationLayers = nil;
 
   if (g_batch_fd == self)
     {
@@ -1683,6 +1703,7 @@ mtl_decoration_sample (MtlDecorationRecord *record, CFTimeInterval now, BOOL ret
   if (!self.decorationRecords) self.decorationRecords = [NSMutableDictionary dictionary];
   [self.decorationRecords setObject:[NSValue valueWithBytes:&record objCType:@encode(MtlDecorationRecord)]
                             forKey:@(identifier)];
+  [self syncDecorationLayer:identifier];
   [self requestDecorationPresent];
   return YES;
 }
@@ -1691,6 +1712,7 @@ mtl_decoration_sample (MtlDecorationRecord *record, CFTimeInterval now, BOOL ret
 {
   if (![self.decorationRecords objectForKey:@(identifier)]) return NO;
   [self.decorationRecords removeObjectForKey:@(identifier)];
+  [self syncDecorationLayer:identifier];
   [self requestDecorationPresent];
   return YES;
 }
@@ -1710,6 +1732,7 @@ mtl_decoration_sample (MtlDecorationRecord *record, CFTimeInterval now, BOOL ret
     { track->from[i] = property == 1 ? rect[i] : record.value.opacity; track->to[i] = target[i]; }
   [self.decorationRecords setObject:[NSValue valueWithBytes:&record objCType:@encode(MtlDecorationRecord)]
                             forKey:@(identifier)];
+  [self syncDecorationLayer:identifier];
   [self requestDecorationPresent];
   return YES;
 }
@@ -1717,6 +1740,7 @@ mtl_decoration_sample (MtlDecorationRecord *record, CFTimeInterval now, BOOL ret
 - (BOOL)decorationsNeedPump
 {
   struct frame *f = self.emacsFrame;
+  if (self.decorationLayer) return NO;   /* Core Animation runs their tracks */
   if (!f || !FRAME_LIVE_P (f) || !FRAME_VISIBLE_P (f) || !self.decorationRecords.count)
     return NO;
   NSSize size = self.metalLayer.frame.size;
@@ -1756,6 +1780,7 @@ mtl_decoration_sample (MtlDecorationRecord *record, CFTimeInterval now, BOOL ret
 - (void)drawDecorationsOnEncoder:(id<MTLRenderCommandEncoder>)enc
                        texture:(id<MTLTexture>)texture
 {
+  if (self.decorationLayer) return;   /* drawn by Core Animation instead */
   if (!self.decorationRecords.count || !g_decoration_pipeline) return;
   NSSize screen = self.metalLayer.frame.size;
   if (screen.width <= 0 || screen.height <= 0) return;
@@ -2422,6 +2447,7 @@ mtl_batch_append (MtlFrameData *fd, float x0, float y0, float x1, float y1,
 {
   struct frame *f = self.emacsFrame;
   /* Hidden frames retain elapsed tracks but do not ask AppKit for drawables. */
+  if (self.decorationLayer) return;   /* Core Animation shows layer changes */
   if (f && FRAME_LIVE_P (f) && FRAME_VISIBLE_P (f)) [self requestBorderPresent];
 }
 
@@ -2459,7 +2485,7 @@ mtl_batch_append (MtlFrameData *fd, float x0, float y0, float x1, float y1,
       if (drawable)
         {
           [self encodeCompositeOn:self.cmdBuf drawable:drawable];
-          [self.cmdBuf commit];
+          [self presentDrawable:drawable afterCommitting:self.cmdBuf];
           self.cmdBuf = nil;
           return;
         }
@@ -2487,7 +2513,177 @@ mtl_batch_append (MtlFrameData *fd, float x0, float y0, float x1, float y1,
 
   id<MTLCommandBuffer> cmd = [g_queue commandBuffer];
   [self encodeCompositeOn:cmd drawable:drawable];
-  [cmd commit];
+  [self presentDrawable:drawable afterCommitting:cmd];
+}
+
+
+/* Present DRAWABLE after CMD is committed.  With decoration layers, the frame
+   joins the current Core Animation transaction, so layer changes made for
+   this redisplay appear in the same screen update as its text.  */
+- (void)presentDrawable:(id<CAMetalDrawable>)drawable afterCommitting:(id<MTLCommandBuffer>)cmd
+{
+  if (self.metalLayer.presentsWithTransaction)
+    {
+      [cmd commit];
+      [cmd waitUntilScheduled];
+      [drawable present];
+    }
+  else
+    {
+      [cmd presentDrawable:drawable];
+      [cmd commit];
+    }
+}
+
+/* Build the outline of decoration V, in frame coordinates.  */
+static CGPathRef
+mtl_decoration_path (MtlDecoration v)
+{
+  CGMutablePathRef path = CGPathCreateMutable ();
+  CGRect r = CGRectStandardize (NSRectToCGRect (v.rect));
+  switch (v.shape)
+    {
+    case MTL_DECORATION_LINE:
+      /* A line's rect is (X1 Y1 DX DY).  */
+      CGPathMoveToPoint (path, NULL, v.rect.origin.x, v.rect.origin.y);
+      CGPathAddLineToPoint (path, NULL, v.rect.origin.x + v.rect.size.width,
+                            v.rect.origin.y + v.rect.size.height);
+      break;
+    case MTL_DECORATION_CIRCLE:
+      CGPathAddEllipseInRect (path, NULL, r);
+      break;
+    case MTL_DECORATION_ARC:
+      /* Zero is at the right and positive angles turn clockwise on screen,
+         which frame coordinates (y down) give for increasing angles.  */
+      CGPathAddArc (path, NULL, CGRectGetMidX (r), CGRectGetMidY (r),
+                    r.size.width / 2, v.startAngle, v.startAngle + v.sweepAngle,
+                    v.sweepAngle < 0);
+      break;
+    default:
+      {
+        CGFloat radius = MIN (v.radius, MIN (r.size.width, r.size.height) / 2);
+        CGPathAddRoundedRect (path, NULL, r, MAX (radius, 0), MAX (radius, 0));
+      }
+    }
+  return path;
+}
+
+static CGColorRef
+mtl_decoration_color (unsigned long rgb)
+{
+  return CGColorCreateSRGB (((rgb >> 16) & 0xff) / 255.0, ((rgb >> 8) & 0xff) / 255.0,
+                            (rgb & 0xff) / 255.0, 1.0);
+}
+
+/* Replay TRACK as a Core Animation animation of KEY on LAYER.  FROM and TO
+   are the animated values; the track's start keeps a retargeted or restored
+   animation in phase.  */
+static void
+mtl_decoration_animate_layer (CALayer *layer, NSString *key, MtlDecorationTrack *track,
+                              id from, id to)
+{
+  if (!track->active)
+    {
+      [layer removeAnimationForKey:key];
+      return;
+    }
+  CABasicAnimation *animation = [CABasicAnimation animationWithKeyPath:key];
+  animation.fromValue = from;
+  animation.toValue = to;
+  animation.duration = track->duration;
+  animation.beginTime = [layer convertTime:track->start fromLayer:nil];
+  animation.timingFunction = [CAMediaTimingFunction functionWithName:
+                                (track->easing == 1 ? kCAMediaTimingFunctionEaseOut
+                                 : track->easing == 2 ? kCAMediaTimingFunctionEaseInEaseOut
+                                 : kCAMediaTimingFunctionLinear)];
+  if (track->repeat)
+    animation.repeatCount = HUGE_VALF;
+  else
+    {
+      animation.fillMode = kCAFillModeBoth;
+      animation.removedOnCompletion = NO;
+    }
+  [layer addAnimation:animation forKey:key];
+}
+
+/* Show decoration IDENTIFIER's current record as a clipped shape layer, or
+   remove its layer when the record is gone.  */
+- (void)syncDecorationLayer:(unsigned long long)identifier
+{
+  if (!self.decorationLayer) return;
+  NSNumber *key = @(identifier);
+  CALayer *clip = [self.decorationLayers objectForKey:key];
+  NSValue *stored = [self.decorationRecords objectForKey:key];
+  [CATransaction begin];
+  [CATransaction setDisableActions:YES];
+  if (!stored)
+    {
+      [clip removeFromSuperlayer];
+      [self.decorationLayers removeObjectForKey:key];
+      [CATransaction commit];
+      return;
+    }
+  MtlDecorationRecord record;
+  [stored getValue:&record];
+  MtlDecoration v = record.value;
+  CAShapeLayer *shape;
+  if (!clip)
+    {
+      clip = [CALayer layer];
+      clip.masksToBounds = YES;
+      shape = [CAShapeLayer layer];
+      [clip addSublayer:shape];
+      [self.decorationLayer addSublayer:clip];
+      if (!self.decorationLayers)
+        self.decorationLayers = [NSMutableDictionary dictionary];
+      [self.decorationLayers setObject:clip forKey:key];
+    }
+  else
+    shape = (CAShapeLayer *) clip.sublayers.firstObject;
+  CGFloat scale = self.metalLayer.contentsScale;
+  clip.contentsScale = scale;
+  shape.contentsScale = scale;
+  /* Equal z values keep creation order, as sibling order does.  */
+  clip.zPosition = (CGFloat) v.z;
+  clip.frame = NSRectToCGRect (v.clip);
+  shape.frame = CGRectMake (-v.clip.origin.x, -v.clip.origin.y,
+                            self.decorationLayer.bounds.size.width + v.clip.origin.x,
+                            self.decorationLayer.bounds.size.height + v.clip.origin.y);
+  CGPathRef path = mtl_decoration_path (v);
+  shape.path = path;
+  CGColorRef fill = v.hasFill ? mtl_decoration_color (v.fill) : NULL;
+  CGColorRef stroke = v.hasStroke ? mtl_decoration_color (v.stroke) : NULL;
+  shape.fillColor = fill;
+  shape.strokeColor = stroke;
+  if (fill) CGColorRelease (fill);
+  if (stroke) CGColorRelease (stroke);
+  shape.lineWidth = v.hasStroke ? v.strokeWidth : 0;
+  shape.lineCap = (v.shape == MTL_DECORATION_LINE || v.shape == MTL_DECORATION_ARC)
+    ? kCALineCapRound : kCALineCapButt;
+  shape.opacity = record.opacity.active && !record.opacity.repeat
+    ? record.opacity.to[0] : v.opacity;
+  mtl_decoration_animate_layer (shape, @"opacity", &record.opacity,
+                                @(record.opacity.from[0]), @(record.opacity.to[0]));
+  if (record.geometry.active)
+    {
+      MtlDecoration from = v, to = v;
+      from.rect = NSMakeRect (record.geometry.from[0], record.geometry.from[1],
+                              record.geometry.from[2], record.geometry.from[3]);
+      to.rect = NSMakeRect (record.geometry.to[0], record.geometry.to[1],
+                            record.geometry.to[2], record.geometry.to[3]);
+      CGPathRef from_path = mtl_decoration_path (from);
+      CGPathRef to_path = mtl_decoration_path (to);
+      if (!record.geometry.repeat)
+        shape.path = to_path;
+      mtl_decoration_animate_layer (shape, @"path", &record.geometry,
+                                    (__bridge id) from_path, (__bridge id) to_path);
+      CGPathRelease (from_path);
+      CGPathRelease (to_path);
+    }
+  else
+    [shape removeAnimationForKey:@"path"];
+  CGPathRelease (path);
+  [CATransaction commit];
 }
 
 /* Encode the full composite (static blit + video + animation overlays)
@@ -2624,7 +2820,6 @@ mtl_batch_append (MtlFrameData *fd, float x0, float y0, float x1, float y1,
   self.lastPresentTime = CACurrentMediaTime ();
 
   [self encodeCompositeTextureOn:cmd texture:drawable.texture];
-  [cmd presentDrawable:drawable];
 }
 
 - (void)encodeCompositeTextureOn:(id<MTLCommandBuffer>)cmd
