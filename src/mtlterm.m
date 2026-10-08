@@ -2107,6 +2107,11 @@ mtl_decoration_sample (MtlDecorationRecord *record, CFTimeInterval now, BOOL ret
       g_atlas_scale  = scale;
       mtl_atlas_reset ();
       mtl_color_glyph_cache_clear ();   /* color glyphs are scale-baked too */
+      /* Inline image textures are baked at the backing scale too.  */
+      if (g_image_texture_cache)
+        CFDictionaryRemoveAllValues (g_image_texture_cache);
+      if (g_image_hash_cache)
+        CFDictionaryRemoveAllValues (g_image_hash_cache);
     }
 
   /* Ensure staticTexture exists and matches drawable size.
@@ -3203,6 +3208,14 @@ mtl_texture_for_image (struct image *img)
   NSUInteger w = img->width  > 0 ? (NSUInteger)img->width  : (NSUInteger)ceil (sz.width);
   NSUInteger h = img->height > 0 ? (NSUInteger)img->height : (NSUInteger)ceil (sz.height);
 
+  /* Rasterize at the backing scale, as glyphs are: the frame's static
+     texture is physical, and the quad is drawn at the logical size.  An
+     SVG is already loaded at the backing scale and drawn down to the
+     display size by its transform, so this keeps its resolution.  */
+  CGFloat s = g_atlas_scale;
+  NSUInteger pw = (NSUInteger) ceil (w * s);
+  NSUInteger ph = (NSUInteger) ceil (h * s);
+
   /* Cache lookup: key is the struct image* pointer directly.
      CFDictionary with NULL key callbacks uses pointer equality — correct and
      fast.  Re-rasterize if the display size changed (reload / new transform). */
@@ -3211,14 +3224,14 @@ mtl_texture_for_image (struct image *img)
   EMACS_UINT cached_hash = (EMACS_UINT) (uintptr_t)
     CFDictionaryGetValue (g_image_hash_cache, (const void *)img);
   if (tex && cached_hash == img->hash
-      && tex.width == w && tex.height == h)
+      && tex.width == pw && tex.height == ph)
     return tex;
 
   /* Render NSImage to a BGRA8 bitmap via CGContext */
   CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB ();
-  size_t bpr    = w * 4;
-  uint8_t *px   = (uint8_t *)calloc (1, bpr * h);
-  CGContextRef ctx = CGBitmapContextCreate (px, w, h, 8, bpr, cs,
+  size_t bpr    = pw * 4;
+  uint8_t *px   = (uint8_t *)calloc (1, bpr * ph);
+  CGContextRef ctx = CGBitmapContextCreate (px, pw, ph, 8, bpr, cs,
     (CGBitmapInfo)(kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little));
   CGColorSpaceRelease (cs);
   if (!ctx) { free (px); return nil; }
@@ -3234,8 +3247,9 @@ mtl_texture_for_image (struct image *img)
     is_emacs_image ? ((EmacsImage *)nsimg)->transform : nil;
   BOOL smoothing = is_emacs_image ? ((EmacsImage *)nsimg)->smoothing : YES;
 
-  CGContextTranslateCTM (ctx, 0, (CGFloat)h);
+  CGContextTranslateCTM (ctx, 0, (CGFloat)ph);
   CGContextScaleCTM (ctx, 1.0, -1.0);
+  CGContextScaleCTM (ctx, s, s);
   NSGraphicsContext *gc = [NSGraphicsContext graphicsContextWithCGContext:ctx
                                                                   flipped:YES];
   [NSGraphicsContext saveGraphicsState];
@@ -3260,11 +3274,11 @@ mtl_texture_for_image (struct image *img)
   /* Upload pixels to MTLTexture (BGRA8Unorm — byte order already correct) */
   MTLTextureDescriptor *td =
     [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
-                                                       width:w height:h mipmapped:NO];
+                                                       width:pw height:ph mipmapped:NO];
   td.usage       = MTLTextureUsageShaderRead;
   td.storageMode = MTLStorageModeShared;
   tex = [g_device newTextureWithDescriptor:td];
-  [tex replaceRegion:MTLRegionMake2D (0, 0, w, h)
+  [tex replaceRegion:MTLRegionMake2D (0, 0, pw, ph)
          mipmapLevel:0
            withBytes:px bytesPerRow:bpr];
   free (px);
@@ -3566,8 +3580,10 @@ mtl_drv_image_texture (struct frame *f, struct image *img, int *w, int *h)
   (void) f;
   id<MTLTexture> tex = mtl_texture_for_image (img);
   if (!tex) return NULL;
-  if (w) *w = (int) tex.width;
-  if (h) *h = (int) tex.height;
+  /* The texture holds physical pixels; callers compute slice UVs in the
+     image's logical display size.  */
+  if (w) *w = img->width  > 0 ? img->width  : (int) lround (tex.width  / g_atlas_scale);
+  if (h) *h = img->height > 0 ? img->height : (int) lround (tex.height / g_atlas_scale);
   return (void *) tex;
 }
 
