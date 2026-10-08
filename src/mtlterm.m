@@ -1622,8 +1622,11 @@ mtl_decoration_sample (MtlDecorationRecord *record, CFTimeInterval now, BOOL ret
                    atX:(int)x y:(int)y color:(unsigned long)color;
 @property (nonatomic, strong) NSMutableDictionary *decorationRecords;
 - (void)syncDecorationLayer:(unsigned long long)identifier;
-- (void)syncTextLayer:(CALayer *)clip record:(MtlDecorationRecord *)record
+- (void)syncTextLayer:(CALayer *)holder record:(MtlDecorationRecord *)record
            identifier:(unsigned long long)identifier;
+- (void)applyMotion:(CALayer *)layer identifier:(unsigned long long)identifier
+          transform:(CGAffineTransform)path_transform;
+- (CALayer *)decorationContent:(NSNumber *)key class:(Class)class;
 - (void)presentDrawable:(id<CAMetalDrawable>)drawable afterCommitting:(id<MTLCommandBuffer>)cmd;
 - (void)drawDecorationsOnEncoder:(id<MTLRenderCommandEncoder>)encoder
                        texture:(id<MTLTexture>)texture;
@@ -1657,6 +1660,8 @@ mtl_decoration_sample (MtlDecorationRecord *record, CFTimeInterval now, BOOL ret
   self.decorationLayer = nil;
   self.decorationLayers = nil;
   self.decorationTexts = nil;
+  self.decorationExtras = nil;
+  self.decorationKeyframes = nil;
 
   if (g_batch_fd == self)
     {
@@ -1719,6 +1724,8 @@ mtl_decoration_sample (MtlDecorationRecord *record, CFTimeInterval now, BOOL ret
   if (![self.decorationRecords objectForKey:@(identifier)]) return NO;
   [self.decorationRecords removeObjectForKey:@(identifier)];
   [self.decorationTexts removeObjectForKey:@(identifier)];
+  [self.decorationExtras removeObjectForKey:@(identifier)];
+  [self.decorationKeyframes removeObjectForKey:@(identifier)];
   [self syncDecorationLayer:identifier];
   [self requestDecorationPresent];
   return YES;
@@ -2547,10 +2554,197 @@ mtl_batch_append (MtlFrameData *fd, float x0, float y0, float x1, float y1,
     }
 }
 
+/* SVG path data: every command in absolute and relative form, including
+   elliptical arcs, which become relative arcs of a transformed unit circle.  */
+static const char *
+mtl_svg_skip (const char *p)
+{
+  while (*p == ' ' || *p == ',' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+  return p;
+}
+
+static bool
+mtl_svg_number (const char **p, double *value)
+{
+  const char *start = mtl_svg_skip (*p);
+  char *end;
+  *value = strtod (start, &end);
+  if (end == start) return false;
+  *p = end;
+  return true;
+}
+
+static bool
+mtl_svg_flag (const char **p, int *flag)
+{
+  const char *q = mtl_svg_skip (*p);
+  if (*q != '0' && *q != '1') return false;
+  *flag = *q - '0';
+  *p = q + 1;
+  return true;
+}
+
+static void
+mtl_svg_arc (CGMutablePathRef path, double x1, double y1, double rx, double ry,
+             double degrees, int large, int sweep, double x2, double y2)
+{
+  if (rx == 0 || ry == 0) { CGPathAddLineToPoint (path, NULL, x2, y2); return; }
+  rx = fabs (rx); ry = fabs (ry);
+  double phi = degrees * M_PI / 180, c = cos (phi), s = sin (phi);
+  double dx = (x1 - x2) / 2, dy = (y1 - y2) / 2;
+  double x1p = c * dx + s * dy, y1p = -s * dx + c * dy;
+  double lambda = x1p * x1p / (rx * rx) + y1p * y1p / (ry * ry);
+  if (lambda > 1) { rx *= sqrt (lambda); ry *= sqrt (lambda); }
+  double num = rx * rx * ry * ry - rx * rx * y1p * y1p - ry * ry * x1p * x1p;
+  double den = rx * rx * y1p * y1p + ry * ry * x1p * x1p;
+  double coef = (den > 0 ? sqrt (MAX (0, num / den)) : 0) * (large == sweep ? -1 : 1);
+  double cxp = coef * rx * y1p / ry, cyp = -coef * ry * x1p / rx;
+  double cx = c * cxp - s * cyp + (x1 + x2) / 2, cy = s * cxp + c * cyp + (y1 + y2) / 2;
+  double ux = (x1p - cxp) / rx, uy = (y1p - cyp) / ry;
+  double vx = (-x1p - cxp) / rx, vy = (-y1p - cyp) / ry;
+  double theta = atan2 (uy, ux);
+  double delta = atan2 (ux * vy - uy * vx, ux * vx + uy * vy);
+  if (!sweep && delta > 0) delta -= 2 * M_PI;
+  else if (sweep && delta < 0) delta += 2 * M_PI;
+  CGAffineTransform t = CGAffineTransformMakeTranslation (cx, cy);
+  t = CGAffineTransformRotate (t, phi);
+  t = CGAffineTransformScale (t, rx, ry);
+  CGPathAddRelativeArc (path, &t, 0, 0, 1, theta, delta);
+}
+
+CGPathRef
+mtl_svg_path_create (const char *data)
+{
+  CGMutablePathRef path = CGPathCreateMutable ();
+  const char *p = data;
+  char command = 0;
+  double x = 0, y = 0, start_x = 0, start_y = 0, control_x = 0, control_y = 0;
+  char previous = 0;
+  for (;;)
+    {
+      p = mtl_svg_skip (p);
+      if (!*p) break;
+      if (isalpha ((unsigned char) *p)) command = *p++;
+      else if (!command) goto fail;
+      bool relative = islower ((unsigned char) command);
+      double ox = relative ? x : 0, oy = relative ? y : 0;
+      double a[7];
+      char upper = toupper ((unsigned char) command);
+      if (upper != 'M' && upper != 'Z' && CGPathIsEmpty (path)) goto fail;
+      switch (upper)
+        {
+        case 'M':
+          if (!mtl_svg_number (&p, &a[0]) || !mtl_svg_number (&p, &a[1])) goto fail;
+          x = start_x = ox + a[0]; y = start_y = oy + a[1];
+          CGPathMoveToPoint (path, NULL, x, y);
+          /* Further pairs after a move are lines.  */
+          command = relative ? 'l' : 'L';
+          break;
+        case 'L':
+          if (!mtl_svg_number (&p, &a[0]) || !mtl_svg_number (&p, &a[1])) goto fail;
+          x = ox + a[0]; y = oy + a[1];
+          CGPathAddLineToPoint (path, NULL, x, y);
+          break;
+        case 'H':
+          if (!mtl_svg_number (&p, &a[0])) goto fail;
+          x = ox + a[0];
+          CGPathAddLineToPoint (path, NULL, x, y);
+          break;
+        case 'V':
+          if (!mtl_svg_number (&p, &a[0])) goto fail;
+          y = oy + a[0];
+          CGPathAddLineToPoint (path, NULL, x, y);
+          break;
+        case 'C':
+          for (int i = 0; i < 6; i++) if (!mtl_svg_number (&p, &a[i])) goto fail;
+          CGPathAddCurveToPoint (path, NULL, ox + a[0], oy + a[1], ox + a[2], oy + a[3],
+                                 ox + a[4], oy + a[5]);
+          control_x = ox + a[2]; control_y = oy + a[3];
+          x = ox + a[4]; y = oy + a[5];
+          break;
+        case 'S':
+          for (int i = 0; i < 4; i++) if (!mtl_svg_number (&p, &a[i])) goto fail;
+          {
+            bool smooth = previous == 'C' || previous == 'S';
+            double c1x = smooth ? 2 * x - control_x : x, c1y = smooth ? 2 * y - control_y : y;
+            CGPathAddCurveToPoint (path, NULL, c1x, c1y, ox + a[0], oy + a[1],
+                                   ox + a[2], oy + a[3]);
+          }
+          control_x = ox + a[0]; control_y = oy + a[1];
+          x = ox + a[2]; y = oy + a[3];
+          break;
+        case 'Q':
+          for (int i = 0; i < 4; i++) if (!mtl_svg_number (&p, &a[i])) goto fail;
+          CGPathAddQuadCurveToPoint (path, NULL, ox + a[0], oy + a[1], ox + a[2], oy + a[3]);
+          control_x = ox + a[0]; control_y = oy + a[1];
+          x = ox + a[2]; y = oy + a[3];
+          break;
+        case 'T':
+          if (!mtl_svg_number (&p, &a[0]) || !mtl_svg_number (&p, &a[1])) goto fail;
+          {
+            bool smooth = previous == 'Q' || previous == 'T';
+            control_x = smooth ? 2 * x - control_x : x;
+            control_y = smooth ? 2 * y - control_y : y;
+          }
+          CGPathAddQuadCurveToPoint (path, NULL, control_x, control_y, ox + a[0], oy + a[1]);
+          x = ox + a[0]; y = oy + a[1];
+          break;
+        case 'A':
+          {
+            int large, sweep;
+            if (!mtl_svg_number (&p, &a[0]) || !mtl_svg_number (&p, &a[1])
+                || !mtl_svg_number (&p, &a[2]) || !mtl_svg_flag (&p, &large)
+                || !mtl_svg_flag (&p, &sweep) || !mtl_svg_number (&p, &a[3])
+                || !mtl_svg_number (&p, &a[4]))
+              goto fail;
+            mtl_svg_arc (path, x, y, a[0], a[1], a[2], large, sweep, ox + a[3], oy + a[4]);
+            x = ox + a[3]; y = oy + a[4];
+          }
+          break;
+        case 'Z':
+          CGPathCloseSubpath (path);
+          x = start_x; y = start_y;
+          /* Z takes no numbers; a number next is an error, a command is fine.  */
+          command = 0;
+          break;
+        default:
+          goto fail;
+        }
+      previous = upper;
+    }
+  if (CGPathIsEmpty (path)) goto fail;
+  return path;
+ fail:
+  CGPathRelease (path);
+  return NULL;
+}
+
+/* Decoration paths are in frame coordinates.  A path shape's SVG data maps
+   its :view-box onto its :rect, or sits at the rect's origin without one.  */
+static CGAffineTransform
+mtl_decoration_path_transform (MtlDecoration v, NSDictionary *extras)
+{
+  CGRect r = CGRectStandardize (NSRectToCGRect (v.rect));
+  CGAffineTransform t = CGAffineTransformMakeTranslation (r.origin.x, r.origin.y);
+  NSValue *box = extras[@"viewBox"];
+  if (box)
+    {
+      NSRect b = box.rectValue;
+      t = CGAffineTransformScale (t, r.size.width / b.size.width, r.size.height / b.size.height);
+      t = CGAffineTransformTranslate (t, -b.origin.x, -b.origin.y);
+    }
+  return t;
+}
+
 /* Build the outline of decoration V, in frame coordinates.  */
 static CGPathRef
-mtl_decoration_path (MtlDecoration v)
+mtl_decoration_path (MtlDecoration v, NSDictionary *extras)
 {
+  if (v.shape == MTL_DECORATION_PATH && extras[@"path"])
+    {
+      CGAffineTransform t = mtl_decoration_path_transform (v, extras);
+      return CGPathCreateCopyByTransformingPath ((CGPathRef) extras[@"path"], &t);
+    }
   CGMutablePathRef path = CGPathCreateMutable ();
   CGRect r = CGRectStandardize (NSRectToCGRect (v.rect));
   switch (v.shape)
@@ -2587,6 +2781,16 @@ mtl_decoration_color (unsigned long rgb)
                             (rgb & 0xff) / 255.0, 1.0);
 }
 
+static CAMediaTimingFunction *
+mtl_decoration_timing (NSString *name)
+{
+  return [CAMediaTimingFunction functionWithName:
+            ([name isEqualToString:@"ease-in"] ? kCAMediaTimingFunctionEaseIn
+             : [name isEqualToString:@"ease-out"] ? kCAMediaTimingFunctionEaseOut
+             : [name isEqualToString:@"ease-in-out"] ? kCAMediaTimingFunctionEaseInEaseOut
+             : kCAMediaTimingFunctionLinear)];
+}
+
 /* Replay TRACK as a Core Animation animation of KEY on LAYER.  FROM and TO
    are the animated values; the track's start keeps a retargeted or restored
    animation in phase.  */
@@ -2604,10 +2808,9 @@ mtl_decoration_animate_layer (CALayer *layer, NSString *key, MtlDecorationTrack 
   animation.toValue = to;
   animation.duration = track->duration;
   animation.beginTime = [layer convertTime:track->start fromLayer:nil];
-  animation.timingFunction = [CAMediaTimingFunction functionWithName:
-                                (track->easing == 1 ? kCAMediaTimingFunctionEaseOut
-                                 : track->easing == 2 ? kCAMediaTimingFunctionEaseInEaseOut
-                                 : kCAMediaTimingFunctionLinear)];
+  animation.timingFunction = mtl_decoration_timing (track->easing == 1 ? @"ease-out"
+                                                    : track->easing == 2 ? @"ease-in-out"
+                                                    : @"linear");
   if (track->repeat)
     animation.repeatCount = HUGE_VALF;
   else
@@ -2618,38 +2821,127 @@ mtl_decoration_animate_layer (CALayer *layer, NSString *key, MtlDecorationTrack 
   [layer addAnimation:animation forKey:key];
 }
 
+/* Add keyframe SPEC to LAYER unless it already runs.  Path values map from
+   SVG space through TRANSFORM.  The spec's start time keeps a layer rebuilt
+   later in phase.  */
+static void
+mtl_decoration_keyframes_apply (CALayer *layer, NSDictionary *spec, CGAffineTransform transform)
+{
+  NSString *key = spec[@"keyPath"];
+  NSString *marker = [@"mtlSpec." stringByAppendingString:key];
+  if ([layer animationForKey:key] && [layer valueForKey:marker] == spec)
+    return;
+  NSArray *values = spec[@"values"];
+  if ([key isEqualToString:@"path"])
+    {
+      NSMutableArray *paths = [NSMutableArray arrayWithCapacity:values.count];
+      for (id value in values)
+        {
+          CGPathRef path = CGPathCreateCopyByTransformingPath ((CGPathRef) value, &transform);
+          [paths addObject:(id) path];
+          CGPathRelease (path);
+        }
+      values = paths;
+    }
+  NSArray *easings = spec[@"easings"];
+  CAPropertyAnimation *animation;
+  if ([spec[@"spring"] boolValue] && values.count == 2)
+    {
+      CASpringAnimation *spring = [CASpringAnimation animationWithKeyPath:key];
+      spring.fromValue = values[0];
+      spring.toValue = values[1];
+      spring.damping = 12;
+      spring.stiffness = 180;
+      spring.duration = spring.settlingDuration;
+      animation = spring;
+    }
+  else
+    {
+      CAKeyframeAnimation *frames = [CAKeyframeAnimation animationWithKeyPath:key];
+      frames.values = values;
+      if (spec[@"times"]) frames.keyTimes = spec[@"times"];
+      if (easings.count == 1)
+        frames.timingFunction = mtl_decoration_timing (easings[0]);
+      else if (easings.count > 1)
+        {
+          NSMutableArray *functions = [NSMutableArray array];
+          for (NSString *name in easings)
+            [functions addObject:mtl_decoration_timing (name)];
+          frames.timingFunctions = functions;
+        }
+      frames.duration = [spec[@"duration"] doubleValue];
+      animation = frames;
+    }
+  double repeat = [spec[@"repeat"] doubleValue];
+  animation.repeatCount = repeat < 0 ? HUGE_VALF : repeat;
+  animation.autoreverses = [spec[@"autoreverse"] boolValue];
+  animation.beginTime = [layer convertTime:[spec[@"start"] doubleValue]
+                                             + [spec[@"delay"] doubleValue]
+                                 fromLayer:nil];
+  animation.fillMode = kCAFillModeBoth;
+  animation.removedOnCompletion = NO;
+  [layer addAnimation:animation forKey:key];
+  [layer setValue:spec forKey:marker];
+}
+
+/* Apply EXTRAS' static transform and IDENTIFIER's keyframes to LAYER, whose
+   anchor is already the decoration's center.  */
+- (void)applyMotion:(CALayer *)layer identifier:(unsigned long long)identifier
+          transform:(CGAffineTransform)path_transform
+{
+  NSDictionary *extras = [self.decorationExtras objectForKey:@(identifier)];
+  CATransform3D t = CATransform3DIdentity;
+  NSValue *translate = extras[@"translate"];
+  if (translate)
+    t = CATransform3DTranslate (t, translate.pointValue.x, translate.pointValue.y, 0);
+  if (extras[@"rotation"])
+    t = CATransform3DRotate (t, [extras[@"rotation"] doubleValue], 0, 0, 1);
+  if (extras[@"scale"])
+    t = CATransform3DScale (t, [extras[@"scale"] doubleValue], [extras[@"scale"] doubleValue], 1);
+  layer.transform = t;
+  NSDictionary *keyframes = [self.decorationKeyframes objectForKey:@(identifier)];
+  for (NSString *key in keyframes)
+    mtl_decoration_keyframes_apply (layer, keyframes[key], path_transform);
+}
+
+/* Return the content layer of decoration KEY's clip, recreating both when
+   the content must be of class CLASS.  */
+- (CALayer *)decorationContent:(NSNumber *)key class:(Class)class
+{
+  CALayer *clip = [self.decorationLayers objectForKey:key];
+  CALayer *content = clip.sublayers.firstObject;
+  if (clip && [content class] == class)
+    return content;
+  [clip removeFromSuperlayer];
+  clip = [CALayer layer];
+  clip.masksToBounds = YES;
+  content = [class layer];
+  [clip addSublayer:content];
+  [self.decorationLayer addSublayer:clip];
+  if (!self.decorationLayers)
+    self.decorationLayers = [NSMutableDictionary dictionary];
+  [self.decorationLayers setObject:clip forKey:key];
+  return content;
+}
+
 /* Show text decoration IDENTIFIER as a highlight band that sweeps through its
-   label.  A holder over the label is masked by a text layer that draws the
-   label in the same font, so only the letters show the band sliding inside
-   it, over the text Emacs already drew.  */
-- (void)syncTextLayer:(CALayer *)clip record:(MtlDecorationRecord *)record
+   label.  HOLDER covers the label and is masked by a text layer that draws
+   the label in the same font, so only the letters show the band sliding
+   inside it, over the text Emacs already drew.  */
+- (void)syncTextLayer:(CALayer *)holder record:(MtlDecorationRecord *)record
            identifier:(unsigned long long)identifier
 {
-  NSNumber *key = @(identifier);
-  NSDictionary *text = [self.decorationTexts objectForKey:key];
+  NSDictionary *text = [self.decorationTexts objectForKey:@(identifier)];
   MtlDecoration v = record->value;
-  CALayer *holder = clip.sublayers.firstObject;
-  if (clip && ![holder.mask isKindOfClass:[CATextLayer class]])
+  CALayer *clip = holder.superlayer;
+  if (![holder.mask isKindOfClass:[CATextLayer class]])
     {
-      [clip removeFromSuperlayer];
-      clip = nil;
-    }
-  if (!clip)
-    {
-      clip = [CALayer layer];
-      clip.masksToBounds = YES;
-      holder = [CALayer layer];
       holder.masksToBounds = YES;
       holder.mask = [CATextLayer layer];
       CAGradientLayer *band = [CAGradientLayer layer];
       band.startPoint = CGPointMake (0, 0.5);
       band.endPoint = CGPointMake (1, 0.5);
       [holder addSublayer:band];
-      [clip addSublayer:holder];
-      [self.decorationLayer addSublayer:clip];
-      if (!self.decorationLayers)
-        self.decorationLayers = [NSMutableDictionary dictionary];
-      [self.decorationLayers setObject:clip forKey:key];
     }
   CAGradientLayer *band = (CAGradientLayer *) holder.sublayers.firstObject;
   CGFloat scale = self.metalLayer.contentsScale;
@@ -2724,19 +3016,46 @@ mtl_decoration_animate_layer (CALayer *layer, NSString *key, MtlDecorationTrack 
   return YES;
 }
 
-/* Show decoration IDENTIFIER's current record as a clipped shape layer, or
-   remove its layer when the record is gone.  */
+- (BOOL)setDecorationExtras:(NSDictionary *)extras identifier:(unsigned long long)identifier
+{
+  if (!self.decorationExtras) self.decorationExtras = [NSMutableDictionary dictionary];
+  if (extras.count)
+    [self.decorationExtras setObject:extras forKey:@(identifier)];
+  else
+    [self.decorationExtras removeObjectForKey:@(identifier)];
+  return YES;
+}
+
+- (BOOL)setDecorationKeyframes:(NSDictionary *)spec identifier:(unsigned long long)identifier
+{
+  if (!self.decorationLayer || ![self.decorationRecords objectForKey:@(identifier)])
+    return NO;
+  if (!self.decorationKeyframes) self.decorationKeyframes = [NSMutableDictionary dictionary];
+  NSMutableDictionary *keyframes = [self.decorationKeyframes objectForKey:@(identifier)];
+  if (!keyframes)
+    {
+      keyframes = [NSMutableDictionary dictionary];
+      [self.decorationKeyframes setObject:keyframes forKey:@(identifier)];
+    }
+  NSMutableDictionary *started = [[spec mutableCopy] autorelease];
+  started[@"start"] = @(CACurrentMediaTime ());
+  [keyframes setObject:started forKey:spec[@"keyPath"]];
+  [self syncDecorationLayer:identifier];
+  return YES;
+}
+
+/* Show decoration IDENTIFIER's current record as a clipped layer, or remove
+   its layer when the record is gone.  */
 - (void)syncDecorationLayer:(unsigned long long)identifier
 {
   if (!self.decorationLayer) return;
   NSNumber *key = @(identifier);
-  CALayer *clip = [self.decorationLayers objectForKey:key];
   NSValue *stored = [self.decorationRecords objectForKey:key];
   [CATransaction begin];
   [CATransaction setDisableActions:YES];
   if (!stored)
     {
-      [clip removeFromSuperlayer];
+      [[self.decorationLayers objectForKey:key] removeFromSuperlayer];
       [self.decorationLayers removeObjectForKey:key];
       [CATransaction commit];
       return;
@@ -2744,98 +3063,107 @@ mtl_decoration_animate_layer (CALayer *layer, NSString *key, MtlDecorationTrack 
   MtlDecorationRecord record;
   [stored getValue:&record];
   MtlDecoration v = record.value;
+  NSDictionary *extras = [self.decorationExtras objectForKey:key];
+  CGAffineTransform path_transform = mtl_decoration_path_transform (v, extras);
+  CGFloat scale = self.metalLayer.contentsScale;
+  CGRect r = CGRectStandardize (NSRectToCGRect (v.rect));
+
   if (v.shape == MTL_DECORATION_TEXT)
     {
-      [self syncTextLayer:clip record:&record identifier:identifier];
+      CALayer *holder = [self decorationContent:key class:[CALayer class]];
+      [self syncTextLayer:holder record:&record identifier:identifier];
+      [self applyMotion:holder identifier:identifier transform:path_transform];
       [CATransaction commit];
       return;
     }
-  if (clip && ![clip.sublayers.firstObject isKindOfClass:[CAShapeLayer class]])
+
+  CALayer *content;
+  if (v.shape == MTL_DECORATION_IMAGE)
     {
-      [clip removeFromSuperlayer];
-      [self.decorationLayers removeObjectForKey:key];
-      clip = nil;
-    }
-  CAShapeLayer *shape;
-  if (!clip)
-    {
-      clip = [CALayer layer];
-      clip.masksToBounds = YES;
-      shape = [CAShapeLayer layer];
-      [clip addSublayer:shape];
-      [self.decorationLayer addSublayer:clip];
-      if (!self.decorationLayers)
-        self.decorationLayers = [NSMutableDictionary dictionary];
-      [self.decorationLayers setObject:clip forKey:key];
+      content = [self decorationContent:key class:[CALayer class]];
+      content.contents = extras[@"image"];
+      content.contentsGravity = kCAGravityResize;
+      content.frame = CGRectOffset (r, -v.clip.origin.x, -v.clip.origin.y);
     }
   else
-    shape = (CAShapeLayer *) clip.sublayers.firstObject;
-  CGFloat scale = self.metalLayer.contentsScale;
-  clip.contentsScale = scale;
-  shape.contentsScale = scale;
-  /* Equal z values keep creation order, as sibling order does.  */
-  clip.zPosition = (CGFloat) v.z;
-  clip.frame = NSRectToCGRect (v.clip);
-  shape.frame = CGRectMake (-v.clip.origin.x, -v.clip.origin.y,
-                            self.decorationLayer.bounds.size.width + v.clip.origin.x,
-                            self.decorationLayer.bounds.size.height + v.clip.origin.y);
-  CGPathRef path = mtl_decoration_path (v);
-  shape.path = path;
-  CGColorRef fill = v.hasFill ? mtl_decoration_color (v.fill) : NULL;
-  CGColorRef stroke = v.hasStroke ? mtl_decoration_color (v.stroke) : NULL;
-  shape.fillColor = fill;
-  shape.strokeColor = stroke;
-  if (fill) CGColorRelease (fill);
-  if (stroke) CGColorRelease (stroke);
-  shape.lineWidth = v.hasStroke ? v.strokeWidth : 0;
-  shape.lineCap = (v.shape == MTL_DECORATION_LINE || v.shape == MTL_DECORATION_ARC)
-    ? kCALineCapRound : kCALineCapButt;
-  shape.opacity = record.opacity.active && !record.opacity.repeat
-    ? record.opacity.to[0] : v.opacity;
-  mtl_decoration_animate_layer (shape, @"opacity", &record.opacity,
-                                @(record.opacity.from[0]), @(record.opacity.to[0]));
-  if (record.geometry.active)
     {
-      MtlDecoration from = v, to = v;
-      from.rect = NSMakeRect (record.geometry.from[0], record.geometry.from[1],
-                              record.geometry.from[2], record.geometry.from[3]);
-      to.rect = NSMakeRect (record.geometry.to[0], record.geometry.to[1],
-                            record.geometry.to[2], record.geometry.to[3]);
-      CGPathRef from_path = mtl_decoration_path (from);
-      CGPathRef to_path = mtl_decoration_path (to);
-      if (!record.geometry.repeat)
-        shape.path = to_path;
-      mtl_decoration_animate_layer (shape, @"path", &record.geometry,
-                                    (__bridge id) from_path, (__bridge id) to_path);
-      CGPathRelease (from_path);
-      CGPathRelease (to_path);
-    }
-  else
-    [shape removeAnimationForKey:@"path"];
-  /* Rotate about the shape's center, which turns an arc's start angle.  The
-     path starts at the track's first angle when it repeats, or at its last
-     angle otherwise, so the model value is the resting one.  */
-  if (record.rotation.active)
-    {
-      CGRect r = CGRectStandardize (NSRectToCGRect (v.rect));
-      CGSize size = shape.bounds.size;
-      MtlDecoration base = v;
-      float from = record.rotation.from[0], to = record.rotation.to[0];
-      base.startAngle = record.rotation.repeat ? from : to;
-      CGPathRef rotated = mtl_decoration_path (base);
-      shape.path = rotated;
-      CGPathRelease (rotated);
+      CAShapeLayer *shape = (CAShapeLayer *) [self decorationContent:key
+                                                               class:[CAShapeLayer class]];
+      content = shape;
+      /* The shape spans frame coordinates, anchored at the decoration's
+         center so rotation and scale turn about it.  */
+      CGSize size = CGSizeMake (MAX (1, self.decorationLayer.bounds.size.width + v.clip.origin.x),
+                                MAX (1, self.decorationLayer.bounds.size.height + v.clip.origin.y));
+      shape.bounds = CGRectMake (0, 0, size.width, size.height);
       shape.anchorPoint = CGPointMake (CGRectGetMidX (r) / size.width,
                                        CGRectGetMidY (r) / size.height);
       shape.position = CGPointMake (CGRectGetMidX (r) - v.clip.origin.x,
                                     CGRectGetMidY (r) - v.clip.origin.y);
-      mtl_decoration_animate_layer (shape, @"transform.rotation.z", &record.rotation,
-                                    @(record.rotation.repeat ? 0 : from - to),
-                                    @(record.rotation.repeat ? to - from : 0));
+      MtlDecoration resting = v;
+      if (record.rotation.active)
+        resting.startAngle = record.rotation.repeat ? record.rotation.from[0]
+                                                    : record.rotation.to[0];
+      CGPathRef path = mtl_decoration_path (resting, extras);
+      shape.path = path;
+      CGPathRelease (path);
+      BOOL fills = v.hasFill && v.shape != MTL_DECORATION_ARC && v.shape != MTL_DECORATION_LINE;
+      CGColorRef fill = fills ? mtl_decoration_color (v.fill) : NULL;
+      CGColorRef stroke = v.hasStroke ? mtl_decoration_color (v.stroke) : NULL;
+      shape.fillColor = fill;
+      shape.strokeColor = stroke;
+      if (fill) CGColorRelease (fill);
+      if (stroke) CGColorRelease (stroke);
+      shape.lineWidth = v.hasStroke ? v.strokeWidth : 0;
+      NSString *cap = extras[@"lineCap"];
+      shape.lineCap = [cap isEqualToString:@"round"] ? kCALineCapRound
+        : [cap isEqualToString:@"square"] ? kCALineCapSquare
+        : cap ? kCALineCapButt
+        : (v.shape == MTL_DECORATION_LINE || v.shape == MTL_DECORATION_ARC)
+        ? kCALineCapRound : kCALineCapButt;
+      NSString *join = extras[@"lineJoin"];
+      shape.lineJoin = [join isEqualToString:@"round"] ? kCALineJoinRound
+        : [join isEqualToString:@"bevel"] ? kCALineJoinBevel : kCALineJoinMiter;
+      shape.lineDashPattern = extras[@"dash"];
+      shape.strokeStart = extras[@"strokeStart"] ? [extras[@"strokeStart"] doubleValue] : 0;
+      shape.strokeEnd = extras[@"strokeEnd"] ? [extras[@"strokeEnd"] doubleValue] : 1;
+      if (record.geometry.active)
+        {
+          MtlDecoration from = v, to = v;
+          from.rect = NSMakeRect (record.geometry.from[0], record.geometry.from[1],
+                                  record.geometry.from[2], record.geometry.from[3]);
+          to.rect = NSMakeRect (record.geometry.to[0], record.geometry.to[1],
+                                record.geometry.to[2], record.geometry.to[3]);
+          CGPathRef from_path = mtl_decoration_path (from, extras);
+          CGPathRef to_path = mtl_decoration_path (to, extras);
+          if (!record.geometry.repeat)
+            shape.path = to_path;
+          mtl_decoration_animate_layer (shape, @"path", &record.geometry,
+                                        (id) from_path, (id) to_path);
+          CGPathRelease (from_path);
+          CGPathRelease (to_path);
+        }
+      else
+        [shape removeAnimationForKey:@"path"];
+      /* An arc's start-angle track turns the whole shape about its center.  */
+      if (record.rotation.active)
+        {
+          float from = record.rotation.from[0], to = record.rotation.to[0];
+          MtlDecorationTrack track = record.rotation;
+          mtl_decoration_animate_layer (shape, @"transform.rotation.z", &track,
+                                        @(track.repeat ? 0 : from - to),
+                                        @(track.repeat ? to - from : 0));
+        }
     }
-  else
-    [shape removeAnimationForKey:@"transform.rotation.z"];
-  CGPathRelease (path);
+  CALayer *clip = content.superlayer;
+  clip.contentsScale = scale;
+  content.contentsScale = scale;
+  clip.zPosition = (CGFloat) v.z;
+  clip.frame = NSRectToCGRect (v.clip);
+  content.opacity = record.opacity.active && !record.opacity.repeat
+    ? record.opacity.to[0] : v.opacity;
+  mtl_decoration_animate_layer (content, @"opacity", &record.opacity,
+                                @(record.opacity.from[0]), @(record.opacity.to[0]));
+  [self applyMotion:content identifier:identifier transform:path_transform];
   [CATransaction commit];
 }
 

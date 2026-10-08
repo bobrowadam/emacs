@@ -215,8 +215,12 @@ typedef struct {
 /* Generic compositor geometry and paint, independent of application state. */
 typedef NS_ENUM (NSUInteger, MtlDecorationShape) {
   MTL_DECORATION_RECT, MTL_DECORATION_CIRCLE,
-  MTL_DECORATION_ARC, MTL_DECORATION_LINE, MTL_DECORATION_TEXT
+  MTL_DECORATION_ARC, MTL_DECORATION_LINE, MTL_DECORATION_TEXT,
+  MTL_DECORATION_IMAGE, MTL_DECORATION_PATH
 };
+
+/* Parse SVG path DATA into a new path, or return NULL when it is invalid.  */
+CGPathRef mtl_svg_path_create (const char *data);
 typedef struct {
   NSRect rect, clip;
   MtlDecorationShape shape;
@@ -301,6 +305,12 @@ typedef struct {
 /* A text decoration's label, font, size and sweep period, by identifier.  */
 @property (nonatomic, strong) NSMutableDictionary *decorationTexts;
 - (BOOL)setDecorationText:(NSDictionary *)text identifier:(unsigned long long)identifier;
+/* Properties beyond the native record (image, path, paint and transform), and
+   keyframe animations by key path, by identifier.  Core Animation only.  */
+@property (nonatomic, strong) NSMutableDictionary *decorationExtras;
+@property (nonatomic, strong) NSMutableDictionary *decorationKeyframes;
+- (BOOL)setDecorationExtras:(NSDictionary *)extras identifier:(unsigned long long)identifier;
+- (BOOL)setDecorationKeyframes:(NSDictionary *)spec identifier:(unsigned long long)identifier;
 
 /* Moving tool-card borders are independent compositor overlays. */
 - (BOOL)setBorderWithID:(unsigned long long)identifier

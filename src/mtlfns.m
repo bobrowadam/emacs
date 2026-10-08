@@ -981,13 +981,119 @@ mtl_decoration_color (Lisp_Object object)
   return XFIXNUM (object);
 }
 
+static const char *const mtl_decoration_extra_keys[] = {
+  ":image", ":path", ":view-box", ":line-cap", ":line-join", ":dash",
+  ":stroke-start", ":stroke-end", ":rotation", ":scale", ":translate", NULL
+};
+
+static bool
+mtl_decoration_extra_key_p (Lisp_Object key)
+{
+  for (int i = 0; mtl_decoration_extra_keys[i]; i++)
+    if (EQ (key, intern (mtl_decoration_extra_keys[i]))) return true;
+  return false;
+}
+
+static CGPathRef
+mtl_decoration_svg_path (Lisp_Object data)
+{
+  CHECK_STRING (data);
+  CGPathRef path = mtl_svg_path_create (SSDATA (ENCODE_UTF_8 (data)));
+  if (!path) error ("Invalid SVG path data");
+  return path;
+}
+
+/* Parse PLIST's properties beyond the native record for frame F.  Return
+   an autoreleased dictionary, empty when there are none.  */
+static NSDictionary *
+mtl_decoration_extras (Lisp_Object plist, struct frame *f)
+{
+  NSMutableDictionary *extras = [NSMutableDictionary dictionary];
+  for (; CONSP (plist) && CONSP (XCDR (plist)); plist = XCDR (XCDR (plist)))
+    {
+      Lisp_Object key = XCAR (plist), value = XCAR (XCDR (plist));
+      if (NILP (value)) continue;
+      if (EQ (key, intern (":image")))
+        {
+          if (!f) continue;
+          ptrdiff_t image_id = lookup_image (f, value, -1);
+          struct image *img = IMAGE_FROM_ID (f, image_id);
+          prepare_image_for_display (f, img);
+          if (!img->pixmap) error ("Image could not be loaded");
+          extras[@"image"] = (id) img->pixmap;
+        }
+      else if (EQ (key, intern (":path")))
+        {
+          CGPathRef path = mtl_decoration_svg_path (value);
+          extras[@"path"] = (id) path;
+          CGPathRelease (path);
+        }
+      else if (EQ (key, intern (":view-box")))
+        {
+          NSRect box = mtl_decoration_rect (value, NO);
+          extras[@"viewBox"] = [NSValue valueWithRect:box];
+        }
+      else if (EQ (key, intern (":line-cap")) || EQ (key, intern (":line-join")))
+        {
+          CHECK_SYMBOL (value);
+          extras[EQ (key, intern (":line-cap")) ? @"lineCap" : @"lineJoin"]
+            = [NSString stringWithUTF8String:SSDATA (SYMBOL_NAME (value))];
+        }
+      else if (EQ (key, intern (":dash")))
+        {
+          NSMutableArray *dash = [NSMutableArray array];
+          for (Lisp_Object tail = value; CONSP (tail); tail = XCDR (tail))
+            [dash addObject:@(mtl_decoration_number (XCAR (tail)))];
+          extras[@"dash"] = dash;
+        }
+      else if (EQ (key, intern (":stroke-start")) || EQ (key, intern (":stroke-end")))
+        {
+          double number = mtl_decoration_number (value);
+          if (number < 0 || number > 1) error ("Stroke start and end must be in 0..1");
+          extras[EQ (key, intern (":stroke-start")) ? @"strokeStart" : @"strokeEnd"] = @(number);
+        }
+      else if (EQ (key, intern (":rotation")))
+        extras[@"rotation"] = @(mtl_decoration_number (value));
+      else if (EQ (key, intern (":scale")))
+        {
+          double number = mtl_decoration_number (value);
+          if (number <= 0) error ("Scale must be positive");
+          extras[@"scale"] = @(number);
+        }
+      else if (EQ (key, intern (":translate")))
+        {
+          if (!CONSP (value) || !CONSP (XCDR (value))) error ("Translate requires (DX DY)");
+          extras[@"translate"] = [NSValue valueWithPoint:
+                                    NSMakePoint (mtl_decoration_number (XCAR (value)),
+                                                 mtl_decoration_number (XCAR (XCDR (value))))];
+        }
+    }
+  return extras;
+}
+
+/* Whether decoration VALUE with EXTRAS needs Core Animation, which draws
+   images, paths and every property beyond the native record.  */
+static bool
+mtl_decoration_needs_layers (MtlDecoration value, NSDictionary *extras)
+{
+  return value.shape == MTL_DECORATION_IMAGE || value.shape == MTL_DECORATION_PATH
+    || extras.count > 0;
+}
+
+static struct frame *
+mtl_decoration_frame (Lisp_Object frame)
+{
+  if (NILP (frame)) frame = Fselected_frame ();
+  return FRAMEP (frame) && FRAME_LIVE_P (XFRAME (frame)) ? XFRAME (frame) : NULL;
+}
+
 static MtlDecoration
 mtl_decoration_value (Lisp_Object plist)
 {
   MtlDecoration v = { .shape = MTL_DECORATION_RECT, .hasStroke = YES,
     .stroke = 0xffffff, .strokeWidth = 1, .opacity = 1,
     .sweepAngle = 2 * M_PI };
-  Lisp_Object rect = Qnil, seen = Qnil;
+  Lisp_Object rect = Qnil, seen = Qnil, plist_start = plist;
   bool clip_seen = false;
   if (NILP (Fproper_list_p (plist))) error ("Decoration must be a proper plist");
   while (CONSP (plist))
@@ -1005,6 +1111,8 @@ mtl_decoration_value (Lisp_Object plist)
           else if (EQ (value, intern ("arc"))) v.shape = MTL_DECORATION_ARC;
           else if (EQ (value, intern ("line"))) v.shape = MTL_DECORATION_LINE;
           else if (EQ (value, intern ("text"))) v.shape = MTL_DECORATION_TEXT;
+          else if (EQ (value, intern ("image"))) v.shape = MTL_DECORATION_IMAGE;
+          else if (EQ (value, intern ("path"))) v.shape = MTL_DECORATION_PATH;
           else error ("Unknown decoration shape");
         }
       else if (EQ (key, intern (":rect"))) rect = value;
@@ -1029,6 +1137,8 @@ mtl_decoration_value (Lisp_Object plist)
           v.strokeWidth = number; }
       else if (EQ (key, intern (":start-angle"))) v.startAngle = mtl_decoration_number (value);
       else if (EQ (key, intern (":sweep-angle"))) v.sweepAngle = mtl_decoration_number (value);
+      /* Parsed by mtl_decoration_extras.  */
+      else if (mtl_decoration_extra_key_p (key)) ;
       else error ("Unknown decoration property");
       plist = XCDR (plist);
     }
@@ -1050,6 +1160,8 @@ mtl_decoration_value (Lisp_Object plist)
     error ("Arc/line does not support fill");
   if (v.shape == MTL_DECORATION_TEXT && !v.hasFill)
     error ("Text requires a :fill highlight color");
+  if (v.shape == MTL_DECORATION_PATH && NILP (Fplist_get (plist_start, intern (":path"), Qnil)))
+    error ("Path requires :path data");
   /* Normalize before shader fmod to keep angular arithmetic well conditioned. */
   v.startAngle = fmod (v.startAngle, 2 * M_PI);
   return v;
@@ -1071,9 +1183,12 @@ Validation precedes mutation even on unsupported frames.  */)
   MtlDecoration value = mtl_decoration_value (properties);
   MtlFrameData *fd = mtl_border_frame_data (frame);
   if (!fd) return Qnil;
+  NSDictionary *extras = mtl_decoration_extras (properties, mtl_decoration_frame (frame));
+  if (mtl_decoration_needs_layers (value, extras) && !fd.decorationLayer) return Qnil;
   static EMACS_INT next = 0;
   if (next == MOST_POSITIVE_FIXNUM) error ("Decoration IDs exhausted");
   EMACS_INT id = ++next;
+  [fd setDecorationExtras:extras identifier:id];
   return [fd setDecoration:value identifier:id cancel:7] ? make_fixnum (id) : Qnil;
 }
 
@@ -1090,8 +1205,11 @@ CANCEL is a bitmask: 1 cancels geometry animation, 2 cancels opacity animation,
   if (XFIXNUM (cancel) < 0 || XFIXNUM (cancel) > 7) error ("Invalid cancellation mask");
   MtlFrameData *fd = mtl_border_frame_data (frame);
   MtlDecorationRecord record;
-  return fd && [fd getDecoration:XFIXNUM (id) record:&record]
-    && [fd setDecoration:value identifier:XFIXNUM (id) cancel:XFIXNUM (cancel)] ? Qt : Qnil;
+  if (!fd || ![fd getDecoration:XFIXNUM (id) record:&record]) return Qnil;
+  NSDictionary *extras = mtl_decoration_extras (properties, mtl_decoration_frame (frame));
+  if (mtl_decoration_needs_layers (value, extras) && !fd.decorationLayer) return Qnil;
+  [fd setDecorationExtras:extras identifier:XFIXNUM (id)];
+  return [fd setDecoration:value identifier:XFIXNUM (id) cancel:XFIXNUM (cancel)] ? Qt : Qnil;
 }
 
 DEFUN ("gpu--decoration-remove", Fmtl_decoration_remove, Smtl_decoration_remove, 1, 2, 0,
@@ -1126,6 +1244,144 @@ is zero.  Return t, or nil when FRAME cannot draw text decorations.  */)
                           @"size": @(pixels), @"advance": @(mtl_decoration_number (advance)),
                           @"period": @(seconds) };
   return [fd setDecorationText:text identifier:XFIXNUM (id)] ? Qt : Qnil;
+}
+
+/* Key paths and value kinds of the keyframe properties.  */
+static NSString *
+mtl_decoration_key_path (Lisp_Object property, int *kind)
+{
+  static const struct { const char *name, *path; int kind; } table[] = {
+    { ":opacity", "opacity", 0 }, { ":rotation", "transform.rotation.z", 0 },
+    { ":scale", "transform.scale", 0 }, { ":translate-x", "transform.translation.x", 0 },
+    { ":translate-y", "transform.translation.y", 0 }, { ":stroke-start", "strokeStart", 0 },
+    { ":stroke-end", "strokeEnd", 0 }, { ":stroke-width", "lineWidth", 0 },
+    { ":fill", "fillColor", 1 }, { ":stroke", "strokeColor", 1 }, { ":path", "path", 2 },
+  };
+  for (size_t i = 0; i < sizeof table / sizeof table[0]; i++)
+    if (EQ (property, intern (table[i].name)))
+      {
+        *kind = table[i].kind;
+        return [NSString stringWithUTF8String:table[i].path];
+      }
+  error ("Property cannot animate with keyframes");
+}
+
+static NSString *
+mtl_decoration_easing_name (Lisp_Object easing)
+{
+  if (NILP (easing)) return @"linear";
+  CHECK_SYMBOL (easing);
+  if (EQ (easing, intern ("linear")) || EQ (easing, intern ("ease-in"))
+      || EQ (easing, intern ("ease-out")) || EQ (easing, intern ("ease-in-out")))
+    return [NSString stringWithUTF8String:SSDATA (SYMBOL_NAME (easing))];
+  error ("Unknown keyframe easing");
+}
+
+DEFUN ("gpu--decoration-keyframes", Fmtl_decoration_keyframes, Smtl_decoration_keyframes,
+       5, 6, 0,
+       doc: /* Animate decoration ID's PROPERTY through VALUES over DURATION seconds.
+Internal primitive for gpu.el, for FRAME.  OPTIONS is a plist of :times,
+:easing (a symbol, a list with one per step, or spring for two values),
+:repeat (t or a count), :autoreverse and :delay.  Return t, or nil when
+FRAME cannot draw decorations with Core Animation.  */)
+  (Lisp_Object id, Lisp_Object property, Lisp_Object values, Lisp_Object duration,
+   Lisp_Object options, Lisp_Object frame)
+{
+  mtl_decoration_id (id);
+  int kind;
+  NSString *key = mtl_decoration_key_path (property, &kind);
+  double seconds = mtl_decoration_number (duration);
+  if (seconds < 0.001) error ("Animation duration must be at least 0.001 seconds");
+  NSMutableArray *list = [NSMutableArray array];
+  for (Lisp_Object tail = values; CONSP (tail); tail = XCDR (tail))
+    {
+      Lisp_Object value = XCAR (tail);
+      if (kind == 1)
+        {
+          unsigned long rgb = mtl_decoration_color (value);
+          CGColorRef color = CGColorCreateSRGB (((rgb >> 16) & 0xff) / 255.0,
+                                                ((rgb >> 8) & 0xff) / 255.0,
+                                                (rgb & 0xff) / 255.0, 1.0);
+          [list addObject:(NSObject *) color];
+          CGColorRelease (color);
+        }
+      else if (kind == 2)
+        {
+          CGPathRef path = mtl_decoration_svg_path (value);
+          [list addObject:(NSObject *) path];
+          CGPathRelease (path);
+        }
+      else
+        [list addObject:@(mtl_decoration_number (value))];
+    }
+  if (list.count < 2) error ("Keyframes need at least two values");
+  NSMutableDictionary *spec = [NSMutableDictionary dictionary];
+  spec[@"keyPath"] = key;
+  spec[@"values"] = list;
+  spec[@"duration"] = @(seconds);
+  Lisp_Object times = Fplist_get (options, intern (":times"), Qnil);
+  if (!NILP (times))
+    {
+      NSMutableArray *array = [NSMutableArray array];
+      for (Lisp_Object tail = times; CONSP (tail); tail = XCDR (tail))
+        [array addObject:@(mtl_decoration_number (XCAR (tail)))];
+      if (array.count != list.count) error ("Keyframe :times must match the values");
+      spec[@"times"] = array;
+    }
+  Lisp_Object easing = Fplist_get (options, intern (":easing"), Qnil);
+  if (EQ (easing, intern ("spring")))
+    {
+      if (list.count != 2) error ("Spring easing needs exactly two values");
+      spec[@"spring"] = @YES;
+    }
+  else if (CONSP (easing))
+    {
+      NSMutableArray *array = [NSMutableArray array];
+      for (Lisp_Object tail = easing; CONSP (tail); tail = XCDR (tail))
+        [array addObject:mtl_decoration_easing_name (XCAR (tail))];
+      if (array.count != list.count - 1) error ("Keyframe :easing needs one per step");
+      spec[@"easings"] = array;
+    }
+  else
+    spec[@"easings"] = @[mtl_decoration_easing_name (easing)];
+  Lisp_Object repeat = Fplist_get (options, intern (":repeat"), Qnil);
+  spec[@"repeat"] = @(EQ (repeat, Qt) ? -1.0 : NILP (repeat) ? 0.0
+                      : mtl_decoration_number (repeat));
+  spec[@"autoreverse"] = @(!NILP (Fplist_get (options, intern (":autoreverse"), Qnil)));
+  Lisp_Object delay = Fplist_get (options, intern (":delay"), Qnil);
+  spec[@"delay"] = @(NILP (delay) ? 0.0 : mtl_decoration_number (delay));
+  MtlFrameData *fd = mtl_border_frame_data (frame);
+  return fd && fd.decorationLayer && [fd setDecorationKeyframes:spec identifier:XFIXNUM (id)]
+    ? Qt : Qnil;
+}
+
+DEFUN ("gpu-decoration-capabilities", Fmtl_decoration_capabilities,
+       Smtl_decoration_capabilities, 0, 1, 0,
+       doc: /* Return what decorations FRAME can draw, or nil without decorations.
+The value is a plist.  :shapes lists the shapes and :animate the properties
+`gpu-decoration-animate' accepts.  :keyframes and :layers are t when Core
+Animation draws the frame's decorations, which adds images, paths, text,
+paint and transform properties, and `gpu-decoration-keyframes'.  */)
+  (Lisp_Object frame)
+{
+  MtlFrameData *fd = mtl_border_frame_data (frame);
+  if (!fd) return Qnil;
+  bool layers = fd.decorationLayer != nil;
+  Lisp_Object shapes = list4 (intern ("rounded-rectangle"), intern ("circle"),
+                              intern ("arc"), intern ("line"));
+  Lisp_Object animate = list3 (intern (":rect"), intern (":opacity"), intern (":start-angle"));
+  if (layers)
+    {
+      shapes = nconc2 (shapes, list3 (intern ("text"), intern ("image"), intern ("path")));
+      animate = nconc2 (animate, list (intern (":rotation"), intern (":scale"),
+                                       intern (":translate-x"), intern (":translate-y"),
+                                       intern (":stroke-start"), intern (":stroke-end"),
+                                       intern (":stroke-width"), intern (":fill"),
+                                       intern (":stroke"), intern (":path")));
+    }
+  return list (intern (":shapes"), shapes, intern (":animate"), animate,
+               intern (":keyframes"), layers ? Qt : Qnil,
+               intern (":layers"), layers ? Qt : Qnil);
 }
 
 DEFUN ("gpu--decoration-animate", Fmtl_decoration_animate, Smtl_decoration_animate, 4, 7, 0,
@@ -1293,6 +1549,8 @@ syms_of_mtlfns (void)
   defsubr (&Smtl_decoration_remove);
   defsubr (&Smtl_decoration_animate);
   defsubr (&Smtl_decoration_text);
+  defsubr (&Smtl_decoration_keyframes);
+  defsubr (&Smtl_decoration_capabilities);
   defsubr (&Smtl_decoration_state);
   defsubr (&Smtl_vsync);
   defsubr (&Smtl_transition_start);

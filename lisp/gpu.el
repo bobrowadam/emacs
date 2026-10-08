@@ -529,10 +529,21 @@ Arc angles are radians: zero at right, positive clockwise, :start-angle 0,
 :sweep-angle 2pi by default, within -2pi..2pi.  Arcs and lines are stroked
 with round ends, not filled.  Unknown or invalid properties signal errors.
 
+:shape image draws :image, an Emacs image such as an SVG from `create-image',
+stretched over :rect.  :shape path draws :path, SVG path data, with its
+:view-box (X Y WIDTH HEIGHT) mapped onto :rect, or at :rect's origin without
+one.  Shapes also take :line-cap (butt, round or square), :line-join (miter,
+round or bevel), :dash (a list of on and off lengths), :stroke-start and
+:stroke-end (the visible portion of the outline, 0..1).  Every decoration
+takes :rotation (radians), :scale and :translate (DX DY), about :rect's
+center.  These need a frame whose `gpu-decoration-capabilities' report
+:layers; elsewhere creation returns nil.
+
 :shape text sweeps a highlight band of :fill color through the letters of
 :text, drawn in :font family at :font-size pixels with its top at :rect's
-top and each letter :advance pixels apart, every :period seconds.  It returns nil where Core Animation does not
-draw decorations, so the caller can keep its own animation.
+top and each letter :advance pixels apart, every :period seconds.  It
+returns nil where Core Animation does not draw decorations, so the caller
+can keep its own animation.
 
 Objects draw above cached text/video/crossfade and legacy borders, below
 animated cursors, in ascending :z then creation order.  Fill can obscure
@@ -602,20 +613,75 @@ Repeated deletion is harmless.  Return non-nil if a native object was removed."
         (when (markerp marker) (set-marker marker nil)))
       (when (frame-live-p frame) (gpu--decoration-remove id frame)))))
 
-(defun gpu-decoration-animate (handle property target duration &optional easing repeat)
+(defconst gpu--decoration-native-animations '(:rect :opacity :start-angle)
+  "Properties every decoration backend animates itself.")
+
+(defun gpu--decoration-resting (handle property)
+  "Return HANDLE's PROPERTY value at rest, before any animation."
+  (let ((properties (gpu--decoration-properties handle)))
+    (pcase property
+      ((or :rotation :translate-x :translate-y :stroke-start)
+       (let ((translate (plist-get properties :translate)))
+         (pcase property
+           (:translate-x (or (car translate) 0))
+           (:translate-y (or (cadr translate) 0))
+           (_ (or (plist-get properties property) 0)))))
+      (:scale (or (plist-get properties :scale) 1))
+      (:stroke-end (or (plist-get properties :stroke-end) 1))
+      (:stroke-width (or (plist-get properties :stroke-width) 1))
+      (:stroke (or (plist-get properties :stroke) #xffffff))
+      (_ (plist-get properties property)))))
+
+(defun gpu-decoration-animate (handle property target duration &optional easing repeat
+                                      &rest options)
   "Animate HANDLE's PROPERTY to TARGET over DURATION seconds.
-PROPERTY is :opacity, :rect or :start-angle, which turns an arc.  EASING is linear, ease-out (quadratic) or
-ease-in-out (smoothstep).  REPEAT t resets to the original start each cycle.
+PROPERTY is :opacity, :rect or :start-angle, which turns an arc, on every
+backend.  Where `gpu-decoration-capabilities' reports :layers, it can also be
+any property `gpu-decoration-keyframes' animates.  EASING is linear,
+ease-in, ease-out, ease-in-out or, for layers, spring.  REPEAT t resets to
+the start each cycle.  OPTIONS are :delay and :autoreverse, for layers.
 Retargeting starts from the current native value.  Terminal values stay
 retained and are presented before the track retires.  Hidden/clipped frames
 stop pumping; monotonic elapsed time is used when presentation resumes.
 No decoration gets its own timer."
   (unless (gpu--decoration-p handle) (signal 'wrong-type-argument (list 'gpu--decoration-p handle)))
-  (when (and (gpu--decoration-id handle)
-             (gpu--decoration-animate (gpu--decoration-id handle) property target
-                                      duration easing repeat (gpu--decoration-frame handle)))
-    (gpu--decoration-wake (gpu--decoration-frame handle))
-    t))
+  (if (and (memq property gpu--decoration-native-animations)
+           (not (memq easing '(ease-in spring)))
+           (not options))
+      (when (and (gpu--decoration-id handle)
+                 (gpu--decoration-animate (gpu--decoration-id handle) property target
+                                          duration easing repeat (gpu--decoration-frame handle)))
+        (gpu--decoration-wake (gpu--decoration-frame handle))
+        t)
+    (apply #'gpu-decoration-keyframes handle property
+           (list (gpu--decoration-resting handle property) target) duration
+           :easing easing :repeat repeat options)))
+
+(defun gpu-decoration-keyframes (handle property values duration &rest options)
+  "Animate HANDLE's PROPERTY through VALUES over DURATION seconds.
+PROPERTY is :opacity, :rotation (radians about the center), :scale,
+:translate-x, :translate-y, :stroke-start, :stroke-end (the visible portion
+of the outline, 0..1), :stroke-width, :fill, :stroke (RGB integers) or :path
+\(SVG path data in the decoration's :view-box, morphing between paths with
+matching commands).  OPTIONS:
+
+  :times     one number in 0..1 per value; evenly spaced by default.
+  :easing    linear, ease-in, ease-out or ease-in-out, or a list with one per
+             step; spring overshoots between exactly two values.
+  :repeat    t to repeat forever, or a count.
+  :autoreverse  non-nil to play each cycle backwards after forwards.
+  :delay     seconds before the first cycle, showing the first value.
+
+The animation runs in the compositor, so it needs no timer or redisplay.
+It needs a frame whose `gpu-decoration-capabilities' report :keyframes;
+elsewhere return nil and leave HANDLE unchanged."
+  (unless (gpu--decoration-p handle) (signal 'wrong-type-argument (list 'gpu--decoration-p handle)))
+  (gpu--decoration-plist options)
+  (and (gpu--decoration-id handle)
+       (fboundp 'gpu--decoration-keyframes)
+       (gpu--decoration-keyframes (gpu--decoration-id handle) property values duration
+                                  options (gpu--decoration-frame handle))
+       t))
 
 (defun gpu-decoration-region (window start end &optional padding viewport-end)
   "Return (RECT CLIP) for buffer START..END as displayed in WINDOW.
