@@ -36,7 +36,7 @@ Keep the installed app independent of temporary build directories. Rebuilding or
 
 Use `admin/bmacs/manage.py` rather than assembling bundles with ad hoc commands. It requires Python 3, GNU Make (`gmake`), macOS signing tools, and an already configured separate build directory. Bootstrap a fresh checkout as described in [INSTALL.REPO](INSTALL.REPO); see [nextstep/INSTALL](nextstep/INSTALL) for NS build requirements.
 
-Configure once outside the checkout. The current Bmacs configuration uses `--with-ns --with-gpu --with-tree-sitter --with-native-compilation=no`, with the default self-contained NS installation. On this Homebrew setup, also pass `LDFLAGS="$(pkg-config --libs-only-L libtiff-4)"` to retain the TIFF library search path. Keep the build's `ns_appdir` inside that build directory, never pointed at the installed Bmacs.
+Configure once outside the checkout. The current Bmacs configuration uses `CC=/usr/bin/gcc --with-ns --with-gpu --with-tree-sitter --with-native-compilation=yes`, with the default self-contained NS installation. Homebrew's GCC cannot find AppKit, so pass Apple's `/usr/bin/gcc` as `CC`. On this Homebrew setup, also pass `LDFLAGS="$(pkg-config --libs-only-L libtiff-4)"` to retain the TIFF library search path. Keep the build's `ns_appdir` inside that build directory, never pointed at the installed Bmacs.
 
 Then use these two explicit operations:
 
