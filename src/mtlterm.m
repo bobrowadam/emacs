@@ -1608,6 +1608,7 @@ mtl_decoration_sample (MtlDecorationRecord *record, CFTimeInterval now, BOOL ret
   mtl_decoration_sample_track (&record->geometry, rect, 4, now, retire);
   record->value.rect = NSMakeRect (rect[0], rect[1], rect[2], rect[3]);
   mtl_decoration_sample_track (&record->opacity, &record->value.opacity, 1, now, retire);
+  mtl_decoration_sample_track (&record->rotation, &record->value.startAngle, 1, now, retire);
 }
 
 @interface MtlFrameData ()
@@ -1621,6 +1622,8 @@ mtl_decoration_sample (MtlDecorationRecord *record, CFTimeInterval now, BOOL ret
                    atX:(int)x y:(int)y color:(unsigned long)color;
 @property (nonatomic, strong) NSMutableDictionary *decorationRecords;
 - (void)syncDecorationLayer:(unsigned long long)identifier;
+- (void)syncTextLayer:(CALayer *)clip record:(MtlDecorationRecord *)record
+           identifier:(unsigned long long)identifier;
 - (void)presentDrawable:(id<CAMetalDrawable>)drawable afterCommitting:(id<MTLCommandBuffer>)cmd;
 - (void)drawDecorationsOnEncoder:(id<MTLRenderCommandEncoder>)encoder
                        texture:(id<MTLTexture>)texture;
@@ -1653,6 +1656,7 @@ mtl_decoration_sample (MtlDecorationRecord *record, CFTimeInterval now, BOOL ret
   [self.decorationLayer removeFromSuperlayer];
   self.decorationLayer = nil;
   self.decorationLayers = nil;
+  self.decorationTexts = nil;
 
   if (g_batch_fd == self)
     {
@@ -1697,8 +1701,10 @@ mtl_decoration_sample (MtlDecorationRecord *record, CFTimeInterval now, BOOL ret
     {
       if (!(cancel & 1)) { record.geometry = previous.geometry; record.value.rect = previous.value.rect; }
       if (!(cancel & 2)) { record.opacity = previous.opacity; record.value.opacity = previous.value.opacity; }
+      if (!(cancel & 4)) { record.rotation = previous.rotation; record.value.startAngle = previous.value.startAngle; }
       /* Shape changes must not inherit a track with incompatible dimensions. */
-      if (value.shape != previous.value.shape) record.geometry.active = NO;
+      if (value.shape != previous.value.shape)
+        record.geometry.active = record.rotation.active = NO;
     }
   if (!self.decorationRecords) self.decorationRecords = [NSMutableDictionary dictionary];
   [self.decorationRecords setObject:[NSValue valueWithBytes:&record objCType:@encode(MtlDecorationRecord)]
@@ -1712,6 +1718,7 @@ mtl_decoration_sample (MtlDecorationRecord *record, CFTimeInterval now, BOOL ret
 {
   if (![self.decorationRecords objectForKey:@(identifier)]) return NO;
   [self.decorationRecords removeObjectForKey:@(identifier)];
+  [self.decorationTexts removeObjectForKey:@(identifier)];
   [self syncDecorationLayer:identifier];
   [self requestDecorationPresent];
   return YES;
@@ -1723,13 +1730,16 @@ mtl_decoration_sample (MtlDecorationRecord *record, CFTimeInterval now, BOOL ret
 {
   MtlDecorationRecord record;
   if (![self getDecoration:identifier record:&record]) return NO;
-  MtlDecorationTrack *track = property == 1 ? &record.geometry : &record.opacity;
+  MtlDecorationTrack *track = property == 1 ? &record.geometry
+    : property == 3 ? &record.rotation : &record.opacity;
   *track = (MtlDecorationTrack) { .active = YES, .repeat = repeat,
     .start = CACurrentMediaTime (), .duration = duration, .easing = easing };
   float rect[] = { record.value.rect.origin.x, record.value.rect.origin.y,
                    record.value.rect.size.width, record.value.rect.size.height };
   for (int i = 0; i < (property == 1 ? 4 : 1); i++)
-    { track->from[i] = property == 1 ? rect[i] : record.value.opacity; track->to[i] = target[i]; }
+    { track->from[i] = property == 1 ? rect[i]
+        : property == 3 ? record.value.startAngle : record.value.opacity;
+      track->to[i] = target[i]; }
   [self.decorationRecords setObject:[NSValue valueWithBytes:&record objCType:@encode(MtlDecorationRecord)]
                             forKey:@(identifier)];
   [self syncDecorationLayer:identifier];
@@ -1772,7 +1782,8 @@ mtl_decoration_sample (MtlDecorationRecord *record, CFTimeInterval now, BOOL ret
       CGFloat extent = record.value.strokeWidth * 0.5 + 1;
       if (!NSIntersectsRect (NSInsetRect (rect, -extent, -extent),
                              NSIntersectionRect (record.value.clip, bounds))) continue;
-      if (record.geometry.active || record.opacity.active) return YES;
+      if (record.geometry.active || record.opacity.active || record.rotation.active)
+        return YES;
     }
   return NO;
 }
@@ -1812,6 +1823,7 @@ mtl_decoration_sample (MtlDecorationRecord *record, CFTimeInterval now, BOOL ret
       mtl_decoration_sample (&record, CACurrentMediaTime (), visible);
       [self.decorationRecords setObject:[NSValue valueWithBytes:&record objCType:@encode(MtlDecorationRecord)] forKey:key];
       MtlDecoration v = record.value;
+      if (v.shape == MTL_DECORATION_TEXT) continue;   /* layers only */
       if (v.opacity == 0 || (!v.hasFill && !v.hasStroke)) continue;
       NSUInteger x0 = MIN ((NSUInteger) floor (NSMinX (clip) * sx), texture.width);
       NSUInteger y0 = MIN ((NSUInteger) floor (NSMinY (clip) * sy), texture.height);
@@ -2606,6 +2618,112 @@ mtl_decoration_animate_layer (CALayer *layer, NSString *key, MtlDecorationTrack 
   [layer addAnimation:animation forKey:key];
 }
 
+/* Show text decoration IDENTIFIER as a highlight band that sweeps through its
+   label.  A holder over the label is masked by a text layer that draws the
+   label in the same font, so only the letters show the band sliding inside
+   it, over the text Emacs already drew.  */
+- (void)syncTextLayer:(CALayer *)clip record:(MtlDecorationRecord *)record
+           identifier:(unsigned long long)identifier
+{
+  NSNumber *key = @(identifier);
+  NSDictionary *text = [self.decorationTexts objectForKey:key];
+  MtlDecoration v = record->value;
+  CALayer *holder = clip.sublayers.firstObject;
+  if (clip && ![holder.mask isKindOfClass:[CATextLayer class]])
+    {
+      [clip removeFromSuperlayer];
+      clip = nil;
+    }
+  if (!clip)
+    {
+      clip = [CALayer layer];
+      clip.masksToBounds = YES;
+      holder = [CALayer layer];
+      holder.masksToBounds = YES;
+      holder.mask = [CATextLayer layer];
+      CAGradientLayer *band = [CAGradientLayer layer];
+      band.startPoint = CGPointMake (0, 0.5);
+      band.endPoint = CGPointMake (1, 0.5);
+      [holder addSublayer:band];
+      [clip addSublayer:holder];
+      [self.decorationLayer addSublayer:clip];
+      if (!self.decorationLayers)
+        self.decorationLayers = [NSMutableDictionary dictionary];
+      [self.decorationLayers setObject:clip forKey:key];
+    }
+  CAGradientLayer *band = (CAGradientLayer *) holder.sublayers.firstObject;
+  CGFloat scale = self.metalLayer.contentsScale;
+  clip.contentsScale = scale;
+  holder.contentsScale = scale;
+  band.contentsScale = scale;
+  clip.zPosition = (CGFloat) v.z;
+  clip.frame = NSRectToCGRect (v.clip);
+  holder.frame = CGRectMake (v.rect.origin.x - v.clip.origin.x,
+                             v.rect.origin.y - v.clip.origin.y,
+                             v.rect.size.width, v.rect.size.height);
+  holder.opacity = v.opacity;
+
+  NSString *string = text[@"text"] ?: @"";
+  CGFloat size = [text[@"size"] doubleValue];
+  double advance = [text[@"advance"] doubleValue];
+  CTFontRef font = CTFontCreateWithName ((__bridge CFStringRef) (text[@"font"] ?: @"Menlo"),
+                                         size, NULL);
+  /* Emacs puts each character on its cell grid.  Kern the font's natural
+     advance to the cell width, or the mask drifts from the letters.  */
+  UniChar m_char = 'M';
+  CGGlyph m_glyph;
+  CGSize natural = CGSizeZero;
+  if (CTFontGetGlyphsForCharacters (font, &m_char, &m_glyph, 1))
+    CTFontGetAdvancesForGlyphs (font, kCTFontOrientationHorizontal, &m_glyph, &natural, 1);
+  NSDictionary *attributes = @{
+    (__bridge NSString *) kCTFontAttributeName: (__bridge id) font,
+    (__bridge NSString *) kCTKernAttributeName: @(advance > 0 ? advance - natural.width : 0),
+    (__bridge NSString *) kCTForegroundColorAttributeName:
+      (__bridge id) CGColorGetConstantColor (kCGColorBlack) };
+  CATextLayer *mask = (CATextLayer *) holder.mask;
+  mask.frame = holder.bounds;
+  mask.contentsScale = scale;
+  mask.string = [[[NSAttributedString alloc] initWithString:string
+                                                 attributes:attributes] autorelease];
+  CFRelease (font);
+
+  /* The band spans about ten cells and enters and leaves the label fully,
+     like Mentat's own shimmer.  */
+  CGFloat width = 10 * (advance > 0 ? advance : natural.width);
+  CGColorRef highlight = mtl_decoration_color (v.fill);
+  CGColorRef clear = CGColorCreateCopyWithAlpha (highlight, 0);
+  band.colors = @[(__bridge id) clear, (__bridge id) highlight, (__bridge id) clear];
+  CGColorRelease (highlight);
+  CGColorRelease (clear);
+  band.bounds = CGRectMake (0, 0, width, v.rect.size.height);
+  band.position = CGPointMake (-width / 2, v.rect.size.height / 2);
+  double period = [text[@"period"] doubleValue];
+  CABasicAnimation *sweep = (CABasicAnimation *) [band animationForKey:@"sweep"];
+  if (period > 0
+      && (!sweep || fabs (sweep.duration - period) > 0.001
+          || fabs ([sweep.toValue doubleValue] - (v.rect.size.width + width / 2)) > 0.5))
+    {
+      sweep = [CABasicAnimation animationWithKeyPath:@"position.x"];
+      sweep.fromValue = @(-width / 2);
+      sweep.toValue = @(v.rect.size.width + width / 2);
+      sweep.duration = period;
+      sweep.repeatCount = HUGE_VALF;
+      [band addAnimation:sweep forKey:@"sweep"];
+    }
+  else if (period <= 0)
+    [band removeAnimationForKey:@"sweep"];
+}
+
+- (BOOL)setDecorationText:(NSDictionary *)text identifier:(unsigned long long)identifier
+{
+  if (!self.decorationLayer || ![self.decorationRecords objectForKey:@(identifier)])
+    return NO;
+  if (!self.decorationTexts) self.decorationTexts = [NSMutableDictionary dictionary];
+  [self.decorationTexts setObject:text forKey:@(identifier)];
+  [self syncDecorationLayer:identifier];
+  return YES;
+}
+
 /* Show decoration IDENTIFIER's current record as a clipped shape layer, or
    remove its layer when the record is gone.  */
 - (void)syncDecorationLayer:(unsigned long long)identifier
@@ -2626,6 +2744,18 @@ mtl_decoration_animate_layer (CALayer *layer, NSString *key, MtlDecorationTrack 
   MtlDecorationRecord record;
   [stored getValue:&record];
   MtlDecoration v = record.value;
+  if (v.shape == MTL_DECORATION_TEXT)
+    {
+      [self syncTextLayer:clip record:&record identifier:identifier];
+      [CATransaction commit];
+      return;
+    }
+  if (clip && ![clip.sublayers.firstObject isKindOfClass:[CAShapeLayer class]])
+    {
+      [clip removeFromSuperlayer];
+      [self.decorationLayers removeObjectForKey:key];
+      clip = nil;
+    }
   CAShapeLayer *shape;
   if (!clip)
     {
@@ -2682,6 +2812,29 @@ mtl_decoration_animate_layer (CALayer *layer, NSString *key, MtlDecorationTrack 
     }
   else
     [shape removeAnimationForKey:@"path"];
+  /* Rotate about the shape's center, which turns an arc's start angle.  The
+     path starts at the track's first angle when it repeats, or at its last
+     angle otherwise, so the model value is the resting one.  */
+  if (record.rotation.active)
+    {
+      CGRect r = CGRectStandardize (NSRectToCGRect (v.rect));
+      CGSize size = shape.bounds.size;
+      MtlDecoration base = v;
+      float from = record.rotation.from[0], to = record.rotation.to[0];
+      base.startAngle = record.rotation.repeat ? from : to;
+      CGPathRef rotated = mtl_decoration_path (base);
+      shape.path = rotated;
+      CGPathRelease (rotated);
+      shape.anchorPoint = CGPointMake (CGRectGetMidX (r) / size.width,
+                                       CGRectGetMidY (r) / size.height);
+      shape.position = CGPointMake (CGRectGetMidX (r) - v.clip.origin.x,
+                                    CGRectGetMidY (r) - v.clip.origin.y);
+      mtl_decoration_animate_layer (shape, @"transform.rotation.z", &record.rotation,
+                                    @(record.rotation.repeat ? 0 : from - to),
+                                    @(record.rotation.repeat ? to - from : 0));
+    }
+  else
+    [shape removeAnimationForKey:@"transform.rotation.z"];
   CGPathRelease (path);
   [CATransaction commit];
 }

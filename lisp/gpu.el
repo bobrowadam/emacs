@@ -489,6 +489,29 @@ This does not enable Metal or any global animation effects."
   (cl-pushnew frame gpu--decoration-frames)
   (gpu--pump-start))
 
+(defconst gpu--decoration-text-keys '(:text :font :font-size :advance :period)
+  "Properties of a text decoration that its native record does not hold.")
+
+(defun gpu--decoration-native (properties)
+  "Return PROPERTIES without the text decoration keys."
+  (let (result)
+    (while properties
+      (unless (memq (car properties) gpu--decoration-text-keys)
+        (setq result (plist-put result (car properties) (cadr properties))))
+      (setq properties (cddr properties)))
+    result))
+
+(defun gpu--decoration-text-sync (id properties frame)
+  "Give text decoration ID the label of PROPERTIES on FRAME.
+Return non-nil when FRAME draws text decorations."
+  (and (fboundp 'gpu--decoration-text)
+       (gpu--decoration-text id (or (plist-get properties :text) "")
+                             (or (plist-get properties :font) "Menlo")
+                             (or (plist-get properties :font-size) 12)
+                             (or (plist-get properties :advance) 0)
+                             (or (plist-get properties :period) 0)
+                             frame)))
+
 (defun gpu-decoration-create (properties &optional frame owner)
   "Create an opt-in retained decoration and return an owned handle.
 Return nil on unsupported FRAME, which defaults to the selected frame.
@@ -506,6 +529,11 @@ Arc angles are radians: zero at right, positive clockwise, :start-angle 0,
 :sweep-angle 2pi by default, within -2pi..2pi.  Arcs and lines are stroked
 with round ends, not filled.  Unknown or invalid properties signal errors.
 
+:shape text sweeps a highlight band of :fill color through the letters of
+:text, drawn in :font family at :font-size pixels with its top at :rect's
+top and each letter :advance pixels apart, every :period seconds.  It returns nil where Core Animation does not
+draw decorations, so the caller can keep its own animation.
+
 Objects draw above cached text/video/crossfade and legacy borders, below
 animated cursors, in ascending :z then creation order.  Fill can obscure
 text.  This is not arbitrary behind-text layering."
@@ -517,7 +545,12 @@ text.  This is not arbitrary behind-text layering."
                      (list 0 0 (frame-pixel-width frame) (frame-pixel-height frame))
                    '(0 0 0 0)))
            (snapshot (gpu--decoration-merge (list :clip clip) properties))
-           (id (gpu--decoration-create snapshot frame)))
+           (id (gpu--decoration-create (gpu--decoration-native snapshot) frame)))
+      (when (and id (eq (plist-get snapshot :shape) 'text)
+                 (not (gpu--decoration-text-sync id snapshot frame)))
+        ;; This frame cannot draw text decorations.
+        (gpu--decoration-remove id frame)
+        (setq id nil))
       (when id
         (let ((handle (gpu--decoration-handle
                        :id id :frame frame :owner owner :properties snapshot)))
@@ -530,7 +563,8 @@ text.  This is not arbitrary behind-text layering."
 
 (defun gpu-decoration-update (handle properties)
   "Patch HANDLE with PROPERTIES, returning t when accepted.
-Only an explicit :rect or :opacity cancels that property's native animation.
+Only an explicit :rect, :opacity or :start-angle cancels that property's
+native animation.
 Other updates preserve animation time.  Deleted handles cannot resurrect.
 Validation failures leave both the accepted native state and handle intact."
   (unless (gpu--decoration-p handle) (signal 'wrong-type-argument (list 'gpu--decoration-p handle)))
@@ -538,9 +572,16 @@ Validation failures leave both the accepted native state and handle intact."
     (let ((snapshot (gpu--decoration-merge (gpu--decoration-properties handle) properties))
           (cancel (+ (if (or (plist-member properties :rect)
                              (plist-member properties :shape)) 1 0)
-                     (if (plist-member properties :opacity) 2 0))))
-      (if (gpu--decoration-set (gpu--decoration-id handle) snapshot
-                              (gpu--decoration-frame handle) cancel)
+                     (if (plist-member properties :opacity) 2 0)
+                     (if (plist-member properties :start-angle) 4 0))))
+      (if (and (gpu--decoration-set (gpu--decoration-id handle)
+                                    (gpu--decoration-native snapshot)
+                                    (gpu--decoration-frame handle) cancel)
+               (or (not (eq (plist-get snapshot :shape) 'text))
+                   (not (seq-some (lambda (key) (plist-member properties key))
+                                  gpu--decoration-text-keys))
+                   (gpu--decoration-text-sync (gpu--decoration-id handle) snapshot
+                                              (gpu--decoration-frame handle))))
           (progn
             (setf (gpu--decoration-properties handle) snapshot)
             (gpu--decoration-wake (gpu--decoration-frame handle))
@@ -563,7 +604,7 @@ Repeated deletion is harmless.  Return non-nil if a native object was removed."
 
 (defun gpu-decoration-animate (handle property target duration &optional easing repeat)
   "Animate HANDLE's PROPERTY to TARGET over DURATION seconds.
-PROPERTY is :opacity or :rect.  EASING is linear, ease-out (quadratic) or
+PROPERTY is :opacity, :rect or :start-angle, which turns an arc.  EASING is linear, ease-out (quadratic) or
 ease-in-out (smoothstep).  REPEAT t resets to the original start each cycle.
 Retargeting starts from the current native value.  Terminal values stay
 retained and are presented before the track retires.  Hidden/clipped frames

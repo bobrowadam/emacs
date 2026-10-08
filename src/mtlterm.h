@@ -215,7 +215,7 @@ typedef struct {
 /* Generic compositor geometry and paint, independent of application state. */
 typedef NS_ENUM (NSUInteger, MtlDecorationShape) {
   MTL_DECORATION_RECT, MTL_DECORATION_CIRCLE,
-  MTL_DECORATION_ARC, MTL_DECORATION_LINE
+  MTL_DECORATION_ARC, MTL_DECORATION_LINE, MTL_DECORATION_TEXT
 };
 typedef struct {
   NSRect rect, clip;
@@ -233,7 +233,7 @@ typedef struct {
 } MtlDecorationTrack;
 typedef struct {
   MtlDecoration value;
-  MtlDecorationTrack geometry, opacity;
+  MtlDecorationTrack geometry, opacity, rotation;
 } MtlDecorationRecord;
 
 @interface MtlFrameData : NSObject
@@ -298,6 +298,9 @@ typedef struct {
    shape layer per record inside this container above the Metal layer.  */
 @property (nonatomic, strong) CALayer *decorationLayer;
 @property (nonatomic, strong) NSMutableDictionary *decorationLayers;
+/* A text decoration's label, font, size and sweep period, by identifier.  */
+@property (nonatomic, strong) NSMutableDictionary *decorationTexts;
+- (BOOL)setDecorationText:(NSDictionary *)text identifier:(unsigned long long)identifier;
 
 /* Moving tool-card borders are independent compositor overlays. */
 - (BOOL)setBorderWithID:(unsigned long long)identifier

@@ -1004,6 +1004,7 @@ mtl_decoration_value (Lisp_Object plist)
           else if (EQ (value, intern ("circle"))) v.shape = MTL_DECORATION_CIRCLE;
           else if (EQ (value, intern ("arc"))) v.shape = MTL_DECORATION_ARC;
           else if (EQ (value, intern ("line"))) v.shape = MTL_DECORATION_LINE;
+          else if (EQ (value, intern ("text"))) v.shape = MTL_DECORATION_TEXT;
           else error ("Unknown decoration shape");
         }
       else if (EQ (key, intern (":rect"))) rect = value;
@@ -1047,6 +1048,8 @@ mtl_decoration_value (Lisp_Object plist)
     error ("Arc sweep must be within -2pi..2pi");
   if ((v.shape == MTL_DECORATION_ARC || v.shape == MTL_DECORATION_LINE) && v.hasFill)
     error ("Arc/line does not support fill");
+  if (v.shape == MTL_DECORATION_TEXT && !v.hasFill)
+    error ("Text requires a :fill highlight color");
   /* Normalize before shader fmod to keep angular arithmetic well conditioned. */
   v.startAngle = fmod (v.startAngle, 2 * M_PI);
   return v;
@@ -1071,20 +1074,20 @@ Validation precedes mutation even on unsupported frames.  */)
   static EMACS_INT next = 0;
   if (next == MOST_POSITIVE_FIXNUM) error ("Decoration IDs exhausted");
   EMACS_INT id = ++next;
-  return [fd setDecoration:value identifier:id cancel:3] ? make_fixnum (id) : Qnil;
+  return [fd setDecoration:value identifier:id cancel:7] ? make_fixnum (id) : Qnil;
 }
 
 DEFUN ("gpu--decoration-set", Fmtl_decoration_set, Smtl_decoration_set, 3, 4, 0,
        doc: /* Replace decoration ID with complete PROPERTIES on FRAME.
-CANCEL is a bitmask: 1 cancels geometry animation, 2 cancels opacity animation.
-Omitted CANCEL means 3.  A missing ID is not recreated.  */)
+CANCEL is a bitmask: 1 cancels geometry animation, 2 cancels opacity animation,
+4 cancels start-angle animation.  Omitted CANCEL means 7.  A missing ID is not recreated.  */)
   (Lisp_Object id, Lisp_Object properties, Lisp_Object frame, Lisp_Object cancel)
 {
   mtl_decoration_id (id);
   MtlDecoration value = mtl_decoration_value (properties);
-  if (NILP (cancel)) cancel = make_fixnum (3);
+  if (NILP (cancel)) cancel = make_fixnum (7);
   CHECK_FIXNUM (cancel);
-  if (XFIXNUM (cancel) < 0 || XFIXNUM (cancel) > 3) error ("Invalid cancellation mask");
+  if (XFIXNUM (cancel) < 0 || XFIXNUM (cancel) > 7) error ("Invalid cancellation mask");
   MtlFrameData *fd = mtl_border_frame_data (frame);
   MtlDecorationRecord record;
   return fd && [fd getDecoration:XFIXNUM (id) record:&record]
@@ -1100,9 +1103,34 @@ DEFUN ("gpu--decoration-remove", Fmtl_decoration_remove, Smtl_decoration_remove,
   return fd && [fd removeDecoration:XFIXNUM (id)] ? Qt : Qnil;
 }
 
+DEFUN ("gpu--decoration-text", Fmtl_decoration_text, Smtl_decoration_text, 6, 7, 0,
+       doc: /* Give text decoration ID its LABEL, FONT family, SIZE, ADVANCE and PERIOD.
+Internal primitive for gpu.el, for FRAME.  SIZE is the font's pixel size,
+and ADVANCE the pixel width of each character cell.  A highlight
+band sweeps through LABEL every PERIOD seconds, or stays still when PERIOD
+is zero.  Return t, or nil when FRAME cannot draw text decorations.  */)
+  (Lisp_Object id, Lisp_Object label, Lisp_Object font, Lisp_Object size,
+   Lisp_Object advance, Lisp_Object period, Lisp_Object frame)
+{
+  mtl_decoration_id (id);
+  CHECK_STRING (label);
+  CHECK_STRING (font);
+  double pixels = mtl_decoration_number (size);
+  double seconds = mtl_decoration_number (period);
+  if (pixels <= 0) error ("Text size must be positive");
+  if (seconds < 0) error ("Sweep period must be nonnegative");
+  MtlFrameData *fd = mtl_border_frame_data (frame);
+  if (!fd) return Qnil;
+  NSDictionary *text = @{ @"text": [NSString stringWithUTF8String:SSDATA (ENCODE_UTF_8 (label))],
+                          @"font": [NSString stringWithUTF8String:SSDATA (ENCODE_UTF_8 (font))],
+                          @"size": @(pixels), @"advance": @(mtl_decoration_number (advance)),
+                          @"period": @(seconds) };
+  return [fd setDecorationText:text identifier:XFIXNUM (id)] ? Qt : Qnil;
+}
+
 DEFUN ("gpu--decoration-animate", Fmtl_decoration_animate, Smtl_decoration_animate, 4, 7, 0,
        doc: /* Animate ID's PROPERTY to TARGET over DURATION seconds on FRAME.
-PROPERTY is :rect or :opacity.  EASING is linear, ease-out, or ease-in-out.
+PROPERTY is :rect, :opacity or :start-angle.  EASING is linear, ease-out, or ease-in-out.
 REPEAT is nil or t.  Retarget from the current native value, not the last Lisp
 snapshot.  Hidden objects use elapsed time when next presented.  */)
   (Lisp_Object id, Lisp_Object property, Lisp_Object target, Lisp_Object duration,
@@ -1135,7 +1163,12 @@ snapshot.  Hidden objects use elapsed time when next presented.  */)
           values[i] = mtl_decoration_number (XCAR (tail)); tail = XCDR (tail); }
       if (!NILP (tail)) error ("Target rect requires four numbers");
     }
-  else error ("Only :rect and :opacity can animate");
+  else if (EQ (property, intern (":start-angle")))
+    {
+      prop = 3;
+      values[0] = mtl_decoration_number (target);
+    }
+  else error ("Only :rect, :opacity and :start-angle can animate");
   MtlFrameData *fd = mtl_border_frame_data (frame);
   MtlDecorationRecord record;
   if (!fd || ![fd getDecoration:XFIXNUM (id) record:&record]) return Qnil;
@@ -1259,6 +1292,7 @@ syms_of_mtlfns (void)
   defsubr (&Smtl_decoration_set);
   defsubr (&Smtl_decoration_remove);
   defsubr (&Smtl_decoration_animate);
+  defsubr (&Smtl_decoration_text);
   defsubr (&Smtl_decoration_state);
   defsubr (&Smtl_vsync);
   defsubr (&Smtl_transition_start);
