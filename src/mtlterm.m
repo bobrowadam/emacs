@@ -815,6 +815,12 @@ mtl_global_setup (void)
 
 static MtlGlyphCacheEntry g_glyph_cache[MTL_CACHE_SLOTS];
 
+/* Fonts with entries in g_glyph_cache.  Keys hold only a font's address,
+   so each font stays retained until the cache is reset: otherwise a new
+   font allocated at a freed font's address would hit the freed font's
+   glyphs, drawing wrong or blank characters.  */
+static NSMutableSet *g_glyph_fonts;
+
 static void
 glyph_cache_init (void)
 {
@@ -822,6 +828,7 @@ glyph_cache_init (void)
   g_atlas_next_x  = 0;
   g_atlas_next_y  = 0;
   g_atlas_row_h   = 0;
+  [g_glyph_fonts removeAllObjects];
 }
 
 /* Reset the atlas packing and the glyph table, then re-reserve the 4x4
@@ -856,7 +863,7 @@ glyph_cache_slot (uint64_t key)
   return (unsigned int)((key * 11400714819323198485ULL) >> 50) & (MTL_CACHE_SLOTS - 1);
 }
 
-/* key = (font_ptr_as_int << 21) | codepoint */
+/* KEY comes from mtl_cache_glyph_id.  */
 static MtlGlyphCacheEntry *
 glyph_cache_lookup (uint64_t key)
 {
@@ -1026,14 +1033,21 @@ mtl_cache_glyph_id (CTFontRef font, CGGlyph glyphId)
 {
   if (!font || glyphId == 0) return NULL;
 
-  /* Cache key = (font_ptr × large_prime) XOR glyphId */
+  /* Cache key = (font_ptr × large_prime) XOR glyphId.  g_glyph_fonts
+     keeps FONT at this address while the key is in the cache.  */
   uint64_t key = ((uint64_t)(uintptr_t)font * 6364136223846793005ULL) ^ (uint64_t)glyphId;
 
   MtlGlyphCacheEntry *e = glyph_cache_lookup (key);
   if (e) return e;
   if (!g_atlas) return NULL;
 
-  return mtl_rasterize_glyph_id (font, glyphId, key);
+  MtlGlyphCacheEntry *entry = mtl_rasterize_glyph_id (font, glyphId, key);
+  if (entry)
+    {
+      if (!g_glyph_fonts) g_glyph_fonts = [NSMutableSet new];
+      [g_glyph_fonts addObject:(__bridge id) font];
+    }
+  return entry;
 }
 
 /* mtl_cache_glyph — SECONDARY path for off-screen test renders.
@@ -4041,6 +4055,11 @@ mtl_draw_image_texture (MtlFrameData *fd, id<MTLTexture> tex,
 @end
 
 static NSMutableDictionary<NSNumber *, MtlColorGlyph *> *g_color_glyph_cache;
+/* Fonts with entries in g_color_glyph_cache.  Keys hold only a font's
+   address, so each font stays retained until the cache is cleared:
+   otherwise a new font allocated at a freed font's address would hit
+   the freed font's glyphs.  */
+static NSMutableSet *g_color_glyph_fonts;
 
 /* Called when g_atlas_scale changes: color glyphs are baked at physical
    resolution too, so they must re-rasterize at the new scale. */
@@ -4048,6 +4067,7 @@ static void
 mtl_color_glyph_cache_clear (void)
 {
   [g_color_glyph_cache removeAllObjects];
+  [g_color_glyph_fonts removeAllObjects];
 }
 
 static MtlColorGlyph *
@@ -4112,6 +4132,8 @@ mtl_color_glyph (CTFontRef font, CGGlyph g)
   cg.bearing_y = bh - raster_oy;
   cg.advance_x = (float)(adv.width / s);
   g_color_glyph_cache[k] = cg;
+  if (!g_color_glyph_fonts) g_color_glyph_fonts = [NSMutableSet new];
+  [g_color_glyph_fonts addObject:(__bridge id) font];
   return cg;
 }
 
