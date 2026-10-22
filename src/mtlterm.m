@@ -4814,9 +4814,23 @@ static const char mtl_resize_obs_key;
 @interface MtlResizeObserver : NSObject
 @property (nonatomic, assign) CAMetalLayer *layer;   /* not weak: layer owned by MtlFrameData */
 @property (nonatomic, assign) struct frame *emacsFrame;
+@property (nonatomic, assign) NSView *view;
+- (void)updateLayerGeometry;
 @end
 
 @implementation MtlResizeObserver
+
+- (void)dealloc
+{
+  [[NSNotificationCenter defaultCenter] removeObserver:self];
+  [super dealloc];
+}
+
+- (void)backingPropertiesChanged:(NSNotification *)notification
+{
+  if (notification.object == self.view.window)
+    [self updateLayerGeometry];
+}
 
 - (void)observeValueForKeyPath:(NSString *)keyPath
                       ofObject:(id)object
@@ -4824,33 +4838,32 @@ static const char mtl_resize_obs_key;
                        context:(void *)ctx
 {
   (void)change; (void)ctx;
-  NSView *view = (NSView *)object;
+  (void)keyPath; (void)object;
+  [self updateLayerGeometry];
+}
+
+- (void)updateLayerGeometry
+{
+  NSView *view = self.view;
   NSSize sz = view.bounds.size;
-
-  /* Handle 'window' KVO (monitor/DPI change): re-read backing scale factor */
-  if ([keyPath isEqualToString:@"window"])
-    {
-      NSWindow *win = view.window;
-      if (win && self.layer)
-        {
-          CGFloat scale = win.backingScaleFactor;
-          self.layer.contentsScale = scale;
-          self.layer.drawableSize  = CGSizeMake (sz.width * scale, sz.height * scale);
-          self.layer.frame = view.bounds;
-          if (self.emacsFrame) SET_FRAME_GARBAGED (self.emacsFrame);
-        }
-      return;
-    }
-
   if (self.layer)
     {
       CGFloat scale = view.window
         ? view.window.backingScaleFactor
         : [[NSScreen mainScreen] backingScaleFactor];
+      BOOL scaleChanged = self.layer.contentsScale != scale;
       self.layer.contentsScale = scale;
-      self.layer.drawableSize  = CGSizeMake (sz.width  * scale,
-                                              sz.height * scale);
+      self.layer.drawableSize = CGSizeMake (sz.width * scale, sz.height * scale);
       self.layer.frame = view.bounds;
+      if (scaleChanged && self.emacsFrame)
+        {
+          MtlFrameData *fd = mtl_get_frame_data (self.emacsFrame);
+          fd.decorationLayer.contentsScale = scale;
+          /* Re-rasterize text masks as well as updating shape/image layers.
+             Keep existing holders so creation-order stacking is unchanged. */
+          for (NSNumber *key in fd.decorationRecords)
+            [fd syncDecorationLayer:key.unsignedLongLongValue];
+        }
     }
 
   /* Only the layer geometry is ours to manage: the EmacsView's own
@@ -4952,6 +4965,10 @@ mtl_patch_terminal_rif (struct frame *f)
       MtlResizeObserver *obs = [[MtlResizeObserver alloc] init];
       obs.layer      = fd.metalLayer;
       obs.emacsFrame = f;
+      obs.view = view;
+      [[NSNotificationCenter defaultCenter]
+        addObserver:obs selector:@selector(backingPropertiesChanged:)
+        name:NSWindowDidChangeBackingPropertiesNotification object:nil];
 
       /* Observe 'frame' changes on the view (triggers on resize) */
       [view addObserver:obs forKeyPath:@"frame"
@@ -4961,15 +4978,8 @@ mtl_patch_terminal_rif (struct frame *f)
       objc_setAssociatedObject (view, &mtl_resize_obs_key,
                                  obs, OBJC_ASSOCIATION_RETAIN);
 
-      /* Phase 6: multi-monitor support via KVO on 'window.screen'.
-         Bug fix: NSWindowDidChangeScreenNotification with usingBlock: returns an
-         observer TOKEN that MUST be stored; dropping it immediately removes the
-         observer and in macOS 26.5 the token (an OS_dispatch_source internally)
-         can corrupt adjacent static variables like g_image_texture_cache → crash.
-
-         Safe alternative: observe 'window' on the view.  When the view moves to a
-         new window (or the window's backing scale changes), update the Metal layer.
-         This uses the same KVO mechanism as the resize observer — stable and safe. */
+      /* KVO handles reparenting the view.  Moving the same window between
+         displays instead sends the backing-properties notification above. */
       [view addObserver:obs forKeyPath:@"window"
                  options:NSKeyValueObservingOptionNew context:NULL];
       [obs release];
@@ -5233,6 +5243,8 @@ mtl_free_frame_resources (struct frame *f)
         {
           obs.emacsFrame = NULL;
           obs.layer = nil;
+          obs.view = nil;
+          [[NSNotificationCenter defaultCenter] removeObserver:obs];
           [view removeObserver:obs forKeyPath:@"frame"];
           [view removeObserver:obs forKeyPath:@"window"];
           objc_setAssociatedObject (view, &mtl_resize_obs_key,
