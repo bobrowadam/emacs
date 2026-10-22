@@ -34,6 +34,21 @@ Keep the installed app independent of temporary build directories. Rebuilding or
 
 ## Repeatable build and installation
 
+Before preparing any build, read [the signing guide](admin/bmacs/README.md).
+Agent builds must reuse the existing persistent Keychain code-signing identity
+with `--signing-identity` or `BMACS_SIGNING_IDENTITY`. Inspect available identities
+with `security find-identity -v -p codesigning`; do not generate a replacement
+identity. Never accept the helper's ad-hoc default or pass `--signing-identity=-`
+unless Bob explicitly requests an ad-hoc build. If the established identity is
+unavailable or cannot be identified, stop and ask before building.
+
+After preparation, verify that the manifest records certificate signing, the
+expected identity, and a certificate-based designated requirement. Preserve the
+bundle identifier and reuse the same identity on later builds. Switching from
+ad-hoc to certificate signing can require a one-time permission grant after an
+authorized installation; do not promise that existing ad-hoc grants will carry
+over. Never reset privacy permissions as part of a routine build.
+
 Use `admin/bmacs/manage.py` rather than assembling bundles with ad hoc commands. It requires Python 3, GNU Make (`gmake`), macOS signing tools, and an already configured separate build directory. Bootstrap a fresh checkout as described in [INSTALL.REPO](INSTALL.REPO); see [nextstep/INSTALL](nextstep/INSTALL) for NS build requirements.
 
 Configure once outside the checkout. The current Bmacs configuration uses `CC=/usr/bin/gcc --with-ns --with-gpu --with-tree-sitter --with-native-compilation=yes`, with the default self-contained NS installation. Homebrew's GCC cannot find AppKit, so pass Apple's `/usr/bin/gcc` as `CC`. On this Homebrew setup, also pass `LDFLAGS="$(pkg-config --libs-only-L libtiff-4)"` to retain the TIFF library search path. Keep the build's `ns_appdir` inside that build directory, never pointed at the installed Bmacs.
