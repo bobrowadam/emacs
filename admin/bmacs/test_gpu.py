@@ -102,8 +102,8 @@ print("Checked \\(samples.count) border perimeter samples on \\(device.name)")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         print(result.stdout.strip())
 
-    def test_generic_compositor_pixels_and_animation_lifecycle(self):
-        """Capture the actual compositor: shapes, clipping, z and final cleanup."""
+    def test_metal_compositor_pixels_and_animation_lifecycle(self):
+        """Capture Metal-only decorations: shapes, clipping, z and cleanup."""
         app = Path(os.environ["BMACS_PREPARED"]).expanduser().resolve() / "Bmacs.app"
         swift = shutil.which("swift")
         if not swift:
@@ -113,10 +113,13 @@ print("Checked \\(samples.count) border perimeter samples on \\(device.name)")
             directory = Path(temp)
             socket = directory / "server"
             with (stage / "decoration-rendering.log").open("w") as log:
+                # gpu-capture-frame reads the Metal compositor, not the
+                # separate Core Animation decoration layers used by default.
                 process = subprocess.Popen(
                     [str(app / "Contents/MacOS/Emacs"), "-Q", f"--fg-daemon={socket}",
                      "--eval", f'(progn (setq user-emacs-directory "{temp}/") '
                      f'(startup-redirect-eln-cache "{temp}/eln-cache/"))'],
+                    env=dict(os.environ, BMACS_CA_DECORATIONS="0"),
                     stdout=log, stderr=subprocess.STDOUT)
                 try:
                     deadline = time.monotonic() + 30
