@@ -818,8 +818,9 @@ static MtlGlyphCacheEntry g_glyph_cache[MTL_CACHE_SLOTS];
 /* Fonts with entries in g_glyph_cache.  Keys hold only a font's address,
    so each font stays retained until the cache is reset: otherwise a new
    font allocated at a freed font's address would hit the freed font's
-   glyphs, drawing wrong or blank characters.  */
-static NSMutableSet *g_glyph_fonts;
+   glyphs, drawing wrong or blank characters.  Equal fonts can have different
+   addresses, so retain each distinct pointer, not just one equal font.  */
+static NSHashTable *g_glyph_fonts;
 
 static void
 glyph_cache_init (void)
@@ -1044,7 +1045,11 @@ mtl_cache_glyph_id (CTFontRef font, CGGlyph glyphId)
   MtlGlyphCacheEntry *entry = mtl_rasterize_glyph_id (font, glyphId, key);
   if (entry)
     {
-      if (!g_glyph_fonts) g_glyph_fonts = [NSMutableSet new];
+      if (!g_glyph_fonts)
+        g_glyph_fonts = [[NSHashTable alloc] initWithOptions:
+                          NSPointerFunctionsStrongMemory
+                          | NSPointerFunctionsObjectPointerPersonality
+                          capacity:0];
       [g_glyph_fonts addObject:(__bridge id) font];
     }
   return entry;
@@ -4058,8 +4063,8 @@ static NSMutableDictionary<NSNumber *, MtlColorGlyph *> *g_color_glyph_cache;
 /* Fonts with entries in g_color_glyph_cache.  Keys hold only a font's
    address, so each font stays retained until the cache is cleared:
    otherwise a new font allocated at a freed font's address would hit
-   the freed font's glyphs.  */
-static NSMutableSet *g_color_glyph_fonts;
+   the freed font's glyphs.  Retain distinct pointers even for equal fonts.  */
+static NSHashTable *g_color_glyph_fonts;
 
 /* Called when g_atlas_scale changes: color glyphs are baked at physical
    resolution too, so they must re-rasterize at the new scale. */
@@ -4132,7 +4137,11 @@ mtl_color_glyph (CTFontRef font, CGGlyph g)
   cg.bearing_y = bh - raster_oy;
   cg.advance_x = (float)(adv.width / s);
   g_color_glyph_cache[k] = cg;
-  if (!g_color_glyph_fonts) g_color_glyph_fonts = [NSMutableSet new];
+  if (!g_color_glyph_fonts)
+    g_color_glyph_fonts = [[NSHashTable alloc] initWithOptions:
+                            NSPointerFunctionsStrongMemory
+                            | NSPointerFunctionsObjectPointerPersonality
+                            capacity:0];
   [g_color_glyph_fonts addObject:(__bridge id) font];
   return cg;
 }
