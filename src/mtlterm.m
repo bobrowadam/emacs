@@ -2993,7 +2993,12 @@ mtl_decoration_keyframes_apply (CALayer *layer, NSDictionary *spec, CGAffineTran
     (__bridge NSString *) kCTForegroundColorAttributeName:
       (__bridge id) CGColorGetConstantColor (kCGColorBlack) };
   CATextLayer *mask = (CATextLayer *) holder.mask;
-  mask.frame = holder.bounds;
+  /* CATextLayer adds the font's descent above its first baseline.  Emacs
+     starts at the ascent instead.  Move the mask up by that descent and
+     extend it so descenders are not clipped before masking the holder.  */
+  CGFloat descent = ceil (CTFontGetDescent (font));
+  mask.frame = CGRectMake (0, -descent, holder.bounds.size.width,
+                           holder.bounds.size.height + descent);
   mask.contentsScale = scale;
   mask.string = [[[NSAttributedString alloc] initWithString:string
                                                  attributes:attributes] autorelease];

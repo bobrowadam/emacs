@@ -22,6 +22,107 @@ import manage
 @unittest.skipUnless(os.environ.get("BMACS_PREPARED"),
                      "set BMACS_PREPARED for isolated GPU presentation")
 class PresentationResponsivenessTest(unittest.TestCase):
+    def test_native_text_mask_matches_core_text_baseline(self):
+        """Paint the renderer's mask geometry against a Core Text reference."""
+        clang = shutil.which("clang")
+        if not clang:
+            self.skipTest("Clang is required for the native text regression")
+        source = (Path(__file__).resolve().parents[2] / "src/mtlterm.m").read_text()
+        start = source.index("  CATextLayer *mask = (CATextLayer *) holder.mask;")
+        end = source.index("  mask.contentsScale = scale;", start)
+        geometry = source[start:end + len("  mask.contentsScale = scale;")]
+        runner = r'''
+#import <Cocoa/Cocoa.h>
+#import <QuartzCore/QuartzCore.h>
+#import <CoreText/CoreText.h>
+
+int main(void) {
+  @autoreleasepool {
+    CGFloat sizes[] = {22, 24, 28}, rows[] = {24, 27, 31};
+    for (int i = 0; i < 3; i++) {
+      CTFontRef font = CTFontCreateWithName(CFSTR("CommitMonoV143"), sizes[i], NULL);
+      NSString *name = (NSString *) CTFontCopyPostScriptName(font);
+      if (![name containsString:@"CommitMono"]) return 77;
+      [name release];
+      NSDictionary *attributes = @{
+        (id) kCTFontAttributeName: (id) font,
+        (id) kCTForegroundColorAttributeName: (id) CGColorGetConstantColor(kCGColorWhite)
+      };
+      NSAttributedString *text = [[NSAttributedString alloc]
+        initWithString:@"Working" attributes:attributes];
+      for (CGFloat scale = 1; scale <= 2; scale++) {
+        CALayer *root = [CALayer layer];
+        root.bounds = CGRectMake(0, 0, 200, 60);
+        root.geometryFlipped = YES;
+        CALayer *holder = [CALayer layer];
+        holder.frame = CGRectMake(0, 0, 180, rows[i]);
+        holder.backgroundColor = CGColorGetConstantColor(kCGColorWhite);
+        holder.masksToBounds = YES;
+        [root addSublayer:holder];
+        holder.mask = [CATextLayer layer];
+GEOMETRY
+        mask.string = text;
+        int width = 200 * scale, height = 60 * scale;
+        int first[2], last[2];
+        for (int reference = 0; reference < 2; reference++) {
+          unsigned char *data = calloc(width * height, 4);
+          CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
+          CGContextRef context = CGBitmapContextCreate(data, width, height,
+            8, width * 4, space, kCGImageAlphaPremultipliedLast);
+          CGColorSpaceRelease(space);
+          CGContextTranslateCTM(context, 0, height);
+          CGContextScaleCTM(context, scale, -scale);
+          if (reference) {
+            CGContextClipToRect(context, holder.bounds);
+            CGContextSetTextMatrix(context, CGAffineTransformMakeScale(1, -1));
+            CGContextSetTextPosition(context, 0, ceil(CTFontGetAscent(font)));
+            CTLineRef line = CTLineCreateWithAttributedString((CFAttributedStringRef) text);
+            CTLineDraw(line, context);
+            CFRelease(line);
+          } else {
+            [root renderInContext:context];
+          }
+          first[reference] = height;
+          last[reference] = -1;
+          for (int y = 0; y < height; y++)
+            for (int x = 0; x < width; x++)
+              if (data[(y * width + x) * 4] > 48) {
+                first[reference] = MIN(first[reference], y);
+                last[reference] = MAX(last[reference], y);
+              }
+          CGContextRelease(context);
+          free(data);
+        }
+        printf("size %.0f scale %.0f: native %d..%d, reference %d..%d\n",
+          sizes[i], scale, first[0], last[0], first[1], last[1]);
+        /* Core Animation and Core Text can round ink edges differently.  */
+        if (last[0] < 0 || last[1] < 0
+            || abs(first[0] - first[1]) > scale
+            || abs(last[0] - last[1]) > scale) return 1;
+      }
+      [text release];
+      CFRelease(font);
+    }
+  }
+  return 0;
+}
+'''.replace("GEOMETRY", geometry)
+        with tempfile.TemporaryDirectory(prefix="bmacs-text-mask-") as directory:
+            root = Path(directory)
+            path = root / "check.m"
+            path.write_text(runner)
+            binary = root / "check"
+            subprocess.run([clang, str(path), "-o", str(binary),
+                            "-framework", "Cocoa", "-framework", "QuartzCore",
+                            "-framework", "CoreText"], check=True,
+                           capture_output=True, text=True, timeout=60)
+            result = subprocess.run([str(binary)], capture_output=True,
+                                    text=True, timeout=30)
+            if result.returncode == 77:
+                self.skipTest("CommitMonoV143 is required for the captured font case")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            print(result.stdout, end="")
+
     def test_border_path_tracks_interior_stroke_pixels(self):
         """Run the renderer's actual perimeter function on Metal."""
         swift = shutil.which("swift")
