@@ -5,6 +5,14 @@ and stages a verified app. It never replaces the installed Bmacs. Installation
 is a separate, explicitly authorized `manage.py install` operation; see
 [AGENTS.md](../../AGENTS.md) for build configuration, validation, and rollback.
 
+## Microphone access
+
+Preparation adds `NSMicrophoneUsageDescription` to the app's `Info.plist`
+before signing. This lets macOS request microphone permission for voice
+conversations and dictation, including audio helpers launched by Bmacs.
+It does not grant permission automatically. A signed app prepared with this
+declaration must be installed and relaunched before it can request access.
+
 ## Keep privacy permissions across rebuilds
 
 By default, preparation uses ad-hoc signing (`codesign --sign -`). Its designated
