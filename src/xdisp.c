@@ -10205,12 +10205,14 @@ move_it_in_display_line_to (struct it *it,
 
   while (true)
     {
-      int x, i, ascent = 0, descent = 0;
+      int x, i, ascent = 0, descent = 0, phys_ascent = 0, phys_descent = 0;
 
 /* Utility macro to reset an iterator with x, ascent, and descent.  */
 #define IT_RESET_X_ASCENT_DESCENT(IT)			\
   ((IT)->current_x = x, (IT)->max_ascent = ascent,	\
-   (IT)->max_descent = descent)
+   (IT)->max_descent = descent,				\
+   (IT)->max_phys_ascent = phys_ascent,			\
+   (IT)->max_phys_descent = phys_descent)
 
       /* Stop if we move beyond TO_CHARPOS (after an image or a
 	 display string or stretch glyph).  */
@@ -10324,6 +10326,8 @@ move_it_in_display_line_to (struct it *it,
 	 the next element doesn't fit on the line.  */
       ascent = it->max_ascent;
       descent = it->max_descent;
+      phys_ascent = it->max_phys_ascent;
+      phys_descent = it->max_phys_descent;
 
       /* The call to produce_glyphs will get the metrics of the
 	 display element IT is loaded with.  Record the x-position
@@ -12131,6 +12135,36 @@ screen line that includes TO to the returned height of the text.  */)
     set_buffer_internal_1 (old_b);
 
   return value;
+}
+
+/* Keep this adjustment local to GPU region geometry.  The standard text
+   measurement functions measure logical line heights, whereas redisplay's
+   compute_line_metrics expands the first row for its physical ascent.  */
+DEFUN ("gpu--window-first-row-overhang", Fgpu__window_first_row_overhang,
+       Sgpu__window_first_row_overhang, 1, 1, 0,
+       doc: /* Return WINDOW's first text row's extra physical ascent in pixels.
+Scan current buffer layout rather than relying on a redisplayed glyph matrix.
+This is an internal helper for `gpu-decoration-region'.  */)
+  (Lisp_Object window)
+{
+  struct window *w = decode_live_window (window);
+  struct buffer *old_buffer = current_buffer;
+  struct text_pos start;
+  struct it it;
+  void *itdata = bidi_shelve_cache ();
+  int overhang = 0;
+
+  set_buffer_internal_1 (XBUFFER (w->contents));
+  /* Narrowing can leave W->start outside the accessible text.  */
+  CLIP_TEXT_POS_FROM_MARKER (start, w->start);
+  start_display (&it, w, start);
+  move_it_in_display_line_to (&it, -1, -1, 0);
+  if (FRAME_WINDOW_P (it.f))
+    overhang = max (0, it.max_phys_ascent - it.max_ascent);
+
+  bidi_unshelve_cache (itdata, false);
+  set_buffer_internal_1 (old_buffer);
+  return make_fixnum (overhang);
 }
 
 DEFUN ("buffer-text-pixel-size", Fbuffer_text_pixel_size, Sbuffer_text_pixel_size, 0, 4, 0,
@@ -38285,6 +38319,7 @@ be let-bound around code that needs to disable messages temporarily. */);
   defsubr (&Sinvisible_p);
   defsubr (&Scurrent_bidi_paragraph_direction);
   defsubr (&Swindow_text_pixel_size);
+  defsubr (&Sgpu__window_first_row_overhang);
   defsubr (&Sbuffer_text_pixel_size);
   defsubr (&Smove_point_visually);
   defsubr (&Sbidi_find_overridden_directionality);

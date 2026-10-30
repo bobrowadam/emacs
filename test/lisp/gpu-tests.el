@@ -246,5 +246,78 @@
       (gpu-decoration-delete b)
       (when (frame-live-p frame) (delete-frame frame t)))))
 
+(ert-deftest gpu-region-first-row-overhang-terminal ()
+  "A terminal window needs no physical-ascent adjustment."
+  (skip-unless (eq (framep (selected-frame)) t))
+  (should (= 0 (gpu--window-first-row-overhang (selected-window)))))
+
+(ert-deftest gpu-region-first-row-overhang ()
+  "Region geometry includes the first row's physical ascent, even stale."
+  (require 'gpu)
+  (skip-unless (eq window-system 'ns))
+  (skip-unless (find-font (font-spec :family "CommitMonoV143")))
+  (let ((frame (make-frame '((visibility . nil) (width . 50) (height . 12)
+                             (no-accept-focus . t) (no-focus-on-map . t)
+                             (z-group . below) (tool-bar-lines . 0))))
+        (buffer (generate-new-buffer " *gpu-region-overhang*")))
+    (unwind-protect
+        (with-selected-frame frame
+          (set-face-attribute 'default frame :family "CommitMonoV143" :height 210)
+          (set-window-buffer (selected-window) buffer)
+          (with-current-buffer buffer
+            (setq mode-line-format nil)
+            (insert (propertize "x" 'display "┤") "\nThinking\n")
+            (goto-char (point-min))
+            (make-frame-visible frame)
+            (lower-frame frame)
+            (redisplay t)
+            (let* ((window (selected-window))
+                   (top (nth 1 (window-inside-pixel-edges window)))
+                   (logical (cdr (window-text-pixel-size window 1 3 nil nil nil t)))
+                   (extra (gpu--window-first-row-overhang window))
+                   (height (car (window-line-height 0 window))))
+              ;; Assert that the fixture actually exercises the mismatch.
+              (should (> extra 0))
+              (should (= height (+ logical extra)))
+              (should (= (+ top height)
+                         (nth 1 (car (gpu-decoration-region window 3 11)))))
+              (should (= height
+                         (nth 3 (car (gpu-decoration-region window 1 3)))))
+              ;; Invalidate the glyph matrix, without allowing redisplay.
+              (put-text-property 1 2 'display "x")
+              (should-not (window-line-height 0 window))
+              (should (= 0 (gpu--window-first-row-overhang window)))
+              (should (= (+ top logical)
+                         (nth 1 (car (gpu-decoration-region window 3 11)))))
+              (put-text-property 1 2 'display "┤")
+              (should-not (window-line-height 0 window))
+              (should (= extra (gpu--window-first-row-overhang window)))
+              (should (= (+ top height)
+                         (nth 1 (car (gpu-decoration-region window 3 11)))))
+              ;; Pixel scrolling hides part of the first row; the next
+              ;; row still starts at its visible bottom.
+              (redisplay t)
+              (set-window-vscroll window logical t)
+              (redisplay t)
+              (should (= (+ top (car (window-line-height 0 window)))
+                         (nth 1 (car (gpu-decoration-region window 3 11)))))
+              (set-window-vscroll window 0 t)
+              ;; A tall glyph that wraps to the second row must not
+              ;; enlarge the first row.
+              (erase-buffer)
+              (insert (make-string (1- (window-max-chars-per-line window)) ?a)
+                      (propertize "x" 'display
+                                  (propertize "┤" 'face '(:height 2.0)))
+                      "\nThinking\n")
+              (redisplay t)
+              (let ((next (save-excursion (goto-char 1) (forward-line 1) (point))))
+                (should (= 0 (gpu--window-first-row-overhang window)))
+                (should (= (+ top (cdr (nth 1 (window-lines-pixel-dimensions
+                                               window nil nil t))))
+                           (nth 1 (car (gpu-decoration-region
+                                        window next (+ next 8))))))))))
+      (when (frame-live-p frame) (delete-frame frame t))
+      (kill-buffer buffer))))
+
 (provide 'gpu-tests)
 ;;; gpu-tests.el ends here

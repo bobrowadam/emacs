@@ -698,12 +698,23 @@ edges at the viewport.  This bounded helper is not a general layout engine."
            (origin (window-start window))
            (visible-end (or viewport-end (window-end window t) (point-max)))
            (limit (* 3 (max 1 height)))
+           (overhang (gpu--window-first-row-overhang window))
+           ;; Measurements start at the first row's top, above TOP
+           ;; when the window is pixel-scrolled.
+           (row-top (- top (window-vscroll window t)))
            (start-y (if (< start origin) (- top height)
                       (+ top (cdr (window-text-pixel-size window origin start nil limit nil t)))))
            (end-y (if (> end visible-end) (+ top (* 2 height))
                     (+ top (cdr (window-text-pixel-size
                                  window origin end nil limit nil (eq (char-before end) ?\n))))))
            (pad (or padding '(0 0 0 0))))
+      ;; Text measurements use logical heights.  Redisplay expands the
+      ;; first row to include glyphs above its logical ascent; every
+      ;; measured boundary below that row needs the same adjustment.
+      (when (and (>= start origin) (> start-y row-top))
+        (setq start-y (+ start-y overhang)))
+      (when (and (<= end visible-end) (> end-y row-top))
+        (setq end-y (+ end-y overhang)))
       (list (list (- left (nth 0 pad)) (- start-y (nth 1 pad))
                   (max 1 (+ width (nth 0 pad) (nth 2 pad)))
                   (max 1 (+ (- end-y start-y) (nth 1 pad) (nth 3 pad))))
