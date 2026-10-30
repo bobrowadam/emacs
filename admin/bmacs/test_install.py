@@ -108,7 +108,7 @@ class DisposableInstallationTest(unittest.TestCase):
                 restored = root / "restored"
                 real_run("/usr/bin/ditto", "-x", "-k", backups[0], restored)
                 self.assertEqual(manage.hashes(restored / "Bmacs.app"), old_hashes)
-                manage.verify_bundle(restored / "Bmacs.app")
+                manage.verify_bundle(restored / "Bmacs.app", required_info=manage.IDENTITY)
             finally:
                 # Only instances from this disposable app path may be stopped.
                 for pid in manage.running_pids(app):

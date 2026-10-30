@@ -21,12 +21,15 @@ ROOT = HERE.parent.parent
 APP = Path.home() / "Applications/Bmacs.app"
 SUPPORT = Path.home() / "Library/Application Support"
 SOCKET = Path(tempfile.gettempdir()) / f"emacs{os.getuid()}/server"
-BRANDING = {
+IDENTITY = {
     "CFBundleName": "Bmacs",
     "CFBundleDisplayName": "Bmacs",
     "CFBundleIdentifier": "com.bob.emacs.mode-line",
     "CFBundleIconFile": "Emacs.icns",
     "CFBundleExecutable": "Emacs",
+}
+BRANDING = {
+    **IDENTITY,
     "NSMicrophoneUsageDescription": "Bmacs uses the microphone for voice conversations and dictation.",
 }
 ARTIFACTS = (
@@ -95,13 +98,13 @@ def sign_bundle(app, identity):
             "identity": identity, "designated_requirement": requirement}
 
 
-def verify_bundle(app):
+def verify_bundle(app, required_info=BRANDING):
     require(app.is_dir() and not app.is_symlink(), f"Not a standalone app: {app}")
     require(not any(p.is_symlink() for p in app.rglob("*")),
             f"Bundle contains symlinks: {app}")
     info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
-    require(all(info.get(k) == v for k, v in BRANDING.items()),
-            f"Unexpected application identity: {app}")
+    require(all(info.get(k) == v for k, v in required_info.items()),
+            f"Unexpected application metadata: {app}")
     run("/usr/bin/codesign", "--verify", "--deep", "--strict", app)
     run(app / "Contents/MacOS/Emacs", "-Q", "--batch", "--eval",
         STARTUP_CHECK, timeout=30)
@@ -294,7 +297,7 @@ def install(directory, socket, isolated_launch=False):
     run("/usr/bin/ditto", source, staged)
     verify_bundle(staged)
     if APP.exists():
-        verify_bundle(APP)
+        verify_bundle(APP, required_info=IDENTITY)
         backups = SUPPORT / "bmacs-backups"
         backups.mkdir(parents=True, exist_ok=True)
         backup = backups / f"Bmacs-before-{staging.name.lstrip('.')}.zip"

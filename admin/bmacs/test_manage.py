@@ -23,6 +23,30 @@ REQUIREMENT = (f'identifier "{manage.BRANDING["CFBundleIdentifier"]}" '
                f'and certificate root = H"{FINGERPRINT}"')
 
 
+class BundleVerificationTests(unittest.TestCase):
+    def test_existing_app_needs_identity_but_new_bundle_needs_microphone_metadata(self):
+        with tempfile.TemporaryDirectory() as temp:
+            app = Path(temp) / "Bmacs.app"
+            plist = app / "Contents/Info.plist"
+            plist.parent.mkdir(parents=True)
+            info = dict(manage.IDENTITY)
+            plist.write_bytes(plistlib.dumps(info))
+            with patch.object(manage, "run") as run:
+                manage.verify_bundle(app, required_info=manage.IDENTITY)
+                self.assertEqual(run.call_count, 2)
+                run.reset_mock()
+                with self.assertRaisesRegex(RuntimeError, "Unexpected application metadata"):
+                    manage.verify_bundle(app)
+                run.assert_not_called()
+                info.update(manage.BRANDING)
+                plist.write_bytes(plistlib.dumps(info))
+                manage.verify_bundle(app)
+                info["CFBundleIdentifier"] = "another.app"
+                plist.write_bytes(plistlib.dumps(info))
+                with self.assertRaisesRegex(RuntimeError, "Unexpected application metadata"):
+                    manage.verify_bundle(app, required_info=manage.IDENTITY)
+
+
 class SigningTests(unittest.TestCase):
     def test_ad_hoc_needs_no_keychain_access(self):
         with patch.object(manage, "output") as output:
