@@ -27,6 +27,7 @@ BRANDING = {
     "CFBundleIdentifier": "com.bob.emacs.mode-line",
     "CFBundleIconFile": "Emacs.icns",
     "CFBundleExecutable": "Emacs",
+    "NSMicrophoneUsageDescription": "Bmacs uses the microphone for voice conversations and dictation.",
 }
 ARTIFACTS = (
     "Contents/MacOS/Emacs",
