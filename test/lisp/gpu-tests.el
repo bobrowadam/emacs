@@ -343,7 +343,17 @@
               ;; Line 2's text ends one row above the window, as does the
               ;; start of line 3.
               (should (= (- top row) (funcall bottom (1- (funcall line 3)))))
-              (should (= (- top row) (funcall bottom (funcall line 3)))))))
+              (should (= (- top row) (funcall bottom (funcall line 3))))
+              (when (display-graphic-p)
+                (unwind-protect
+                    (progn
+                      (set-window-vscroll window 5 t)
+                      (should (= 5 (window-vscroll window t)))
+                      (should (= (- top row 5)
+                                 (funcall bottom (1- (funcall line 3)))))
+                      (should (= (- top row 5)
+                                 (funcall bottom (funcall line 3)))))
+                  (set-window-vscroll window 0 t))))))
       (set-window-buffer window old)
       (kill-buffer buffer))))
 

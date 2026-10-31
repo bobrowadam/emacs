@@ -710,7 +710,7 @@ edges at the viewport.  This bounded helper is not a general layout engine."
                    ;; since text measurements cannot run backwards.
                    ((< end origin)
                     (let ((base (save-excursion (goto-char end) (line-beginning-position))))
-                      (+ (- top (cdr (window-text-pixel-size window base origin nil limit nil t)))
+                      (+ (- row-top (cdr (window-text-pixel-size window base origin nil limit nil t)))
                          (cdr (window-text-pixel-size
                                window base end nil limit nil (eq (char-before end) ?\n))))))
                    (t (+ top (cdr (window-text-pixel-size
