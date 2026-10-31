@@ -319,5 +319,33 @@
       (when (frame-live-p frame) (delete-frame frame t))
       (kill-buffer buffer))))
 
+(ert-deftest gpu-region-end-above-window-start ()
+  "A region that ends above the window start ends above the window top."
+  (require 'gpu)
+  (let ((buffer (generate-new-buffer " *gpu-region-above*"))
+        (window (selected-window))
+        (old (window-buffer (selected-window))))
+    (unwind-protect
+        (progn
+          (set-window-buffer window buffer)
+          (with-current-buffer buffer
+            (dotimes (i 8) (insert (format "line %d\n" i)))
+            (let* ((line (lambda (n) (save-excursion (goto-char 1) (forward-line n) (point))))
+                   (origin (funcall line 4))
+                   (top (nth 1 (window-inside-pixel-edges window)))
+                   (row (cdr (window-text-pixel-size
+                              window (funcall line 3) origin nil nil nil t)))
+                   (bottom (lambda (end) (let ((rect (car (gpu-decoration-region
+                                                           window 1 end))))
+                                           (+ (nth 1 rect) (nth 3 rect))))))
+              (set-window-start window origin)
+              (should (> row 0))
+              ;; Line 2's text ends one row above the window, as does the
+              ;; start of line 3.
+              (should (= (- top row) (funcall bottom (1- (funcall line 3)))))
+              (should (= (- top row) (funcall bottom (funcall line 3)))))))
+      (set-window-buffer window old)
+      (kill-buffer buffer))))
+
 (provide 'gpu-tests)
 ;;; gpu-tests.el ends here

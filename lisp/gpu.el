@@ -704,16 +704,25 @@ edges at the viewport.  This bounded helper is not a general layout engine."
            (row-top (- top (window-vscroll window t)))
            (start-y (if (< start origin) (- top height)
                       (+ top (cdr (window-text-pixel-size window origin start nil limit nil t)))))
-           (end-y (if (> end visible-end) (+ top (* 2 height))
-                    (+ top (cdr (window-text-pixel-size
-                                 window origin end nil limit nil (eq (char-before end) ?\n))))))
+           (end-y (cond
+                   ((> end visible-end) (+ top (* 2 height)))
+                   ;; Measure an end above the window from its line's start,
+                   ;; since text measurements cannot run backwards.
+                   ((< end origin)
+                    (let ((base (save-excursion (goto-char end) (line-beginning-position))))
+                      (+ (- top (cdr (window-text-pixel-size window base origin nil limit nil t)))
+                         (cdr (window-text-pixel-size
+                               window base end nil limit nil (eq (char-before end) ?\n))))))
+                   (t (+ top (cdr (window-text-pixel-size
+                                   window origin end nil limit nil
+                                   (eq (char-before end) ?\n)))))))
            (pad (or padding '(0 0 0 0))))
       ;; Text measurements use logical heights.  Redisplay expands the
       ;; first row to include glyphs above its logical ascent; every
       ;; measured boundary below that row needs the same adjustment.
       (when (and (>= start origin) (> start-y row-top))
         (setq start-y (+ start-y overhang)))
-      (when (and (<= end visible-end) (> end-y row-top))
+      (when (and (<= origin end visible-end) (> end-y row-top))
         (setq end-y (+ end-y overhang)))
       (list (list (- left (nth 0 pad)) (- start-y (nth 1 pad))
                   (max 1 (+ width (nth 0 pad) (nth 2 pad)))
