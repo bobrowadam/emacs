@@ -12167,6 +12167,42 @@ This is an internal helper for `gpu-decoration-region'.  */)
   return make_fixnum (overhang);
 }
 
+/* window_text_pixel_size moves in logical order, so a wrapped line that
+   mixes text directions can break at other positions than redisplay
+   breaks it.  GPU region geometry must follow the rows redisplay draws.  */
+DEFUN ("gpu--window-row-y", Fgpu__window_row_y, Sgpu__window_row_y,
+       4, 4, 0,
+       doc: /* Return (TOP . BOTTOM) of the screen row that shows POS in WINDOW.
+Lay out text from FROM as redisplay would if WINDOW started there,
+including bidirectional reordering.  TOP and BOTTOM are pixels below
+the top of FROM's row.  BOTTOM counts only the text before POS on its
+row, as `window-text-pixel-size' does.  Stop laying out text at Y-LIMIT
+pixels.  This is an internal helper for `gpu-decoration-region'.  */)
+  (Lisp_Object window, Lisp_Object from, Lisp_Object pos, Lisp_Object y_limit)
+{
+  struct window *w = decode_live_window (window);
+  ptrdiff_t from_pos = fix_position (from), to_pos = fix_position (pos);
+  int max_y = check_integer_range (y_limit, 0, INT_MAX);
+  struct buffer *old_buffer = current_buffer;
+  struct text_pos start;
+  struct it it;
+  void *itdata = bidi_shelve_cache ();
+
+  set_buffer_internal_1 (XBUFFER (w->contents));
+  from_pos = clip_to_bounds (BEGV, from_pos, ZV);
+  SET_TEXT_POS (start, from_pos, CHAR_TO_BYTE (from_pos));
+  start_display (&it, w, start);
+  int start_y = it.current_y;
+  move_it_to (&it, clip_to_bounds (from_pos, to_pos, ZV),
+	      -1, max_y, -1, MOVE_TO_POS | MOVE_TO_Y);
+  int top = min (max_y, it.current_y - start_y);
+  int bottom = min (max_y, top + it.max_ascent + it.max_descent);
+
+  bidi_unshelve_cache (itdata, false);
+  set_buffer_internal_1 (old_buffer);
+  return Fcons (make_fixnum (top), make_fixnum (bottom));
+}
+
 DEFUN ("buffer-text-pixel-size", Fbuffer_text_pixel_size, Sbuffer_text_pixel_size, 0, 4, 0,
        doc: /* Return the dimensions of whole text of BUFFER-OR-NAME in WINDOW.
 BUFFER-OR-NAME must specify a live buffer or the name of a live buffer
@@ -38320,6 +38356,7 @@ be let-bound around code that needs to disable messages temporarily. */);
   defsubr (&Scurrent_bidi_paragraph_direction);
   defsubr (&Swindow_text_pixel_size);
   defsubr (&Sgpu__window_first_row_overhang);
+  defsubr (&Sgpu__window_row_y);
   defsubr (&Sbuffer_text_pixel_size);
   defsubr (&Smove_point_visually);
   defsubr (&Sbidi_find_overridden_directionality);

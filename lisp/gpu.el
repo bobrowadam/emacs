@@ -683,9 +683,16 @@ elsewhere return nil and leave HANDLE unchanged."
                                   options (gpu--decoration-frame handle))
        t))
 
+(defun gpu--region-end-y (window from end limit)
+  "Return region END's pixel offset below FROM's row in WINDOW.
+That is the top of END's row after a newline, else the bottom of the
+text before END on its row.  Stop measuring at LIMIT pixels."
+  (let ((row (gpu--window-row-y window from end limit)))
+    (if (eq (char-before end) ?\n) (car row) (cdr row))))
+
 (defun gpu-decoration-region (window start end &optional padding viewport-end)
   "Return (RECT CLIP) for buffer START..END as displayed in WINDOW.
-Use actual window text pixel measurements, not stale glyph matrices.
+Lay out rows as redisplay does, rather than read stale glyph matrices.
 PADDING is (LEFT TOP RIGHT BOTTOM) added outward, default zero.
 VIEWPORT-END overrides a stale window end during redisplay-driven scrolling.
 Partially visible regions retain offscreen bounds so clip does not invent
@@ -703,19 +710,16 @@ edges at the viewport.  This bounded helper is not a general layout engine."
            ;; when the window is pixel-scrolled.
            (row-top (- top (window-vscroll window t)))
            (start-y (if (< start origin) (- top height)
-                      (+ top (cdr (window-text-pixel-size window origin start nil limit nil t)))))
+                      (+ top (car (gpu--window-row-y window origin start limit)))))
            (end-y (cond
                    ((> end visible-end) (+ top (* 2 height)))
                    ;; Measure an end above the window from its line's start,
                    ;; since text measurements cannot run backwards.
                    ((< end origin)
                     (let ((base (save-excursion (goto-char end) (line-beginning-position))))
-                      (+ (- row-top (cdr (window-text-pixel-size window base origin nil limit nil t)))
-                         (cdr (window-text-pixel-size
-                               window base end nil limit nil (eq (char-before end) ?\n))))))
-                   (t (+ top (cdr (window-text-pixel-size
-                                   window origin end nil limit nil
-                                   (eq (char-before end) ?\n)))))))
+                      (+ (- row-top (car (gpu--window-row-y window base origin limit)))
+                         (gpu--region-end-y window base end limit))))
+                   (t (+ top (gpu--region-end-y window origin end limit)))))
            (pad (or padding '(0 0 0 0))))
       ;; Text measurements use logical heights.  Redisplay expands the
       ;; first row to include glyphs above its logical ascent; every

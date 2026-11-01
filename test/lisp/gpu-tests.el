@@ -357,5 +357,61 @@
       (set-window-buffer window old)
       (kill-buffer buffer))))
 
+(ert-deftest gpu-region-bidi-wrapped-rows ()
+  "Region rows match drawn rows in wrapped mixed-direction text.
+Logical-order measurement wraps such text at other positions."
+  (require 'gpu)
+  (skip-unless (eq window-system 'ns))
+  (skip-unless (find-font (font-spec :family "CommitMonoV143")))
+  (let ((frame (make-frame '((visibility . nil) (width . 60) (height . 12)
+                             (no-accept-focus . t) (no-focus-on-map . t)
+                             (z-group . below) (tool-bar-lines . 0))))
+        (buffer (generate-new-buffer " *gpu-region-bidi*"))
+        (logical-errors 0))
+    (unwind-protect
+        (with-selected-frame frame
+          (set-face-attribute 'default frame :family "CommitMonoV143" :height 210)
+          (set-window-buffer (selected-window) buffer)
+          (make-frame-visible frame)
+          (lower-frame frame)
+          (with-current-buffer buffer
+            (setq mode-line-format nil word-wrap t)
+            (insert "שלום עולם this is a test של טקסט מעורב with English words"
+                    " בתוך שורה ארוכה מאוד וגם עוד כמה מילים\nend\n")
+            (let ((window (selected-window))
+                  (next (save-excursion (goto-char 1) (forward-line 1) (point))))
+              (dolist (columns (number-sequence 30 80))
+                (set-frame-width frame columns)
+                ;; Start the window at the line start and partway through it.
+                (dolist (first-row '(0 1))
+                  (let ((origin (save-excursion
+                                  (goto-char 1)
+                                  (vertical-motion first-row window)
+                                  (point))))
+                    (set-window-start window origin)
+                    (redisplay t)
+                    (let ((top (nth 1 (window-inside-pixel-edges window)))
+                          (overhang (gpu--window-first-row-overhang window))
+                          (drawn (cons 0 (mapcar #'cdr (window-lines-pixel-dimensions
+                                                        window nil nil t)))))
+                      (save-excursion
+                        (goto-char origin)
+                        (while (< (point) next)
+                          (let ((logical (cdr (window-text-pixel-size
+                                               window origin (point) nil nil nil t))))
+                            (unless (= (car drawn)
+                                       (if (> logical 0) (+ logical overhang) logical))
+                              (setq logical-errors (1+ logical-errors))))
+                          (should (equal (list columns origin (point) (+ top (pop drawn)))
+                                         (list columns origin (point)
+                                               (nth 1 (car (gpu-decoration-region
+                                                            window (point) (1+ (point))))))))
+                          (unless (= (vertical-motion 1 window) 1)
+                            (goto-char next)))))))))
+            ;; Assert that the fixture actually exercises the mismatch.
+            (should (> logical-errors 0))))
+      (when (frame-live-p frame) (delete-frame frame t))
+      (kill-buffer buffer))))
+
 (provide 'gpu-tests)
 ;;; gpu-tests.el ends here
