@@ -710,7 +710,7 @@ edges at the viewport.  This bounded helper is not a general layout engine."
            ;; when the window is pixel-scrolled.
            (row-top (- top (window-vscroll window t)))
            (start-y (if (< start origin) (- top height)
-                      (+ top (car (gpu--window-row-y window origin start limit)))))
+                      (+ row-top (car (gpu--window-row-y window origin start limit)))))
            (end-y (cond
                    ((> end visible-end) (+ top (* 2 height)))
                    ;; Measure an end above the window from its line's start,
@@ -719,7 +719,7 @@ edges at the viewport.  This bounded helper is not a general layout engine."
                     (let ((base (save-excursion (goto-char end) (line-beginning-position))))
                       (+ (- row-top (car (gpu--window-row-y window base origin limit)))
                          (gpu--region-end-y window base end limit))))
-                   (t (+ top (gpu--region-end-y window origin end limit)))))
+                   (t (+ row-top (gpu--region-end-y window origin end limit)))))
            (pad (or padding '(0 0 0 0))))
       ;; Text measurements use logical heights.  Redisplay expands the
       ;; first row to include glyphs above its logical ascent; every

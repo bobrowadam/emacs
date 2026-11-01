@@ -352,7 +352,14 @@
                       (should (= (- top row 5)
                                  (funcall bottom (1- (funcall line 3)))))
                       (should (= (- top row 5)
-                                 (funcall bottom (funcall line 3)))))
+                                 (funcall bottom (funcall line 3))))
+                      ;; Rows below the window start move up too.
+                      (let ((rect (car (gpu-decoration-region
+                                        window (funcall line 5)
+                                        (funcall line 6)))))
+                        (should (= (- (+ top row) 5) (nth 1 rect)))
+                        (should (= (- (+ top (* 2 row)) 5)
+                                   (+ (nth 1 rect) (nth 3 rect))))))
                   (set-window-vscroll window 0 t))))))
       (set-window-buffer window old)
       (kill-buffer buffer))))
