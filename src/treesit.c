@@ -1995,7 +1995,13 @@ treesit_read_buffer (void *parser, uint32_t byte_index,
   else
     {
       beg = (char *) BUF_BYTE_ADDRESS (buffer, byte_pos);
-      len = BYTES_BY_CHAR_HEAD ((int) *beg);
+      /* Tree-sitter can ask to read from inside a character, such
+	 as the second byte of a raw-byte character, whose first byte
+	 is not valid UTF-8.  BYTES_BY_CHAR_HEAD would misread that
+	 byte and could claim bytes past the gap or the visible end,
+	 so pass it alone.  */
+      unsigned char head = *beg;
+      len = CHAR_HEAD_P (head) ? BYTES_BY_CHAR_HEAD (head) : 1;
     }
   /* We never let tree-sitter to parse buffers that large so this
      assertion should never hit.  */

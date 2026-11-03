@@ -95,6 +95,20 @@
          (treesit-parser-root-node parser))
         "(document (array (number) (object (pair key: (string (string_content)) value: (string (string_content)))) (number) (number)))")))))
 
+(ert-deftest treesit-parse-raw-byte ()
+  "Test parsing a raw-byte character followed by stale gap bytes."
+  (skip-unless (treesit-language-available-p 'json))
+  (with-temp-buffer
+    (let ((parser (treesit-parser-create 'json)))
+      (insert "[\"x")
+      (treesit-parser-root-node parser)
+      ;; The second byte of this raw byte's internal form looks like
+      ;; the head of a 4-byte sequence.  Deleting text at the end leaves
+      ;; multibyte bytes in the gap after it.
+      (insert (unibyte-char-to-multibyte #xF6) "\u00e9\u00e9\u00e9\u00e9")
+      (delete-char -4)
+      (should (treesit-node-p (treesit-parser-root-node parser))))))
+
 (ert-deftest treesit-node-api ()
   "Tests for node API."
   (skip-unless (treesit-language-available-p 'json))
