@@ -45,6 +45,20 @@ def run(*args, **kwargs):
     return subprocess.run([str(arg) for arg in args], check=True, **kwargs)
 
 
+def run_logged(*args, log, **kwargs):
+    """Stream combined command output to stdout and an open log file."""
+    command = [str(arg) for arg in args]
+    with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                          text=True, **kwargs) as process:
+        for line in process.stdout:
+            log.write(line)
+            log.flush()
+            print(line, end="", flush=True)
+        returncode = process.wait()
+    if returncode:
+        raise subprocess.CalledProcessError(returncode, command)
+
+
 def output(*args):
     return run(*args, capture_output=True, text=True).stdout.strip()
 
@@ -170,7 +184,7 @@ def graphical_checks(app, directory):
                     process.wait()
 
 
-def prepare(build, signing_identity="-"):
+def prepare(build, signing_identity="-", *, stream=False):
     build = build.expanduser().resolve()
     require(build != ROOT and ROOT not in build.parents,
             "Use a build directory outside the source checkout")
@@ -198,7 +212,11 @@ def prepare(build, signing_identity="-"):
     with (directory / "build.log").open("w") as log:
         # Serial execution avoids racing temacs relinking against portable dumping.
         for target in ("all", "sanity-check", "install"):
-            run("gmake", "-j1", target, cwd=build, stdout=log, stderr=subprocess.STDOUT)
+            if stream:
+                print(f"BUILD: {target}", flush=True)
+                run_logged("gmake", "-j1", target, cwd=build, log=log)
+            else:
+                run("gmake", "-j1", target, cwd=build, stdout=log, stderr=subprocess.STDOUT)
     print("BUILT: compilation, sanity check, and build-directory installation passed", flush=True)
     app = directory / "Bmacs.app"
     run("/usr/bin/ditto", source_app, app)

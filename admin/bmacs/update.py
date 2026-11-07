@@ -12,6 +12,30 @@ import sys
 import manage
 
 
+def compile_packages(packages, socket, directory):
+    """Run package compilation separately so the interactive app stays usable."""
+    code = ("(progn (require 'bob-elpaca) (require 'json) "
+            "(json-encode (list :helper (symbol-file 'bob/elpaca-native-compile 'defun) "
+            ":builds elpaca-builds-directory :load_path (vconcat load-path))))")
+    result = manage.client(manage.APP, socket, code)
+    context = json.loads(json.loads(result.stdout))
+    load_path = " ".join("nil" if path is None else json.dumps(path)
+                         for path in context["load_path"])
+    setup = (f"(setq load-path '({load_path}) "
+             f"elpaca-builds-directory {json.dumps(context['builds'])} "
+             "native-comp-jit-compilation nil)")
+    names = " ".join(json.dumps(package) for package in packages)
+    worker = manage.HERE / "native-compile.el"
+    logfile = directory / "native.log"
+    print(f"NATIVE COMPILATION: package workers; log: {logfile}", flush=True)
+    with logfile.open("w") as log:
+        manage.run_logged(manage.APP / "Contents/MacOS/Emacs", "-Q", "--batch",
+                          "--eval", setup, "--load", context["helper"],
+                          "--load", worker,
+                          "--eval", f"(bmacs-update--native-compile '({names}))",
+                          log=log)
+
+
 def update(build, signing_identity, socket, native_compile=None):
     """Keep failure logs; remove this run's staging only after confirmed startup."""
     manage.require(signing_identity.strip() != "-",
@@ -27,14 +51,10 @@ def update(build, signing_identity, socket, native_compile=None):
         manage.run(manage.ROOT / "configure", "--with-ns", "--with-gpu",
                    "--with-tree-sitter", "--with-native-compilation=yes",
                    cwd=build, env=environment)
-    directory = manage.prepare(build, identity)
+    directory = manage.prepare(build, identity, stream=True)
     manage.install(directory, socket, backup=False)
     if native_compile is not None:
-        packages = " ".join(json.dumps(package) for package in native_compile)
-        code = ("(progn (require 'bob-elpaca) "
-                f"(bob/elpaca-native-compile '({packages})))")
-        result = manage.client(manage.APP, socket, code, timeout=300)
-        print(f"NATIVE COMPILATION: {result.stdout.strip()}", flush=True)
+        compile_packages(native_compile, socket, directory)
     shutil.rmtree(directory)
     print("UPDATED: Bmacs startup confirmed; temporary staging removed. "
           "Configured build directory retained for incremental builds.")
@@ -51,7 +71,7 @@ def main():
     parser.add_argument("--socket", type=Path, default=manage.SOCKET.with_name("bmacs"),
                         help="current Bmacs server socket (default: bmacs)")
     parser.add_argument("--native-compile", nargs="*", metavar="PACKAGE",
-                        help="request async native compilation after restart; "
+                        help="stream and wait for package native compilation after restart; "
                              "name built Elpaca packages, or omit names for all packages")
     args = parser.parse_args()
     manage.require(sys.platform == "darwin", "This helper is for macOS")

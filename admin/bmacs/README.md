@@ -16,7 +16,8 @@ for incremental builds. For this checkout, the default is
 `/Users/bob/source/emacs-build`. It builds serially, signs with the existing
 **Bmacs Local Development** Keychain identity, checks the app, installs it at
 `~/Applications/Bmacs.app`, and confirms startup with your normal configuration.
-It uses the `bmacs` server socket by default.
+It uses the `bmacs` server socket by default. Build output is streamed to stdout
+and saved in the printed build log.
 
 It does not create rollback ZIPs. It keeps the previous app temporarily during
 installation and removes it after startup is confirmed. It then removes only
@@ -55,11 +56,13 @@ dependencies. Only sources with current bytecode and missing or stale native
 output are compiled. This uses `bob/elpaca-native-compile` from your Emacs
 configuration, which must support package selection.
 
-Compilation runs asynchronously in the restarted Bmacs. The updater reports
-that compilation was requested, not that it finished; compiler failures appear
-in Emacs's `*Async-native-compile-log*` buffer. Without the flag, package
-compilation is not requested. An invalid package or failed compiler request
-leaves the new Bmacs installed and retains this run's prepared staging.
+The updater waits for package compilation to finish and streams compiler output
+to stdout. Compilation uses parallel native workers in a separate batch Emacs,
+so your restarted interactive Emacs stays responsive. The worker uses your
+Elpaca helper, package directory, and load path without loading your full init
+again. Compiler errors or missing native output fail the update command and
+retain the prepared staging, including `native.log`; the new Bmacs remains
+installed. Without the flag, package compilation is not requested.
 
 Optional overrides:
 

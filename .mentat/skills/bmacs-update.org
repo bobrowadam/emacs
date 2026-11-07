@@ -21,11 +21,14 @@ Run it from macOS Terminal or standalone Pi:
 python3 /Users/bob/source/emacs/admin/bmacs/update.py
 #+end_src
 
-Add =--native-compile= to request asynchronous native compilation of all built
-Elpaca packages in the restarted Bmacs. Append package names to select only those
-packages, for example =--native-compile vui consult=. The flag uses
-=bob/elpaca-native-compile= from Bob's configuration. Successful completion
-confirms that compilation was requested, not that every compiler job finished.
+Build output streams to stdout and the printed build log.
+Add =--native-compile= to compile all built Elpaca packages after restarting
+Bmacs. Append package names to select only those packages, for example
+=--native-compile vui consult=. The updater waits for parallel workers in a
+separate batch Emacs and streams their output to stdout, leaving the interactive
+app responsive. It uses =bob/elpaca-native-compile= and the package environment
+from Bob's configuration. Compiler errors or missing output fail the command and
+retain =native.log= in the prepared staging.
 
 For another checkout, use that checkout's script path. Run =--help= for
 overrides. Do not copy the implementation into a session-specific script.
