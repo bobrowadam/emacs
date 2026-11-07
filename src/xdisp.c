@@ -24186,6 +24186,7 @@ compute_line_metrics (struct it *it)
 
   it->max_ascent = it->max_descent = 0;
   it->max_phys_ascent = it->max_phys_descent = 0;
+  it->max_extra_line_spacing = 0;
 }
 
 
