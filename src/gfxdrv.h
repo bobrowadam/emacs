@@ -103,6 +103,8 @@ struct gfx_driver
   void (*present) (struct frame *f);
   bool (*in_cycle) (struct frame *f);
   bool (*pending_present) (struct frame *f);
+  /* All current glyph matrices now describe a completed redisplay.  */
+  void (*frame_up_to_date) (struct frame *f);
 
   /* --- Clipping --- */
   /* Clip subsequent draws to the engine's clip rect for S (the native

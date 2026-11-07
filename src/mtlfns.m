@@ -1212,13 +1212,139 @@ CANCEL is a bitmask: 1 cancels geometry animation, 2 cancels opacity animation,
   return [fd setDecoration:value identifier:XFIXNUM (id) cancel:XFIXNUM (cancel)] ? Qt : Qnil;
 }
 
+/* Anchor entries live in the frame's parameter alist, so their windows,
+   buffers and markers are traced by GC and released with the frame.  */
+static void
+mtl_remove_decoration_anchor (struct frame *f, Lisp_Object id)
+{
+  Lisp_Object anchors = get_frame_param (f, Qgpu__decoration_anchors);
+  store_frame_param (f, Qgpu__decoration_anchors,
+                     Fdelq (Fassq (id, anchors), anchors));
+}
+
+DEFUN ("gpu--decoration-anchor", Fmtl_decoration_anchor, Smtl_decoration_anchor,
+       5, 5, 0,
+       doc: /* Bind decoration ID to WINDOW's START and END markers.
+PADDING is (LEFT TOP RIGHT BOTTOM), in logical pixels.  Geometry is resolved
+from the current glyph matrix only after successful redisplay.
+This is an internal primitive for `gpu-decoration-anchor'.  */)
+  (Lisp_Object id, Lisp_Object window, Lisp_Object start, Lisp_Object end,
+   Lisp_Object padding)
+{
+  mtl_decoration_id (id);
+  struct window *w = decode_live_window (window);
+  struct buffer *b = XBUFFER (w->contents);
+  CHECK_TYPE (MARKERP (start), Qmarkerp, start);
+  CHECK_TYPE (MARKERP (end), Qmarkerp, end);
+  if (XMARKER (start)->buffer != b || XMARKER (end)->buffer != b
+      || marker_position (start) < BUF_BEGV (b)
+      || marker_position (start) > marker_position (end)
+      || marker_position (end) > BUF_ZV (b))
+    error ("Anchor markers must delimit accessible text in WINDOW");
+  Lisp_Object pad = make_vector (4, make_float (0));
+  if (!NILP (padding))
+    {
+      Lisp_Object tail = padding;
+      for (int i = 0; i < 4; ++i)
+        {
+          CHECK_CONS (tail);
+          ASET (pad, i, make_float (mtl_decoration_number (XCAR (tail))));
+          tail = XCDR (tail);
+        }
+      CHECK_TYPE (NILP (tail), Qlistp, padding);
+    }
+  struct frame *f = WINDOW_XFRAME (w);
+  MtlFrameData *fd = mtl_get_frame_data (f);
+  MtlDecorationRecord record;
+  if (!fd || ![fd getDecoration:XFIXNUM (id) record:&record]) return Qnil;
+  Lisp_Object data = make_vector (5, Qnil);
+  ASET (data, 0, window);
+  ASET (data, 1, w->contents);
+  ASET (data, 2, start);
+  ASET (data, 3, end);
+  ASET (data, 4, pad);
+  Lisp_Object anchors = get_frame_param (f, Qgpu__decoration_anchors);
+  Lisp_Object entry = Fassq (id, anchors);
+  if (NILP (entry))
+    store_frame_param (f, Qgpu__decoration_anchors,
+                       Fcons (Fcons (id, data), anchors));
+  else
+    Fsetcdr (entry, data);
+  fd.awaitingRedisplay = YES;
+  if (!redisplaying_p) fset_redisplay (f);
+  return Qt;
+}
+
+/* Measure only rows that actually made it into the current matrix.  Bounds
+   beyond the viewport stay beyond it, rather than inventing clipped edges.  */
+static double
+mtl_anchor_y (struct window *w, ptrdiff_t pos, bool bottom, int top, int height)
+{
+  struct buffer *b = XBUFFER (w->contents);
+  bool newline = (bottom && pos > BUF_BEGV (b)
+                  && BUF_FETCH_BYTE (b, buf_charpos_to_bytepos (b, pos - 1)) == '\n');
+  ptrdiff_t lookup = bottom && !newline && pos > BUF_BEGV (b) ? pos - 1 : pos;
+  struct glyph_matrix *matrix = w->current_matrix;
+  struct glyph_row *row = row_containing_pos
+    (w, lookup, MATRIX_FIRST_TEXT_ROW (matrix),
+     matrix->rows + matrix->nrows - 1, -height);
+  if (!row)
+    return lookup < marker_position (w->start) ? top - height : top + 2 * height;
+  int y = WINDOW_TO_FRAME_PIXEL_Y (w, row->y);
+  return bottom && !newline ? y + row->height - row->extra_line_spacing : y;
+}
+
+void
+mtl_commit_decoration_anchors (struct frame *f)
+{
+  MtlFrameData *fd = mtl_get_frame_data (f);
+  Lisp_Object anchors = get_frame_param (f, Qgpu__decoration_anchors);
+  for (Lisp_Object tail = anchors; CONSP (tail); tail = XCDR (tail))
+    {
+      Lisp_Object entry = XCAR (tail), id = XCAR (entry), data = XCDR (entry);
+      Lisp_Object window = AREF (data, 0), buffer = AREF (data, 1);
+      Lisp_Object start = AREF (data, 2), end = AREF (data, 3), pad = AREF (data, 4);
+      MtlDecorationRecord record;
+      if (!WINDOW_LIVE_P (window)
+          || !EQ (XWINDOW (window)->contents, buffer)
+          || XMARKER (start)->buffer != XBUFFER (buffer)
+          || XMARKER (end)->buffer != XBUFFER (buffer))
+        {
+          [fd removeDecoration:XFIXNUM (id)];
+          mtl_remove_decoration_anchor (f, id);
+          continue;
+        }
+      struct window *w = XWINDOW (window);
+      if (!w->current_matrix || w->current_matrix->nrows < 2
+          || ![fd getDecoration:XFIXNUM (id) record:&record])
+        continue;
+      int left, top, width, height;
+      window_box (w, TEXT_AREA, &left, &top, &width, &height);
+      double y1 = mtl_anchor_y (w, marker_position (start), false, top, height);
+      double y2 = mtl_anchor_y (w, marker_position (end), true, top, height);
+      MtlDecoration value = record.value;
+      value.rect = NSMakeRect (left - XFLOAT_DATA (AREF (pad, 0)),
+                               y1 - XFLOAT_DATA (AREF (pad, 1)),
+                               MAX (1, width + XFLOAT_DATA (AREF (pad, 0))
+                                             + XFLOAT_DATA (AREF (pad, 2))),
+                               MAX (1, y2 - y1 + XFLOAT_DATA (AREF (pad, 1))
+                                              + XFLOAT_DATA (AREF (pad, 3))));
+      value.clip = NSMakeRect (left, top, width, height);
+      if (!NSEqualRects (value.rect, record.value.rect)
+          || !NSEqualRects (value.clip, record.value.clip))
+        [fd setDecoration:value identifier:XFIXNUM (id) cancel:1];
+    }
+}
+
 DEFUN ("gpu--decoration-remove", Fmtl_decoration_remove, Smtl_decoration_remove, 1, 2, 0,
        doc: /* Remove retained decoration ID from FRAME.  Return t if removed.  */)
   (Lisp_Object id, Lisp_Object frame)
 {
   mtl_decoration_id (id);
   MtlFrameData *fd = mtl_border_frame_data (frame);
-  return fd && [fd removeDecoration:XFIXNUM (id)] ? Qt : Qnil;
+  if (!fd) return Qnil;
+  mtl_remove_decoration_anchor (fd.emacsFrame, id);
+  return [fd removeDecoration:XFIXNUM (id)] ? Qt : Qnil;
 }
 
 DEFUN ("gpu--decoration-text", Fmtl_decoration_text, Smtl_decoration_text, 6, 7, 0,
@@ -1511,6 +1637,7 @@ the screen.  */)
 void
 syms_of_mtlfns (void)
 {
+  DEFSYM (Qgpu__decoration_anchors, "gpu--decoration-anchors");
   defsubr (&Smtl_open_connection);
   defsubr (&Smtl_backend_p);
   defsubr (&Smtl_device_name);
@@ -1547,6 +1674,7 @@ syms_of_mtlfns (void)
   defsubr (&Smtl_decoration_create);
   defsubr (&Smtl_decoration_set);
   defsubr (&Smtl_decoration_remove);
+  defsubr (&Smtl_decoration_anchor);
   defsubr (&Smtl_decoration_animate);
   defsubr (&Smtl_decoration_text);
   defsubr (&Smtl_decoration_keyframes);

@@ -1641,7 +1641,9 @@ mtl_decoration_sample (MtlDecorationRecord *record, CFTimeInterval now, BOOL ret
                     wd:(int)wd h:(int)h
                    atX:(int)x y:(int)y color:(unsigned long)color;
 @property (nonatomic, strong) NSMutableDictionary *decorationRecords;
+@property (nonatomic, strong) NSMutableSet *dirtyDecorationLayers;
 - (void)syncDecorationLayer:(unsigned long long)identifier;
+- (void)applyDecorationLayer:(unsigned long long)identifier;
 - (void)syncTextLayer:(CALayer *)holder record:(MtlDecorationRecord *)record
            identifier:(unsigned long long)identifier;
 - (void)applyMotion:(CALayer *)layer identifier:(unsigned long long)identifier
@@ -1676,6 +1678,7 @@ mtl_decoration_sample (MtlDecorationRecord *record, CFTimeInterval now, BOOL ret
   self.needsPresent = NO;
   self.borderRecords = nil;
   self.decorationRecords = nil;
+  self.dirtyDecorationLayers = nil;
   [self.decorationLayer removeFromSuperlayer];
   self.decorationLayer = nil;
   self.decorationLayers = nil;
@@ -2165,6 +2168,7 @@ mtl_decoration_sample (MtlDecorationRecord *record, CFTimeInterval now, BOOL ret
 
 - (void)beginFrame
 {
+  if (redisplaying_p) self.awaitingRedisplay = YES;
   CGSize dsz = self.metalLayer.drawableSize;
 
   /* Start the cycle with an empty batch (endFrame drains it; this is the
@@ -2472,7 +2476,7 @@ mtl_batch_append (MtlFrameData *fd, float x0, float y0, float x1, float y1,
   /* Layout hooks can mutate decorations before update_begin opens an encoder.
      Do not combine those records with text from the previous redisplay.  The
      deferred flush retries through this gate if redisplay is still active.  */
-  if (redisplaying_p || self.encoder
+  if (redisplaying_p || self.awaitingRedisplay || self.encoder
       || CACurrentMediaTime () - self.lastPresentTime < MTL_PRESENT_COALESCE)
     {
       self.needsPresent = YES;
@@ -2486,8 +2490,14 @@ mtl_batch_append (MtlFrameData *fd, float x0, float y0, float x1, float y1,
 {
   struct frame *f = self.emacsFrame;
   /* Hidden frames retain elapsed tracks but do not ask AppKit for drawables. */
-  if (self.decorationLayer) return;   /* Core Animation shows layer changes */
-  if (f && FRAME_LIVE_P (f) && FRAME_VISIBLE_P (f)) [self requestBorderPresent];
+  if (!f || !FRAME_LIVE_P (f) || !FRAME_VISIBLE_P (f)) return;
+  if (self.decorationLayer)
+    {
+      self.needsPresent = YES;
+      [self schedulePresent];
+      return;
+    }
+  [self requestBorderPresent];
 }
 
 - (void)requestBorderPresent
@@ -2516,7 +2526,7 @@ mtl_batch_append (MtlFrameData *fd, float x0, float y0, float x1, float y1,
   self.encoder = nil;
   self.drawable = nil;
 
-  if (present
+  if (present && !redisplaying_p && !self.awaitingRedisplay
       && CACurrentMediaTime () - self.lastPresentTime >= MTL_PRESENT_COALESCE
       && self.staticTexture && g_blit_pipeline)
     {
@@ -2565,7 +2575,13 @@ mtl_batch_append (MtlFrameData *fd, float x0, float y0, float x1, float y1,
     {
       [cmd commit];
       [cmd waitUntilScheduled];
+      [CATransaction begin];
+      [CATransaction setDisableActions:YES];
+      for (NSNumber *key in self.dirtyDecorationLayers)
+        [self applyDecorationLayer:key.unsignedLongLongValue];
+      [self.dirtyDecorationLayers removeAllObjects];
       [drawable present];
+      [CATransaction commit];
     }
   else
     {
@@ -3038,6 +3054,7 @@ mtl_decoration_keyframes_apply (CALayer *layer, NSDictionary *spec, CGAffineTran
   if (!self.decorationTexts) self.decorationTexts = [NSMutableDictionary dictionary];
   [self.decorationTexts setObject:text forKey:@(identifier)];
   [self syncDecorationLayer:identifier];
+  [self requestDecorationPresent];
   return YES;
 }
 
@@ -3066,12 +3083,20 @@ mtl_decoration_keyframes_apply (CALayer *layer, NSDictionary *spec, CGAffineTran
   started[@"start"] = @(CACurrentMediaTime ());
   [keyframes setObject:started forKey:spec[@"keyPath"]];
   [self syncDecorationLayer:identifier];
+  [self requestDecorationPresent];
   return YES;
 }
 
-/* Show decoration IDENTIFIER's current record as a clipped layer, or remove
-   its layer when the record is gone.  */
+/* Keep model changes private until their text drawable can be presented.  */
 - (void)syncDecorationLayer:(unsigned long long)identifier
+{
+  if (!self.decorationLayer) return;
+  if (!self.dirtyDecorationLayers) self.dirtyDecorationLayers = [NSMutableSet set];
+  [self.dirtyDecorationLayers addObject:@(identifier)];
+}
+
+/* Called only inside the transaction that presents the matching text.  */
+- (void)applyDecorationLayer:(unsigned long long)identifier
 {
   if (!self.decorationLayer) return;
   NSNumber *key = @(identifier);
@@ -4190,6 +4215,15 @@ mtl_drv_end_frame (struct frame *f, bool present_p)
 }
 
 static void
+mtl_drv_frame_up_to_date (struct frame *f)
+{
+  MtlFrameData *fd = mtl_get_frame_data (f);
+  mtl_commit_decoration_anchors (f);
+  fd.awaitingRedisplay = NO;
+  if (fd.needsPresent) [fd presentCoalesced];
+}
+
+static void
 mtl_drv_present (struct frame *f)
 {
   [mtl_get_frame_data (f) presentCoalesced];
@@ -4429,6 +4463,7 @@ static struct gfx_driver mtl_gfx_driver =
   .present              = mtl_drv_present,
   .in_cycle             = mtl_drv_in_cycle,
   .pending_present      = mtl_drv_pending_present,
+  .frame_up_to_date     = mtl_drv_frame_up_to_date,
   .clip_to_glyph_string = mtl_drv_clip_to_glyph_string,
   .clear_clip           = mtl_drv_clear_clip,
   .fill_rect            = mtl_drv_fill_rect,

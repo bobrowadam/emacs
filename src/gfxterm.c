@@ -1101,6 +1101,8 @@ gfx_frame_up_to_date (struct frame *f)
     }
   if (gfx_drv->in_cycle (f))
     gfx_drv->end_frame (f, true);
+  if (gfx_drv->frame_up_to_date)
+    gfx_drv->frame_up_to_date (f);
 }
 
 /* -----------------------------------------------------------------------

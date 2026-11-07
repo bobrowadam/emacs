@@ -186,6 +186,7 @@
                       ((symbol-function 'gpu--decoration-set) (lambda (&rest _) t))
                       ((symbol-function 'gpu--decoration-remove)
                        (lambda (&rest _) (setq deleted t)))
+                      ((symbol-function 'gpu--decoration-anchor) (lambda (&rest _) t))
                       ((symbol-function 'gpu--pump-start) #'ignore))
               (set-window-buffer window buffer)
               (with-current-buffer buffer
@@ -203,6 +204,69 @@
                   (should-not (marker-buffer start))
                   (should-not gpu--decorations))))
           (kill-buffer buffer))))))
+
+(ert-deftest gpu-decoration-native-anchors-follow-committed-rows ()
+  "Resolve streaming anchors after wrapping, layout changes and pixel scrolling."
+  (skip-unless (and (eq window-system 'ns) (gpu-backend-p)
+                    (fboundp 'gpu--decoration-anchor)))
+  (require 'gpu)
+  (let ((frame (make-frame '((visibility . nil) (width . 42) (height . 20)
+                             (no-accept-focus . t) (no-focus-on-map . t)
+                             (z-group . below) (tool-bar-lines . 0))))
+        (buffer (generate-new-buffer " *gpu-committed-anchor*"))
+        handle)
+    (unwind-protect
+        (with-selected-frame frame
+          (gpu-enable-for-frame frame)
+          (set-window-buffer (selected-window) buffer)
+          (with-current-buffer buffer
+            (setq mode-line-format nil)
+            (insert "Before\n")
+            (let ((start (copy-marker (point))) end)
+              (insert "First response row\nSecond response row\n")
+              (setq end (copy-marker (point)))
+              (insert "Following activity\n")
+              (set-marker-insertion-type end t)
+              (goto-char (point-min))
+              (setq handle (gpu-decoration-create '(:rect (0 0 1 1) :opacity 0.5)))
+              (gpu-decoration-anchor handle (selected-window) start end '(0 3 0 4))
+              (make-frame-visible frame)
+              (lower-frame frame)
+              (cl-labels
+                  ((check ()
+                     (redisplay t)
+                     (let* ((window (selected-window))
+                            (edges (window-inside-pixel-edges window))
+                            (y1 (+ (nth 1 edges)
+                                   (cdr (posn-x-y (posn-at-point start window)))))
+                            (y2 (+ (nth 1 edges)
+                                   (cdr (posn-x-y (posn-at-point end window)))))
+                            (state (gpu--decoration-state
+                                    (gpu--decoration-id handle) frame)))
+                       (should (equal (car state)
+                                      (list (float (nth 0 edges)) (float (- y1 3))
+                                            (float (- (nth 2 edges) (nth 0 edges)))
+                                            (float (+ (- y2 y1) 7)))))
+                       (should (= (nth 1 state) 0.5)))))
+                (check)
+                (let ((before (car (gpu--decoration-state
+                                   (gpu--decoration-id handle) frame))))
+                  (goto-char end)
+                  (insert "A streamed row long enough to wrap across the window edge.\n")
+                  ;; Pending text must not alter the previous committed geometry.
+                  (should (equal before (car (gpu--decoration-state
+                                              (gpu--decoration-id handle) frame))))
+                  (check))
+                (setq-local line-spacing 7)
+                (force-window-update (selected-window))
+                (check)
+                (set-window-vscroll (selected-window) 3 t)
+                (check))
+              (set-marker start nil)
+              (set-marker end nil))))
+      (gpu-decoration-delete handle)
+      (when (frame-live-p frame) (delete-frame frame t))
+      (kill-buffer buffer))))
 
 (ert-deftest gpu-decoration-native-retained-tracks ()
   "Updates preserve other tracks and invalid input cannot replace accepted state."

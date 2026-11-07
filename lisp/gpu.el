@@ -447,6 +447,7 @@ The NS backend still handles events, menus, and scrollbars."
 (declare-function gpu--decoration-create "mtlfns.m" (properties &optional frame))
 (declare-function gpu--decoration-set "mtlfns.m" (id properties frame &optional cancel))
 (declare-function gpu--decoration-remove "mtlfns.m" (id &optional frame))
+(declare-function gpu--decoration-anchor "mtlfns.m" (id window start end padding))
 (declare-function gpu--decoration-animate "mtlfns.m"
                   (id property target duration &optional easing repeat frame))
 
@@ -735,25 +736,36 @@ edges at the viewport.  This bounded helper is not a general layout engine."
 
 (defun gpu-decoration-anchor (handle window start end &optional padding)
   "Bind HANDLE to WINDOW's buffer region START..END, with optional PADDING.
-Ownership becomes that buffer.  Redisplay and scrolling update its geometry
-without touching opacity.  Window reassignment/deletion releases the handle."
+Ownership becomes that buffer.  Successful redisplay resolves its geometry
+from the actual glyph rows and presents it with their text, without touching
+opacity.  Window reassignment/deletion releases the handle."
   (unless (and (gpu--decoration-p handle) (gpu--decoration-id handle)
                (window-live-p window)
                (eq (gpu--decoration-frame handle) (window-frame window)))
     (error "Anchor requires a live handle on the window's frame"))
-  (let ((geometry (gpu-decoration-region window start end padding)))
-    (when (gpu-decoration-update handle (list :rect (car geometry) :clip (cadr geometry)))
-      (dolist (marker (list (gpu--decoration-start handle) (gpu--decoration-end handle)))
-        (when (markerp marker) (set-marker marker nil)))
-      (with-current-buffer (window-buffer window)
-        (setf (gpu--decoration-window handle) window
-              (gpu--decoration-owner handle) (current-buffer)
-              (gpu--decoration-start handle) (copy-marker start)
-              (gpu--decoration-end handle) (copy-marker end t)
-              (gpu--decoration-padding handle) padding)
-        (add-hook 'kill-buffer-hook #'gpu--decoration-owner-cleanup nil t)
-        (add-hook 'change-major-mode-hook #'gpu--decoration-owner-cleanup nil t))
-      handle)))
+  (with-current-buffer (window-buffer window)
+    (unless (<= (point-min) start end (point-max))
+      (error "Invalid anchor bounds"))
+    (let ((from (copy-marker start)) (to (copy-marker end t))
+          accepted)
+      (unwind-protect
+          (when (setq accepted
+                      (gpu--decoration-anchor (gpu--decoration-id handle)
+                                              window from to padding))
+            (dolist (marker (list (gpu--decoration-start handle)
+                                 (gpu--decoration-end handle)))
+              (when (markerp marker) (set-marker marker nil)))
+            (setf (gpu--decoration-window handle) window
+                  (gpu--decoration-owner handle) (current-buffer)
+                  (gpu--decoration-start handle) from
+                  (gpu--decoration-end handle) to
+                  (gpu--decoration-padding handle) (copy-sequence padding))
+            (add-hook 'kill-buffer-hook #'gpu--decoration-owner-cleanup nil t)
+            (add-hook 'change-major-mode-hook #'gpu--decoration-owner-cleanup nil t)
+            handle)
+        (unless accepted
+          (set-marker from nil)
+          (set-marker to nil))))))
 
 (defun gpu--decoration-owner-cleanup ()
   "Delete all decorations owned by the current buffer."
@@ -772,28 +784,9 @@ without touching opacity.  Window reassignment/deletion releases the handle."
                                 (not (eq (window-buffer window) owner)))))
         (gpu-decoration-delete handle)))))
 
-(defun gpu--decoration-redisplay (window &optional scrolling)
-  "Maintain owned anchors in WINDOW; SCROLLING avoids stale window ends."
-  (gpu--decoration-prune)
-  (dolist (handle (copy-sequence gpu--decorations))
-    (when (eq (gpu--decoration-window handle) window)
-      (condition-case err
-          (let* ((start (gpu--decoration-start handle))
-                 (end (gpu--decoration-end handle))
-                 (viewport-end (and scrolling
-                                    (with-current-buffer (window-buffer window)
-                                      (save-excursion
-                                        (goto-char (window-start window))
-                                        (vertical-motion (1+ (window-body-height window)) window)
-                                        (point)))))
-                 (geometry (gpu-decoration-region window start end
-                                                  (gpu--decoration-padding handle) viewport-end))
-                 (properties (gpu--decoration-properties handle)))
-            (unless (and (equal (car geometry) (plist-get properties :rect))
-                         (equal (cadr geometry) (plist-get properties :clip)))
-              (gpu-decoration-update handle (list :rect (car geometry) :clip (cadr geometry)))))
-        (error (gpu-decoration-delete handle)
-               (message "GPU decoration released: %s" (error-message-string err)))))))
+(defun gpu--decoration-redisplay (_window &optional _scrolling)
+  "Prune dead anchors before layout; native redisplay resolves live geometry."
+  (gpu--decoration-prune))
 
 (defun gpu--decoration-scrolled (window _start)
   "Maintain WINDOW's anchors after redisplay-driven scrolling."

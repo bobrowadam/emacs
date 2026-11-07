@@ -277,6 +277,8 @@ typedef struct {
 /* Pump dt is per frame: border-bearing frames can be ticked independently. */
 @property (nonatomic, assign) CFTimeInterval              lastPumpTime;
 @property (nonatomic, assign) BOOL                        presentScheduled;
+/* The working texture must not be shown until redisplay completes.  */
+@property (nonatomic, assign) BOOL                        awaitingRedisplay;
 
 /* Buffer-switch transition: a snapshot of the previous content cross-
    fades over the new one (drawn by the compositor while active).  */
@@ -459,6 +461,9 @@ extern int mtl_dgs_call_count;
 extern int mtl_dgs_nofd_count;
 extern int mtl_dgs_nofont_count;
 extern int mtl_dgs_drawn_count;
+
+/* Resolve region anchors against the completed frame's current matrices.  */
+extern void mtl_commit_decoration_anchors (struct frame *f);
 
 extern void syms_of_mtlfns (void);
 
