@@ -42,6 +42,25 @@ configuration uses Apple's compiler, NS, GPU, tree-sitter, native compilation,
 and the Homebrew TIFF library search path. Configuration failures retain
 `config.log` in the build directory. The script does not install dependencies.
 
+To also native-compile your built Elpaca packages after Bmacs restarts:
+
+```sh
+python3 admin/bmacs/update.py --native-compile
+python3 admin/bmacs/update.py --native-compile vui consult
+```
+
+With no package names, the flag processes all built Elpaca packages. With names,
+it processes only those packages; all built packages remain available as compiler
+dependencies. Only sources with current bytecode and missing or stale native
+output are compiled. This uses `bob/elpaca-native-compile` from your Emacs
+configuration, which must support package selection.
+
+Compilation runs asynchronously in the restarted Bmacs. The updater reports
+that compilation was requested, not that it finished; compiler failures appear
+in Emacs's `*Async-native-compile-log*` buffer. Without the flag, package
+compilation is not requested. An invalid package or failed compiler request
+leaves the new Bmacs installed and retains this run's prepared staging.
+
 Optional overrides:
 
 ```sh

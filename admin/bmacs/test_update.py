@@ -34,6 +34,8 @@ class UpdateTests(unittest.TestCase):
             patch.object(manage, "resolve_signing_identity", return_value=FINGERPRINT))
         self.prepare = self.enterContext(patch.object(manage, "prepare", return_value=self.prepared))
         self.install = self.enterContext(patch.object(manage, "install"))
+        self.client = self.enterContext(patch.object(manage, "client"))
+        self.client.return_value.stdout = "Native compilation requested"
         self.run = self.enterContext(patch.object(manage, "run"))
         self.output = self.enterContext(patch.object(manage, "output", return_value="-L/tiff/lib"))
 
@@ -50,9 +52,45 @@ class UpdateTests(unittest.TestCase):
         update.update(self.build, "Existing certificate", self.socket)
         self.prepare.assert_called_once_with(self.build, FINGERPRINT)
         self.run.assert_not_called()
+        self.client.assert_not_called()
         self.assertFalse(self.prepared.exists())
         self.assertTrue(other.exists())
         self.assertTrue((self.build / "Makefile").exists())
+
+    def test_native_compile_runs_after_install_and_before_cleanup(self):
+        for packages, expression in (([], "'()"), (["vui", "mentat"], "'(\"vui\" \"mentat\")")):
+            with self.subTest(packages=packages):
+                self.prepared.mkdir(exist_ok=True)
+
+                def compile_requested(app, socket, code, *, timeout):
+                    self.install.assert_called_with(self.prepared, self.socket, backup=False)
+                    self.assertTrue(self.prepared.exists())
+                    self.assertEqual(app, manage.APP)
+                    self.assertEqual(socket, self.socket)
+                    self.assertEqual(timeout, 300)
+                    self.assertIn(f"(bob/elpaca-native-compile {expression})", code)
+                    return self.client.return_value
+
+                self.client.side_effect = compile_requested
+                update.update(self.build, "Existing certificate", self.socket, packages)
+                self.assertFalse(self.prepared.exists())
+
+    def test_failed_native_request_retains_stage_after_install(self):
+        self.client.side_effect = RuntimeError("unknown package")
+        with self.assertRaisesRegex(RuntimeError, "unknown package"):
+            update.update(self.build, "Existing certificate", self.socket, ["missing"])
+        self.install.assert_called_once()
+        self.assertEqual((self.prepared / "build.log").read_text(), "build output")
+
+    def test_cli_distinguishes_disabled_all_and_selected_packages(self):
+        for flags, expected in (([], None), (["--native-compile"], []),
+                                (["--native-compile", "vui", "mentat"], ["vui", "mentat"])):
+            with self.subTest(flags=flags), \
+                    patch.object(update.sys, "argv", ["update.py", *flags]), \
+                    patch.object(update.sys, "platform", "darwin"), \
+                    patch.object(update, "update") as perform_update:
+                update.main()
+                self.assertEqual(perform_update.call_args.kwargs["native_compile"], expected)
 
     def test_failed_install_preserves_build_logs(self):
         self.install.side_effect = RuntimeError("startup failed")

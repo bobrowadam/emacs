@@ -2,6 +2,7 @@
 """Build, check, install, and reopen Bmacs without retaining app backups."""
 
 import argparse
+import json
 import os
 from pathlib import Path
 import shutil
@@ -11,7 +12,7 @@ import sys
 import manage
 
 
-def update(build, signing_identity, socket):
+def update(build, signing_identity, socket, native_compile=None):
     """Keep failure logs; remove this run's staging only after confirmed startup."""
     manage.require(signing_identity.strip() != "-",
                    "Routine updates require the existing persistent signing identity")
@@ -28,6 +29,12 @@ def update(build, signing_identity, socket):
                    cwd=build, env=environment)
     directory = manage.prepare(build, identity)
     manage.install(directory, socket, backup=False)
+    if native_compile is not None:
+        packages = " ".join(json.dumps(package) for package in native_compile)
+        code = ("(progn (require 'bob-elpaca) "
+                f"(bob/elpaca-native-compile '({packages})))")
+        result = manage.client(manage.APP, socket, code, timeout=300)
+        print(f"NATIVE COMPILATION: {result.stdout.strip()}", flush=True)
     shutil.rmtree(directory)
     print("UPDATED: Bmacs startup confirmed; temporary staging removed. "
           "Configured build directory retained for incremental builds.")
@@ -43,9 +50,13 @@ def main():
                         help="existing Keychain certificate name or SHA-1; never ad-hoc")
     parser.add_argument("--socket", type=Path, default=manage.SOCKET.with_name("bmacs"),
                         help="current Bmacs server socket (default: bmacs)")
+    parser.add_argument("--native-compile", nargs="*", metavar="PACKAGE",
+                        help="request async native compilation after restart; "
+                             "name built Elpaca packages, or omit names for all packages")
     args = parser.parse_args()
     manage.require(sys.platform == "darwin", "This helper is for macOS")
-    update(args.build_directory, args.signing_identity, args.socket)
+    update(args.build_directory, args.signing_identity, args.socket,
+           native_compile=args.native_compile)
 
 
 if __name__ == "__main__":
