@@ -268,6 +268,40 @@
       (when (frame-live-p frame) (delete-frame frame t))
       (kill-buffer buffer))))
 
+(ert-deftest gpu-decoration-native-anchor-keeps-spacing-row-local ()
+  "A large preceding gap must not shorten the following row's outline."
+  (skip-unless (and (eq window-system 'ns) (gpu-backend-p)
+                    (fboundp 'gpu--decoration-anchor)))
+  (require 'gpu)
+  (let ((frame (make-frame '((visibility . nil) (width . 50) (height . 12)
+                             (no-accept-focus . t) (no-focus-on-map . t)
+                             (z-group . below) (tool-bar-lines . 0))))
+        (buffer (generate-new-buffer " *gpu-row-local-spacing*"))
+        handle)
+    (unwind-protect
+        (with-selected-frame frame
+          (gpu-enable-for-frame frame)
+          (set-window-buffer (selected-window) buffer)
+          (with-current-buffer buffer
+            (setq mode-line-format nil)
+            (insert "Earlier response" (propertize "\n" 'line-spacing 42))
+            (let ((start (point)) end)
+              (insert "Final response")
+              (setq end (point))
+              (insert (propertize "\n" 'line-spacing 21) "Following prompt\n")
+              (goto-char (point-min))
+              (setq handle (gpu-decoration-create '(:rect (0 0 1 1))))
+              (gpu-decoration-anchor handle (selected-window) start end)
+              (make-frame-visible frame)
+              (lower-frame frame)
+              (redisplay t)
+              (should (equal (car (gpu--decoration-state (gpu--decoration-id handle) frame))
+                             (mapcar #'float (car (gpu-decoration-region
+                                                   (selected-window) start end))))))))
+      (gpu-decoration-delete handle)
+      (when (frame-live-p frame) (delete-frame frame t))
+      (kill-buffer buffer))))
+
 (ert-deftest gpu-decoration-native-retained-tracks ()
   "Updates preserve other tracks and invalid input cannot replace accepted state."
   (skip-unless (and (eq window-system 'ns) (gpu-backend-p)
