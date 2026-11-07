@@ -30,6 +30,14 @@ app responsive. It uses =bob/elpaca-native-compile= and the package environment
 from Bob's configuration. Compiler errors or missing output fail the command and
 retain =native.log= in the prepared staging.
 
+If package compilation fails with =file-missing=, look for broken links under
+=~/.emacs.d/elpaca/builds/=. Check with =elpaca-get= whether the owning package
+is still managed by Elpaca. Rebuild a managed package with =elpaca-rebuild=.
+A build directory for a package Elpaca no longer manages is obsolete; delete it
+only after confirming nothing loads from it and Bob approves. To retry package
+compilation without reinstalling Bmacs, call =update.compile_packages= from
+Python with the package names, the server socket, and a log directory.
+
 For another checkout, use that checkout's script path. Run =--help= for
 overrides. Do not copy the implementation into a session-specific script.
 
