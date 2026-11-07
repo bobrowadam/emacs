@@ -1,0 +1,70 @@
+#+TITLE: Build and update Bmacs
+#+DESCRIPTION: Use the one-command Bmacs build, persistent signing, installation, and cleanup workflow.
+
+* Scope and authorization
+
+Use this skill when changing Bmacs and preparing to use the result.
+Read =admin/bmacs/README.md= and =AGENTS.md= in this checkout first.
+
+Source edits do not authorize installing, restarting, committing, or pushing.
+Get explicit installation approval before running an update command.
+Do not run installation through the Emacs instance being replaced. Give Bob the
+Terminal command or use a separately authorized standalone Pi session.
+Do not create a background updater.
+
+* Routine workflow
+
+Use =admin/bmacs/update.py= rather than assembling an app manually.
+Run it from macOS Terminal or standalone Pi:
+
+#+begin_src sh :tangle no
+python3 /Users/bob/source/emacs/admin/bmacs/update.py
+#+end_src
+
+For another checkout, use that checkout's script path. Run =--help= for
+overrides. Do not copy the implementation into a session-specific script.
+
+The default build directory is =CHECKOUT-build= beside the source checkout.
+First use configures it with Apple's compiler, NS, GPU, tree-sitter, native
+compilation, and the Homebrew TIFF search path. Later runs reuse it.
+Bootstrap the source and install prerequisites according to =INSTALL.REPO= and
+the README. Do not repurpose another checkout's configured build directory.
+
+The script uses the existing =Bmacs Local Development= Keychain signing identity,
+or =BMACS_SIGNING_IDENTITY= / =--signing-identity=. Check available public identity
+selectors with =security find-identity -v -p codesigning=. Never generate a
+replacement identity, fall back to ad-hoc signing, alter trust, or reset privacy
+permissions as part of an update.
+
+The default server socket is =bmacs=. Confirm the intended Bmacs socket and use
+=--socket PATH= when it differs. The installer checks the server's process ID
+and refuses to quit with unsaved file buffers.
+
+* Validation and application identity
+
+Run focused tests for the source change before installation. For redisplay
+changes, cover graphical and terminal behavior and verify visible painting in
+an isolated instance. Hidden-frame checks are not visual verification.
+
+The helper builds serially, checks and signs the complete standalone app, then
+installs at =~/Applications/Bmacs.app= and confirms startup with normal user init.
+Keep the app name, path, bundle identifier, icon, and persistent signing identity.
+Do not promise that macOS will never ask for permissions again.
+
+* Cleanup and recovery
+
+Do not retain permanent app backups for routine updates. The script creates no
+rollback ZIP. It keeps the previous app temporarily until startup is confirmed.
+After success it deletes this run's prepared staging directory, logs, and
+manifest; it retains the configured build directory for incremental builds.
+It does not prune other runs' artifacts.
+
+On failure, keep logs and report their location. Build/check failures leave the
+installed app unchanged. Post-replacement startup failures may leave the new app
+installed and retain the previous app in the printed recovery directory.
+Do not claim that such a failure was automatically rolled back.
+Regular Emacs and standalone Pi are the fallback. A previous Git commit can be
+rebuilt; do not commit, merge, or check out revisions without approval.
+
+Report BUILT, STAGED, INSTALLED, and RUNNING distinctly. Successful script
+completion means startup was confirmed and its temporary staging was removed.

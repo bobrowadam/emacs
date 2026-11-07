@@ -224,6 +224,7 @@ def prepare(build, signing_identity="-"):
     (directory / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print(f"STAGED: {directory}\nInstalled app unchanged. Visible rendering remains unchecked.")
     print(f"To install: python3 {HERE / 'manage.py'} install {json.dumps(str(directory))}")
+    return directory
 
 
 def running_pids(app):
@@ -281,7 +282,7 @@ def confirm_running(app, ready):
     return data
 
 
-def install(directory, socket, isolated_launch=False):
+def install(directory, socket, isolated_launch=False, backup=True):
     directory = directory.expanduser().resolve()
     if isolated_launch:
         require(not running_pids(APP),
@@ -298,13 +299,14 @@ def install(directory, socket, isolated_launch=False):
     verify_bundle(staged)
     if APP.exists():
         verify_bundle(APP, required_info=IDENTITY)
-        backups = SUPPORT / "bmacs-backups"
-        backups.mkdir(parents=True, exist_ok=True)
-        backup = backups / f"Bmacs-before-{staging.name.lstrip('.')}.zip"
-        run("/usr/bin/ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", APP, backup)
-        with zipfile.ZipFile(backup) as archive:
-            require(archive.testzip() is None, f"Rollback ZIP failed verification: {backup}")
-        print(f"Rollback: {backup}", flush=True)
+        if backup:
+            backups = SUPPORT / "bmacs-backups"
+            backups.mkdir(parents=True, exist_ok=True)
+            archive_path = backups / f"Bmacs-before-{staging.name.lstrip('.')}.zip"
+            run("/usr/bin/ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", APP, archive_path)
+            with zipfile.ZipFile(archive_path) as archive:
+                require(archive.testzip() is None, f"Rollback ZIP failed verification: {archive_path}")
+            print(f"Rollback: {archive_path}", flush=True)
     private_socket = None
     if isolated_launch:
         private_socket = Path(tempfile.mkdtemp(prefix="bmacs-live-", dir="/tmp")) / "server"

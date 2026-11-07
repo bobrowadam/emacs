@@ -29,6 +29,13 @@
 !.gitlab-ci.yml
 !.mailmap
 
+# Keep the project-owned skill, not private Mentat state.
+!/.mentat/
+/.mentat/*
+!/.mentat/skills/
+/.mentat/skills/*
+!/.mentat/skills/bmacs-update.org
+
 # Built by 'autogen.sh'.
 /aclocal.m4
 /configure

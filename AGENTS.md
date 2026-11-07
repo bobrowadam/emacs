@@ -28,13 +28,23 @@ Do not restart Bob's running Emacs unless explicitly requested. Use an isolated 
 
 Treat [Bmacs.app](/Users/bob/Applications/Bmacs.app) as Bob's stable, usable version. It contains a copy of the built executable and its resources, not a link to a temporary build directory. Routine builds and tests must not replace it. Test new builds in isolation.
 
-Update the installed app only when explicitly requested. Preserve its installation path, app name, bundle identifier, and icon unless Bob requests a change. Verify the replacement before installation and retain a recoverable previous version.
+Update the installed app only when explicitly requested. Preserve its installation path, app name, bundle identifier, and icon unless Bob requests a change. Verify the replacement before installation. Routine updates keep the previous app only until startup is confirmed; do not retain permanent app backups.
 
 Keep the installed app independent of temporary build directories. Rebuilding or cleaning the source tree must not break it.
 
 ## Repeatable build and installation
 
-Before preparing any build, read [the signing guide](admin/bmacs/README.md).
+For routine updates, read [the Bmacs update skill](.mentat/skills/bmacs-update.org)
+and [the build and signing guide](admin/bmacs/README.md). Use
+`python3 admin/bmacs/update.py` from Terminal or standalone Pi when installation
+is explicitly authorized. It configures a separate incremental build directory
+on first use, reuses the existing persistent signing identity, builds and checks
+the app, installs and confirms startup, then removes its prepared staging.
+It creates no rollback ZIP. Keep the configured build directory for reuse.
+Failures retain logs and recovery files; a post-replacement startup failure is
+not an automatic rollback.
+
+Before preparing any build, read the signing guide.
 Agent builds must reuse the existing persistent Keychain code-signing identity
 with `--signing-identity` or `BMACS_SIGNING_IDENTITY`. Inspect available identities
 with `security find-identity -v -p codesigning`; do not generate a replacement
@@ -49,11 +59,11 @@ ad-hoc to certificate signing can require a one-time permission grant after an
 authorized installation; do not promise that existing ad-hoc grants will carry
 over. Never reset privacy permissions as part of a routine build.
 
-Use `admin/bmacs/manage.py` rather than assembling bundles with ad hoc commands. It requires Python 3, GNU Make (`gmake`), macOS signing tools, and an already configured separate build directory. Bootstrap a fresh checkout as described in [INSTALL.REPO](INSTALL.REPO); see [nextstep/INSTALL](nextstep/INSTALL) for NS build requirements.
+The routine script reuses `admin/bmacs/manage.py`; do not assemble bundles with ad hoc commands. The helpers require Python 3, GNU Make (`gmake`), macOS signing tools, and the NS build dependencies. Bootstrap a fresh checkout as described in [INSTALL.REPO](INSTALL.REPO); see [nextstep/INSTALL](nextstep/INSTALL) for NS build requirements. Direct `manage.py prepare` use requires an already configured separate build directory.
 
 Configure once outside the checkout. The current Bmacs configuration uses `CC=/usr/bin/gcc --with-ns --with-gpu --with-tree-sitter --with-native-compilation=yes`, with the default self-contained NS installation. Homebrew's GCC cannot find AppKit, so pass Apple's `/usr/bin/gcc` as `CC`. On this Homebrew setup, also pass `LDFLAGS="$(pkg-config --libs-only-L libtiff-4)"` to retain the TIFF library search path. Keep the build's `ns_appdir` inside that build directory, never pointed at the installed Bmacs.
 
-Then use these two explicit operations:
+For separate preparation and installation, use these two explicit operations:
 
 ```sh
 python3 admin/bmacs/manage.py prepare /path/to/configured-build
@@ -65,7 +75,7 @@ python3 admin/bmacs/manage.py install "/path/printed/by/prepare"
 - **Install** is a separate, explicitly authorized action. It verifies the prepared artifacts, creates a rollback ZIP, refuses to quit with unsaved file buffers, quits Bmacs, swaps whole bundles, and reopens Bmacs in the background. It confirms the new process's startup acknowledgment before reporting success. Use `--socket PATH` if the current Emacs uses a nondefault server socket; if it has no server, quit it manually first.
 - Run installation from standalone Pi or Terminal, not through tools hosted by the Emacs being replaced. The helper rejects installation when the target Emacs is its ancestor. Do not add a background updater or depend on Emacs surviving its own replacement.
 - When native Emacs is in use, `install PREPARED --isolated-launch` requires Bmacs to be stopped and starts it with `-Q` and its own private socket. It does not load user init or Mentat; use the printed socket for Bmacs-only checks, and never assume the default socket belongs to Bmacs.
-- Preserve the helper's logs, manifest, and rollback. The manifest records source revision, dirty state, configure options, checks, and artifact hashes. The portable dump's embedded revision alone is not proof of which build was installed.
+- With the two-step workflow, preserve the helper's logs, manifest, and rollback. The routine update script instead removes its prepared staging after confirmed startup and retains failures for diagnosis. The manifest records source revision, dirty state, configure options, checks, and artifact hashes. The portable dump's embedded revision alone is not proof of which build was installed.
 - Report **BUILT**, **STAGED**, **INSTALLED**, and **RUNNING** distinctly. A prepared app is not an installed app; a successful copy is not a confirmed running process. If startup fails, report the recovery directory instead of claiming completion.
 - Report skipped tests separately from passes. Hidden-frame checks do not cover visible painting or visible mode-line behavior. Run additional checks appropriate to the source change before approving installation.
 

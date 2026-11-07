@@ -19,18 +19,20 @@ import manage
 
 @unittest.skipUnless(os.environ.get("BMACS_PREPARED"), "set BMACS_PREPARED for disposable-app deployment")
 class DisposableInstallationTest(unittest.TestCase):
-    def test_isolated_install_uses_a_private_server(self):
+    def test_isolated_install_without_archive_uses_a_private_server(self):
         prepared = Path(os.environ["BMACS_PREPARED"]).expanduser().resolve()
         with tempfile.TemporaryDirectory(prefix="bmacs-isolated-deploy-", dir="/private/tmp") as temp:
             root = Path(temp)
             app = root / "Bmacs.app"
             source = root / "prepared"
             manage.run("/usr/bin/ditto", prepared, source)
+            manage.run("/usr/bin/ditto", prepared / "Bmacs.app", app)
             private_socket = None
             try:
                 with patch.object(manage, "APP", app), \
                      patch.object(manage, "SUPPORT", root / "support"):
-                    manage.install(source, root / "unused-socket", isolated_launch=True)
+                    manage.install(source, root / "unused-socket", isolated_launch=True, backup=False)
+                self.assertFalse((root / "support/bmacs-backups").exists())
                 data = json.loads((source / "running.json").read_text())
                 private_socket = Path(data["server_socket"])
                 self.assertEqual(int(manage.client(app, private_socket, "(emacs-pid)").stdout),

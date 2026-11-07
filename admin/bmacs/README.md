@@ -1,4 +1,61 @@
-# Preparing and signing Bmacs
+# Building and updating Bmacs
+
+## Routine update
+
+Run this from macOS Terminal or standalone Pi, not from Bmacs or an Emacs shell:
+
+```sh
+python3 /Users/bob/source/emacs/admin/bmacs/update.py
+```
+
+Running this command authorizes installation and a Bmacs restart. Save file
+buffers first; the installer refuses to quit if any have unsaved changes.
+
+The script configures a separate build directory on first use, then reuses it
+for incremental builds. For this checkout, the default is
+`/Users/bob/source/emacs-build`. It builds serially, signs with the existing
+**Bmacs Local Development** Keychain identity, checks the app, installs it at
+`~/Applications/Bmacs.app`, and confirms startup with your normal configuration.
+It uses the `bmacs` server socket by default.
+
+It does not create rollback ZIPs. It keeps the previous app temporarily during
+installation and removes it after startup is confirmed. It then removes only
+this run's prepared staging directory, including its logs and manifest. It
+retains the configured build directory for the next incremental build.
+
+Build and check failures leave the installed app unchanged and retain failure
+logs. A failure after replacement may leave the new app installed; the installer
+prints the recovery directory containing the previous app. There is no automatic
+rollback for a user-init failure. Use regular Emacs or Pi CLI while recovering,
+and rebuild a previous Git commit if needed. Commit source changes, with review
+and approval, if you want to reproduce them later.
+
+The app name, bundle identifier, icon, and installation path stay unchanged.
+Reuse the same signing certificate to minimize renewed permission prompts.
+The script never creates certificates, changes Keychain trust, or resets macOS
+permissions.
+
+Prerequisites are those below and in [AGENTS.md](../../AGENTS.md): bootstrap the
+source checkout once using [INSTALL.REPO](../../INSTALL.REPO), install the build
+dependencies, and have the persistent signing identity available. First-use
+configuration uses Apple's compiler, NS, GPU, tree-sitter, native compilation,
+and the Homebrew TIFF library search path. Configuration failures retain
+`config.log` in the build directory. The script does not install dependencies.
+
+Optional overrides:
+
+```sh
+python3 admin/bmacs/update.py /path/to/separate-build \
+  --signing-identity CERTIFICATE_NAME_OR_SHA1 --socket /path/to/bmacs-socket
+```
+
+`BMACS_SIGNING_IDENTITY` also overrides the default certificate name. Ad-hoc
+signing is rejected. An existing build directory must belong to this checkout;
+the script does not reconfigure a directory belonging to another source tree.
+The built-in checks use isolated instances but do not verify visible rendering.
+Run source-change-specific tests and visual checks before installation.
+
+## Separate preparation and installation
 
 `manage.py prepare` builds in an existing, separately configured build directory
 and stages a verified app. It never replaces the installed Bmacs. Installation
