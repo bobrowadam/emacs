@@ -1648,7 +1648,7 @@ mtl_decoration_sample (MtlDecorationRecord *record, CFTimeInterval now, BOOL ret
            identifier:(unsigned long long)identifier;
 - (void)applyMotion:(CALayer *)layer identifier:(unsigned long long)identifier
           transform:(CGAffineTransform)path_transform;
-- (CALayer *)decorationContent:(NSNumber *)key class:(Class)class;
+- (CALayer *)decorationContent:(NSNumber *)key shape:(MtlDecorationShape)shape;
 - (void)presentDrawable:(id<CAMetalDrawable>)drawable afterCommitting:(id<MTLCommandBuffer>)cmd;
 - (void)drawDecorationsOnEncoder:(id<MTLRenderCommandEncoder>)encoder
                        texture:(id<MTLTexture>)texture;
@@ -1716,7 +1716,20 @@ mtl_decoration_sample (MtlDecorationRecord *record, CFTimeInterval now, BOOL ret
   NSValue *stored = [self.decorationRecords objectForKey:@(identifier)];
   if (!stored) return NO;
   [stored getValue:record];
-  mtl_decoration_sample (record, CACurrentMediaTime (), NO);
+  BOOL geometry = record->geometry.active, opacity = record->opacity.active;
+  BOOL rotation = record->rotation.active;
+  mtl_decoration_sample (record, CACurrentMediaTime (), self.decorationLayer != nil);
+  if (self.decorationLayer
+      && (geometry != record->geometry.active || opacity != record->opacity.active
+          || rotation != record->rotation.active))
+    {
+      /* Retain terminal model values before removing completed CA animations.
+         This also handles a state query or update after a hidden interval. */
+      [self.decorationRecords setObject:[NSValue valueWithBytes:record
+                                                       objCType:@encode(MtlDecorationRecord)]
+                                forKey:@(identifier)];
+      [self syncDecorationLayer:identifier];
+    }
   return YES;
 }
 
@@ -1780,9 +1793,24 @@ mtl_decoration_sample (MtlDecorationRecord *record, CFTimeInterval now, BOOL ret
 - (BOOL)decorationsNeedPump
 {
   struct frame *f = self.emacsFrame;
-  if (self.decorationLayer) return NO;   /* Core Animation runs their tracks */
   if (!f || !FRAME_LIVE_P (f) || !FRAME_VISIBLE_P (f) || !self.decorationRecords.count)
     return NO;
+  if (self.decorationLayer)
+    {
+      /* CA draws the motion, but the shared pump must retire finite native
+         tracks even without a redisplay or state query, then present the
+         retired layers.  Repeats need no pump.  */
+      BOOL pending = NO;
+      for (NSNumber *key in [self.decorationRecords allKeys])
+        {
+          MtlDecorationRecord record;
+          [self getDecoration:key.unsignedLongLongValue record:&record];
+          pending |= (record.geometry.active && !record.geometry.repeat)
+            || (record.opacity.active && !record.opacity.repeat)
+            || (record.rotation.active && !record.rotation.repeat);
+        }
+      return pending || self.dirtyDecorationLayers.count > 0;
+    }
   NSSize size = self.metalLayer.frame.size;
   NSRect bounds = NSMakeRect (0, 0, size.width, size.height);
   for (NSNumber *key in self.decorationRecords)
@@ -2857,6 +2885,45 @@ mtl_decoration_animate_layer (CALayer *layer, NSString *key, MtlDecorationTrack 
   [layer addAnimation:animation forKey:key];
 }
 
+/* Animate TRACK's rect on raster content LAYER as its local size and its
+   center relative to ORIGIN.  A text mask and its band follow the height;
+   the band keeps its cell-based width.  */
+static void
+mtl_decoration_animate_rect (CALayer *layer, MtlDecorationTrack *track, NSPoint origin)
+{
+  CGRect from = CGRectStandardize (CGRectMake (track->from[0], track->from[1],
+                                               track->from[2], track->from[3]));
+  CGRect to = CGRectStandardize (CGRectMake (track->to[0], track->to[1],
+                                             track->to[2], track->to[3]));
+  mtl_decoration_animate_layer (layer, @"bounds", track,
+    [NSValue valueWithRect:NSMakeRect (0, 0, from.size.width, from.size.height)],
+    [NSValue valueWithRect:NSMakeRect (0, 0, to.size.width, to.size.height)]);
+  mtl_decoration_animate_layer (layer, @"position", track,
+    [NSValue valueWithPoint:NSMakePoint (CGRectGetMidX (from) - origin.x,
+                                         CGRectGetMidY (from) - origin.y)],
+    [NSValue valueWithPoint:NSMakePoint (CGRectGetMidX (to) - origin.x,
+                                         CGRectGetMidY (to) - origin.y)]);
+  CALayer *mask = layer.mask;
+  if (mask)
+    {
+      /* syncTextLayer extends the mask above the holder by the descent.  */
+      CGFloat descent = -mask.frame.origin.y;
+      mtl_decoration_animate_layer (mask, @"bounds", track,
+        [NSValue valueWithRect:NSMakeRect (0, 0, from.size.width, from.size.height + descent)],
+        [NSValue valueWithRect:NSMakeRect (0, 0, to.size.width, to.size.height + descent)]);
+      mtl_decoration_animate_layer (mask, @"position", track,
+        [NSValue valueWithPoint:NSMakePoint (from.size.width / 2,
+                                             (from.size.height - descent) / 2)],
+        [NSValue valueWithPoint:NSMakePoint (to.size.width / 2,
+                                             (to.size.height - descent) / 2)]);
+      CALayer *band = layer.sublayers.firstObject;
+      mtl_decoration_animate_layer (band, @"bounds.size.height", track,
+                                    @(from.size.height), @(to.size.height));
+      mtl_decoration_animate_layer (band, @"position.y", track,
+                                    @(from.size.height / 2), @(to.size.height / 2));
+    }
+}
+
 /* Add keyframe SPEC to LAYER unless it already runs.  Path values map from
    SVG space through TRANSFORM.  The spec's start time keeps a layer rebuilt
    later in phase.  */
@@ -2940,23 +3007,29 @@ mtl_decoration_keyframes_apply (CALayer *layer, NSDictionary *spec, CGAffineTran
     mtl_decoration_keyframes_apply (layer, keyframes[key], path_transform);
 }
 
-/* Return the content layer of decoration KEY's clip, recreating both when
-   the content must be of class CLASS.  */
-- (CALayer *)decorationContent:(NSNumber *)key class:(Class)class
+/* Return KEY's content layer, replacing it on semantic shape changes.
+   Keep the clip in place so equal-z decorations retain creation order.  */
+- (CALayer *)decorationContent:(NSNumber *)key shape:(MtlDecorationShape)shape
 {
   CALayer *clip = [self.decorationLayers objectForKey:key];
   CALayer *content = clip.sublayers.firstObject;
-  if (clip && [content class] == class)
+  if ([[content valueForKey:@"mtlShape"] isEqual:@(shape)])
     return content;
-  [clip removeFromSuperlayer];
-  clip = [CALayer layer];
-  clip.masksToBounds = YES;
+  if (!clip)
+    {
+      clip = [CALayer layer];
+      clip.masksToBounds = YES;
+      [self.decorationLayer addSublayer:clip];
+      if (!self.decorationLayers)
+        self.decorationLayers = [NSMutableDictionary dictionary];
+      [self.decorationLayers setObject:clip forKey:key];
+    }
+  [content removeFromSuperlayer];
+  Class class = shape == MTL_DECORATION_TEXT || shape == MTL_DECORATION_IMAGE
+    ? [CALayer class] : [CAShapeLayer class];
   content = [class layer];
+  [content setValue:@(shape) forKey:@"mtlShape"];
   [clip addSublayer:content];
-  [self.decorationLayer addSublayer:clip];
-  if (!self.decorationLayers)
-    self.decorationLayers = [NSMutableDictionary dictionary];
-  [self.decorationLayers setObject:clip forKey:key];
   return content;
 }
 
@@ -2969,7 +3042,6 @@ mtl_decoration_keyframes_apply (CALayer *layer, NSDictionary *spec, CGAffineTran
 {
   NSDictionary *text = [self.decorationTexts objectForKey:@(identifier)];
   MtlDecoration v = record->value;
-  CALayer *clip = holder.superlayer;
   if (![holder.mask isKindOfClass:[CATextLayer class]])
     {
       holder.masksToBounds = YES;
@@ -2981,15 +3053,7 @@ mtl_decoration_keyframes_apply (CALayer *layer, NSDictionary *spec, CGAffineTran
     }
   CAGradientLayer *band = (CAGradientLayer *) holder.sublayers.firstObject;
   CGFloat scale = self.metalLayer.contentsScale;
-  clip.contentsScale = scale;
-  holder.contentsScale = scale;
   band.contentsScale = scale;
-  clip.zPosition = (CGFloat) v.z;
-  clip.frame = NSRectToCGRect (v.clip);
-  holder.frame = CGRectMake (v.rect.origin.x - v.clip.origin.x,
-                             v.rect.origin.y - v.clip.origin.y,
-                             v.rect.size.width, v.rect.size.height);
-  holder.opacity = v.opacity;
 
   NSString *string = text[@"text"] ?: @"";
   CGFloat size = [text[@"size"] doubleValue];
@@ -3118,28 +3182,37 @@ mtl_decoration_keyframes_apply (CALayer *layer, NSDictionary *spec, CGAffineTran
   CGFloat scale = self.metalLayer.contentsScale;
   CGRect r = CGRectStandardize (NSRectToCGRect (v.rect));
 
-  if (v.shape == MTL_DECORATION_TEXT)
+  CALayer *content = [self decorationContent:key shape:v.shape];
+  if (v.shape == MTL_DECORATION_TEXT || v.shape == MTL_DECORATION_IMAGE)
     {
-      CALayer *holder = [self decorationContent:key class:[CALayer class]];
-      [self syncTextLayer:holder record:&record identifier:identifier];
-      [self applyMotion:holder identifier:identifier transform:path_transform];
-      [CATransaction commit];
-      return;
-    }
-
-  CALayer *content;
-  if (v.shape == MTL_DECORATION_IMAGE)
-    {
-      content = [self decorationContent:key class:[CALayer class]];
-      content.contents = extras[@"image"];
-      content.contentsGravity = kCAGravityResize;
-      content.frame = CGRectOffset (r, -v.clip.origin.x, -v.clip.origin.y);
+      /* Rest at a finite track's terminal rect, as shapes rest at its path.
+         Core Animation interpolates bounds and position separately.  */
+      MtlDecoration resting = v;
+      if (record.geometry.active)
+        {
+          float *rect = record.geometry.repeat ? record.geometry.from : record.geometry.to;
+          resting.rect = NSMakeRect (rect[0], rect[1], rect[2], rect[3]);
+        }
+      CGRect rest = CGRectStandardize (NSRectToCGRect (resting.rect));
+      content.bounds = CGRectMake (0, 0, rest.size.width, rest.size.height);
+      content.position = CGPointMake (CGRectGetMidX (rest) - v.clip.origin.x,
+                                      CGRectGetMidY (rest) - v.clip.origin.y);
+      if (v.shape == MTL_DECORATION_TEXT)
+        {
+          MtlDecorationRecord text = record;
+          text.value = resting;
+          [self syncTextLayer:content record:&text identifier:identifier];
+        }
+      else
+        {
+          content.contents = extras[@"image"];
+          content.contentsGravity = kCAGravityResize;
+        }
+      mtl_decoration_animate_rect (content, &record.geometry, v.clip.origin);
     }
   else
     {
-      CAShapeLayer *shape = (CAShapeLayer *) [self decorationContent:key
-                                                               class:[CAShapeLayer class]];
-      content = shape;
+      CAShapeLayer *shape = (CAShapeLayer *) content;
       /* The shape spans frame coordinates, anchored at the decoration's
          center so rotation and scale turn about it.  */
       CGSize size = CGSizeMake (MAX (1, self.decorationLayer.bounds.size.width + v.clip.origin.x),
@@ -3203,6 +3276,8 @@ mtl_decoration_keyframes_apply (CALayer *layer, NSDictionary *spec, CGAffineTran
                                         @(track.repeat ? 0 : from - to),
                                         @(track.repeat ? to - from : 0));
         }
+      else
+        [shape removeAnimationForKey:@"transform.rotation.z"];
     }
   CALayer *clip = content.superlayer;
   clip.contentsScale = scale;

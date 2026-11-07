@@ -307,7 +307,8 @@
   (skip-unless (and (eq window-system 'ns) (gpu-backend-p)
                     (fboundp 'gpu--decoration-create)))
   (require 'gpu)
-  (let ((frame (make-frame '((visibility . nil) (width . 40) (height . 12)))) a b)
+  (let ((frame (make-frame '((visibility . nil) (width . 40) (height . 12))))
+        (ca-decorations (not (equal (getenv "BMACS_CA_DECORATIONS") "0"))) a b)
     (unwind-protect
         (progn
           (gpu-enable-for-frame frame)
@@ -319,8 +320,10 @@
           (should (gpu-decoration-update a '(:rect (20 20 40 40))))
           (let ((state (gpu--decoration-state (gpu--decoration-id a) frame)))
             (should (= (nth 1 state) 0))
-            ;; A hidden frame has not encoded the terminal value yet.
-            (should (nth 3 state)))
+            ;; CA retires on query; Metal waits to encode the terminal value.
+            (if ca-decorations
+                (should-not (nth 3 state))
+              (should (nth 3 state))))
           (should (gpu-decoration-animate b :rect '(150 120 20 -30) 0.02 'ease-in-out t))
           (should (nth 2 (gpu--decoration-state (gpu--decoration-id b) frame)))
           (should (gpu-decoration-animate a :rect '(40 50 60 60) 0.02 'linear))
@@ -328,7 +331,11 @@
           (should (equal (car (gpu--decoration-state (gpu--decoration-id a) frame))
                          '(40.0 50.0 60.0 60.0)))
           (should (gpu-decoration-update a '(:stroke 0)))
-          (should (nth 2 (gpu--decoration-state (gpu--decoration-id a) frame)))
+          (let ((state (gpu--decoration-state (gpu--decoration-id a) frame)))
+            (should (equal (car state) '(40.0 50.0 60.0 60.0)))
+            (if ca-decorations
+                (should-not (nth 2 state))
+              (should (nth 2 state))))
           (should (gpu-decoration-update a '(:rect (30 30 40 40))))
           (should-not (nth 2 (gpu--decoration-state (gpu--decoration-id a) frame)))
           (should-error (gpu-decoration-update a '(:opacity 2)))

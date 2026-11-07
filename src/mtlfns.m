@@ -1566,7 +1566,9 @@ snapshot.  Hidden objects use elapsed time when next presented.  */)
 
 DEFUN ("gpu--decoration-state", Fmtl_decoration_state, Smtl_decoration_state, 1, 2, 0,
        doc: /* Return sampled native geometry, opacity and animation flags for ID.
-Return nil for a missing decoration.  Does not retire animation tracks.  */)
+Return nil for a missing decoration.
+On Core Animation frames, retire completed tracks.  On Metal-only frames,
+completed tracks remain active until their terminal values are rendered.  */)
   (Lisp_Object id, Lisp_Object frame)
 {
   mtl_decoration_id (id);
